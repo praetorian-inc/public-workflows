@@ -1,2 +1,4 @@
-# public-workflows
-Repos to host shared workflows that could be called from other public repos of Praetorian
+# What is in this repo?
+This repo hosts the GitHub workflows that are callable from Praetorian's internal and public repositories.
+
+# **IMPORTANT:** Do not put propertiary information in the workflows.
