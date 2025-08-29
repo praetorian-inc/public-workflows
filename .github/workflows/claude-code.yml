@@ -1,0 +1,109 @@
+name: Claude PR Assistant (Callable)
+# This workflow is intended to also be callable from other repos to run Claude code.
+# Make sure the access for other repos is enabled in the configuration of this repo, via:
+# Settings -> Actions -> General -> Access -> Accessible from repositories in the 'praetorian-inc' organization
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  pull_request_review_comment:
+    types: [created]
+
+  workflow_call:
+    inputs:
+      prompt:
+        description: "Custom prompt for Claude to execute"
+        required: false
+        type: string
+        default: |
+          Review this PR and determine:
+
+          1. Does it contain Go (\*.go) or TypeScript (\*.ts) changes?
+          2. Does it contain significant code changes?
+          3. Does it include corresponding automated tests?
+
+          For backend changes, (Go files), look for changes in \*\_test.go files in this PR.
+          For frontend changes (JS/TS files), look for changes in \*.spec.ts files in this PR.
+
+          Output format:
+          Has Go or TypeScript Changes: Yes/No
+          Has Significant Changes: Yes/No
+          Has Automated Tests: Yes/No
+
+          IMPORTANT: Do not read previous PR comments to help with the review.
+
+          Tools to use:
+
+          - Use the local `gh` command to access PR's
+          - Use the local `gh` command to retrieve the diffs and write PR comments.
+
+          Write your output to a PR comment. Format it as follows
+
+          - **Format**: Use **ONLY** "Findings" and "Recommendations" sections
+          - **Length**: Maximum 10 bullet points total across both sections
+          - **Focus**: Critical issues and actionable improvements only
+          - **Style**: Direct bullet points, no explanatory paragraphs
+          - IMPORTANT: Remove any "Todo", "Todo List", "Security Assessment", or "Quality Assessment" sections
+
+      require_tests:
+        description: "Whether to enforce test requirements"
+        required: false
+        type: boolean
+        default: true
+
+    secrets:
+      ANTHROPIC_API_KEY:
+        description: "Anthropic API key for Claude"
+        required: true
+
+jobs:
+  claude-code-action:
+    # Guard on what interaction we will run Claude, because we don't know whether the caller workflow
+    # filters correctly on the trigger.
+    if: |
+      ((github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize'))) &&
+      !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude PR Action
+        id: claude-review
+        uses: anthropics/claude-code-action@beta
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          direct_prompt: ${{ inputs.prompt }}
+
+      - name: Check Test Requirements
+        if: ${{ inputs.require_tests }}
+        run: |
+          echo "Has Go or TypeScript Changes: `grep -cE "\*\*Has Go or TypeScript Changes(\*\*)?:(\*\*)? Yes" ${{ steps.claude-review.outputs.execution_file }}`."
+          echo "No Go or TypeScript Changes: `grep -cE "\*\*Has Go or TypeScript Changes(\*\*)?:(\*\*)? No" ${{ steps.claude-review.outputs.execution_file }}`."
+          echo "Has Significant Changes: `grep -cE "\*\*Has Significant Changes(\*\*)?:(\*\*)? Yes" ${{ steps.claude-review.outputs.execution_file }}`."
+          echo "No Significant Changes: `grep -cE "\*\*Has Significant Changes(\*\*)?:(\*\*)? No" ${{ steps.claude-review.outputs.execution_file }}`."
+          echo "Has Automated Tests: `grep -cE "\*\*Has Automated Tests(\*\*)?:(\*\*)? Yes" ${{ steps.claude-review.outputs.execution_file }}`."
+          echo "No/Partial Automated Tests: `grep -cE "\*\*Has Automated Tests(\*\*)?:(\*\*)? (Partial|No)" ${{ steps.claude-review.outputs.execution_file }}`."
+
+          # The decision logic below uses inequality because the Claude output could contain multiple occurrences of these strings as it
+          # reads through previous PR comments.
+
+          # If it has product code changes.
+          if (( "`grep -cE "\*\*Has Go or TypeScript Changes(\*\*)?:(\*\*)? Yes" ${{ steps.claude-review.outputs.execution_file }}`" >= "1" )); then
+            # If it has at least one line of "Has Significant Changes: Yes" and no line of "Has Automated Tests: Yes", then fail.
+            if (( "`grep -cE "\*\*Has Significant Changes(\*\*)?:(\*\*)? Yes" ${{ steps.claude-review.outputs.execution_file }}`" >= "1" )) && ! (( "`grep -cE "\*\*Has Automated Tests(\*\*)?:(\*\*)? Yes" ${{ steps.claude-review.outputs.execution_file }}`" >= "1" )); then
+              echo "❌ Significant changes detected without unit tests"
+              exit 1
+            fi
+          fi
+          echo "✅ Test requirements satisfied"
