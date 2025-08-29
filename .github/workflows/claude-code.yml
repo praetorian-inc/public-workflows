@@ -4,11 +4,6 @@ name: Claude PR Assistant (Callable)
 # Settings -> Actions -> General -> Access -> Accessible from repositories in the 'praetorian-inc' organization
 
 on:
-  pull_request:
-    types: [opened, synchronize]
-  pull_request_review_comment:
-    types: [created]
-
   workflow_call:
     inputs:
       prompt:
