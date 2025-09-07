@@ -13,15 +13,16 @@ on:
         default: |
           Review this PR and determine:
 
-          1. Does it contain Go (\*.go) or TypeScript (\*.ts) changes?
+          1. Does it contain Go (\*.go) or TypeScript (\*.ts) or Python (\*.py) changes?
           2. Does it contain significant code changes?
           3. Does it include corresponding automated tests?
 
           For backend changes, (Go files), look for changes in \*\_test.go files in this PR.
           For frontend changes (JS/TS files), look for changes in \*.spec.ts files in this PR.
+          For CLI changes (Python files), look for changes in test_\*.py files in this PR.
 
           Output format:
-          Has Go or TypeScript Changes: Yes/No
+          Has Go, TypeScript, or Python Changes: Yes/No
           Has Significant Changes: Yes/No
           Has Automated Tests: Yes/No
 
