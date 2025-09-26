@@ -57,7 +57,6 @@ jobs:
     # Guard on what interaction we will run Claude, because we don't know whether the caller workflow
     # filters correctly on the trigger.
     if: |
-      github.event.pull_request.draft == false &&
       ((github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize'))) &&
       !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]')
