@@ -1,0 +1,50 @@
+name: Unit Tests (Callable)
+
+on:
+  workflow_call:
+    secrets:
+      PLUGIN_CI_APP_ID:
+        description: "GitHub App ID for private dependency access (contents:read)"
+        required: true
+      PLUGIN_CI_PRIVATE_KEY:
+        description: "GitHub App private key for private dependency access"
+        required: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Generate token for private dependencies
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PLUGIN_CI_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+          owner: praetorian-inc
+          repositories: claude-tool-sdk
+
+      - name: Configure git for private dependencies
+        run: |
+          git config --global url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/".insteadOf "git@github.com:"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Run tests
+        run: npm test

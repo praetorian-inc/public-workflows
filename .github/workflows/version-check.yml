@@ -1,0 +1,25 @@
+name: Version Check (Callable)
+
+on:
+  workflow_call: {}
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version was bumped
+        run: |
+          BASE_VERSION=$(git show origin/main:.claude-plugin/plugin.json | jq -r '.version')
+          PR_VERSION=$(jq -r '.version' .claude-plugin/plugin.json)
+
+          if [ "$BASE_VERSION" = "$PR_VERSION" ]; then
+            echo "::error::plugin.json version not bumped (still $PR_VERSION)."
+            echo "::error::The auto-bump may have failed. Add the 'bump' label to retry."
+            exit 1
+          fi
+
+          echo "Version bumped: $BASE_VERSION -> $PR_VERSION"
