@@ -49,7 +49,6 @@ jobs:
 | `enable-lint` | `true` | Run golangci-lint |
 | `golangci-lint-version` | `v2.11.4` | Pinned golangci-lint binary version (never `latest`) |
 | `golangci-lint-timeout` | `5m` | Lint timeout |
-| `golangci-lint-only-new-issues` | `false` | Report only issues on lines modified in the PR (useful when migrating a repo with accumulated lint debt) |
 | `enable-test` | `true` | Run `go test` |
 | `test-flags` | `-race -coverprofile=coverage.out -covermode=atomic` | Flags for `go test` |
 | `test-packages` | `./...` | Package selector for `go test` |

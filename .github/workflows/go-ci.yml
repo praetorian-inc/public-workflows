@@ -50,12 +50,6 @@ on:
         type: string
         default: "5m"
 
-      golangci-lint-only-new-issues:
-        description: "Report only issues introduced on lines modified in the PR, skipping pre-existing debt. Useful for repos adopting the workflow with accumulated lint backlog; set false once backlog is cleared."
-        required: false
-        type: boolean
-        default: false
-
       enable-test:
         description: "Whether to run go test."
         required: false
@@ -168,7 +162,6 @@ jobs:
           version: ${{ inputs.golangci-lint-version }}
           args: --timeout=${{ inputs.golangci-lint-timeout }}
           working-directory: ${{ inputs.working-directory }}
-          only-new-issues: ${{ inputs.golangci-lint-only-new-issues }}
 
   test:
     name: Test
