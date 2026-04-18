@@ -1,0 +1,185 @@
+name: Go Security (Callable)
+# Reusable workflow for Go repositories in the praetorian-inc org.
+# Runs gosec (SAST) and govulncheck (Go vulnerability database) against the
+# caller's module and optionally uploads SARIF to the GitHub Security tab.
+#
+# Access: invocable from any repo in the praetorian-inc org
+# (Settings -> Actions -> General -> Access -> Accessible from repositories in
+# the 'praetorian-inc' organization).
+#
+# Caller example (recommended placement: .github/workflows/security.yml):
+#
+#   name: Security
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#     schedule:
+#       - cron: '0 6 * * 1'  # Mondays 06:00 UTC
+#     workflow_dispatch: {}
+#
+#   permissions:
+#     contents: read
+#
+#   jobs:
+#     security:
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v1.0.0
+#       permissions:
+#         contents: read
+#         security-events: write  # required when upload-sarif: true (default)
+#       secrets: inherit
+#
+# Design rationale: gosec+govulncheck live in their own reusable workflow
+# (separate from go-ci.yml) because
+#   (1) they need `security-events: write` which go-ci.yml callers don't grant,
+#   (2) they typically run on a different cadence (weekly + on-push vs per-PR),
+#   (3) a broken security tool (e.g. gosec@latest requiring a newer Go) should
+#       not block builds. This matches the pattern used by kubernetes/release,
+#       ossf/scorecard, cli/cli, and prometheus/prometheus.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Working directory for the Go module (useful for multi-module repos)."
+        required: false
+        type: string
+        default: "."
+
+      go-version-file:
+        description: "Path to go.mod (relative to working-directory) used as Go version source of truth for govulncheck."
+        required: false
+        type: string
+        default: "go.mod"
+
+      enable-gosec:
+        description: "Whether to run gosec SAST scanner."
+        required: false
+        type: boolean
+        default: true
+
+      gosec-args:
+        description: "Arguments passed to gosec. Defaults to observe-only (never fails the job) with SARIF output. Override to enforce: e.g. '-severity=high -fmt sarif -out gosec-results.sarif ./...'."
+        required: false
+        type: string
+        default: "-no-fail -fmt sarif -out gosec-results.sarif ./..."
+
+      enable-govulncheck:
+        description: "Whether to run govulncheck against the module."
+        required: false
+        type: boolean
+        default: true
+
+      govulncheck-package:
+        description: "Go package selector passed to govulncheck."
+        required: false
+        type: string
+        default: "./..."
+
+      upload-sarif:
+        description: "Whether to upload SARIF findings to the GitHub Security tab. When true, the caller MUST grant 'security-events: write'."
+        required: false
+        type: boolean
+        default: true
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  gosec:
+    name: Gosec
+    if: ${{ inputs.enable-gosec }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run gosec
+        uses: securego/gosec@b72378a2da300339c40788e1eddf1ddea6498558  # v2.22.11
+        with:
+          args: ${{ inputs.gosec-args }}
+
+      - name: Upload gosec SARIF
+        if: ${{ inputs.upload-sarif && always() }}
+        uses: github/codeql-action/upload-sarif@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
+        with:
+          # gosec runs in a Docker container that writes output to /github/workspace,
+          # which maps to the runner's workspace root regardless of `working-directory`.
+          sarif_file: gosec-results.sarif
+          category: gosec
+
+  govulncheck:
+    name: Govulncheck
+    if: ${{ inputs.enable-govulncheck }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run govulncheck (SARIF)
+        if: ${{ inputs.upload-sarif }}
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee  # v1.0.4
+        with:
+          work-dir: ${{ inputs.working-directory }}
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          go-package: ${{ inputs.govulncheck-package }}
+          output-format: sarif
+          output-file: govulncheck-results.sarif
+          repo-checkout: false
+
+      - name: Run govulncheck (text)
+        if: ${{ !inputs.upload-sarif }}
+        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee  # v1.0.4
+        with:
+          work-dir: ${{ inputs.working-directory }}
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          go-package: ${{ inputs.govulncheck-package }}
+          repo-checkout: false
+
+      - name: Upload govulncheck SARIF
+        if: ${{ inputs.upload-sarif && always() }}
+        uses: github/codeql-action/upload-sarif@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
+        with:
+          sarif_file: govulncheck-results.sarif
+          category: govulncheck
