@@ -16,7 +16,12 @@ This setting bypasses the org-level "Selected actions" allowlist for same-org re
 
 ### `go-ci.yml` — Go CI (lint + test + build)
 
-One-stop reusable workflow for Go repositories. Provides lint (golangci-lint), test (go test with race + coverage), and cross-platform build matrix, with StepSecurity Harden-Runner enabled by default.
+One-stop reusable workflow for Go repositories. Provides:
+- **Module integrity** (`go mod verify` + `go mod tidy -diff` drift check)
+- **Lint** (golangci-lint)
+- **Test** (`go test -race` with coverage)
+- **Cross-platform build matrix** (GOOS × GOARCH)
+- **StepSecurity Harden-Runner** runtime CI EDR (enabled by default, audit mode)
 
 **Minimal caller** (drop this in `.github/workflows/ci.yml` of a consumer repo):
 
