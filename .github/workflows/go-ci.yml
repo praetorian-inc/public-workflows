@@ -1,0 +1,254 @@
+name: Go CI (Callable)
+# Reusable workflow for Go repositories in the praetorian-inc org.
+# Consumers call this workflow to get consistent lint + test + build + runtime hardening
+# without duplicating inline CI jobs per repo.
+#
+# Access: this workflow is invocable from any repo in the praetorian-inc org
+# (Settings -> Actions -> General -> Access -> Accessible from repositories in
+# the 'praetorian-inc' organization).
+#
+# Caller example:
+#   jobs:
+#     ci:
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-ci.yml@<SHA>  # v1.0.0
+#       permissions:
+#         contents: read
+#       with:
+#         golangci-lint-version: v2.11.4
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Working directory for the Go module (useful for multi-module repos)."
+        required: false
+        type: string
+        default: "."
+
+      go-version-file:
+        description: "Path to go.mod (relative to working-directory) used as Go version source of truth."
+        required: false
+        type: string
+        default: "go.mod"
+
+      enable-lint:
+        description: "Whether to run golangci-lint. Set false for repos without a golangci config."
+        required: false
+        type: boolean
+        default: true
+
+      golangci-lint-version:
+        description: "Pinned golangci-lint binary version. Use a specific version; never 'latest'."
+        required: false
+        type: string
+        default: "v2.11.4"
+
+      golangci-lint-timeout:
+        description: "Timeout for golangci-lint run."
+        required: false
+        type: string
+        default: "5m"
+
+      enable-test:
+        description: "Whether to run go test."
+        required: false
+        type: boolean
+        default: true
+
+      test-flags:
+        description: "Flags passed to 'go test'. Defaults include race detector and coverage."
+        required: false
+        type: string
+        default: "-race -coverprofile=coverage.out -covermode=atomic"
+
+      test-packages:
+        description: "Package selector passed to 'go test'."
+        required: false
+        type: string
+        default: "./..."
+
+      enable-build:
+        description: "Whether to run the cross-platform build matrix."
+        required: false
+        type: boolean
+        default: true
+
+      build-matrix-os:
+        description: "JSON array of GOOS values for the build matrix."
+        required: false
+        type: string
+        default: '["linux","darwin","windows"]'
+
+      build-matrix-arch:
+        description: "JSON array of GOARCH values for the build matrix."
+        required: false
+        type: string
+        default: '["amd64","arm64"]'
+
+      build-cmd-path:
+        description: "Go package path to build (e.g. ./cmd/augustus). Required if enable-build is true."
+        required: false
+        type: string
+        default: ""
+
+      build-binary-name:
+        description: "Base name for the built binary. Defaults to the caller repo name."
+        required: false
+        type: string
+        default: ""
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        required: false
+        type: string
+        default: ""
+
+      upload-coverage:
+        description: "Whether to upload coverage.out to Codecov. Requires CODECOV_TOKEN secret."
+        required: false
+        type: boolean
+        default: false
+
+    secrets:
+      CODECOV_TOKEN:
+        description: "Codecov project token. Only required when upload-coverage is true."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    if: ${{ inputs.enable-lint }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20  # v9.2.0
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          args: --timeout=${{ inputs.golangci-lint-timeout }}
+          working-directory: ${{ inputs.working-directory }}
+
+  test:
+    name: Test
+    if: ${{ inputs.enable-test }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Download dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod download
+
+      - name: Run tests
+        working-directory: ${{ inputs.working-directory }}
+        run: go test ${{ inputs.test-flags }} ${{ inputs.test-packages }}
+
+      - name: Upload coverage
+        if: ${{ inputs.upload-coverage && inputs.enable-test }}
+        uses: codecov/codecov-action@125fc84a9a348dbcf27191600683ec096ec9021c  # v5.5.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ inputs.working-directory }}/coverage.out
+
+  build:
+    name: Build
+    if: ${{ inputs.enable-build && inputs.build-cmd-path != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: ${{ fromJSON(inputs.build-matrix-os) }}
+        goarch: ${{ fromJSON(inputs.build-matrix-arch) }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Determine binary name
+        id: binary
+        run: |
+          if [ -n "${{ inputs.build-binary-name }}" ]; then
+            echo "name=${{ inputs.build-binary-name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -ldflags="-s -w" \
+            -o "${{ steps.binary.outputs.name }}-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            ${{ inputs.build-cmd-path }}

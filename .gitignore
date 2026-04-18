@@ -1,0 +1,4 @@
+# Built binaries from self-test / local runs
+_test-fixtures/**/minimal
+_test-fixtures/**/*-*
+coverage.out
