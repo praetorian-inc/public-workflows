@@ -1,0 +1,53 @@
+name: Test go-ci.yml (self-test)
+# Self-test harness for the go-ci.yml reusable workflow.
+# On every PR that touches go-ci.yml or the test fixture, this workflow invokes
+# go-ci.yml locally against _test-fixtures/go-minimal and confirms lint+test+build pass.
+# This catches regressions before consumers pull a new SHA.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/go-ci.yml'
+      - '.github/workflows/test-go-ci.yml'
+      - '_test-fixtures/go-minimal/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  call-go-ci-defaults:
+    name: Call go-ci (defaults)
+    # Local reference — uses the workflow from THIS commit (caller and callee in same repo).
+    uses: ./.github/workflows/go-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: _test-fixtures/go-minimal
+      build-cmd-path: ./cmd/minimal
+      build-binary-name: minimal
+      # Reduced matrix for the self-test to keep CI fast; production default is fuller.
+      build-matrix-os: '["linux"]'
+      build-matrix-arch: '["amd64"]'
+
+  call-go-ci-lint-disabled:
+    name: Call go-ci (lint disabled)
+    uses: ./.github/workflows/go-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: _test-fixtures/go-minimal
+      enable-lint: false
+      build-cmd-path: ./cmd/minimal
+      build-binary-name: minimal
+      build-matrix-os: '["linux"]'
+      build-matrix-arch: '["amd64"]'
+
+  call-go-ci-no-build:
+    name: Call go-ci (build disabled)
+    uses: ./.github/workflows/go-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: _test-fixtures/go-minimal
+      enable-build: false
