@@ -57,6 +57,7 @@ jobs:
 | `build-matrix-arch` | `["amd64","arm64"]` | GOARCH matrix (JSON) |
 | `build-cmd-path` | `""` | Go package path to build (e.g. `./cmd/augustus`). Build job skipped if empty. |
 | `build-binary-name` | repo name | Base name for the built binary |
+| `build-cgo-enabled` | `"0"` | `CGO_ENABLED` env for Build job. Set `"1"` for C-binding packages; narrow matrix accordingly. |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as first step of every job |
 | `harden-runner-policy` | `audit` | `audit` (observe) or `block` (deny-by-default egress) |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated allowlist for block mode |

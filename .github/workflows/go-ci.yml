@@ -98,6 +98,12 @@ on:
         type: string
         default: ""
 
+      build-cgo-enabled:
+        description: "CGO_ENABLED env value for the Build job. Default '0' produces static binaries and works with cross-compilation. Set '1' for packages with C bindings (e.g., go-tree-sitter, go-sqlite3). When '1', narrow build-matrix-os/arch to platforms with a C toolchain available on the runner (typically just linux/amd64) to avoid cross-compile failures."
+        required: false
+        type: string
+        default: "0"
+
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
         required: false
@@ -247,7 +253,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          CGO_ENABLED: ${{ inputs.build-cgo-enabled }}
         run: |
           go build -trimpath -ldflags="-s -w" \
             -o "${{ steps.binary.outputs.name }}-${{ matrix.goos }}-${{ matrix.goarch }}" \
