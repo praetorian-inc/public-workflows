@@ -137,6 +137,41 @@ permissions:
   contents: read
 
 jobs:
+  modcheck:
+    name: Module integrity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: go mod verify
+        working-directory: ${{ inputs.working-directory }}
+        run: go mod verify
+
+      - name: go mod tidy drift check
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          go mod tidy -diff
+          # `go mod tidy -diff` prints the diff that would be applied and exits
+          # non-zero if go.mod/go.sum are stale relative to the actual import graph.
+
   lint:
     name: Lint
     if: ${{ inputs.enable-lint }}
