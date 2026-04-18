@@ -22,7 +22,7 @@ name: Go Security (Callable)
 #
 #   jobs:
 #     security:
-#       uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v1.0.0
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v1.1.0
 #       permissions:
 #         contents: read
 #         security-events: write  # required when upload-sarif: true (default)
@@ -32,9 +32,16 @@ name: Go Security (Callable)
 # (separate from go-ci.yml) because
 #   (1) they need `security-events: write` which go-ci.yml callers don't grant,
 #   (2) they typically run on a different cadence (weekly + on-push vs per-PR),
-#   (3) a broken security tool (e.g. gosec@latest requiring a newer Go) should
-#       not block builds. This matches the pattern used by kubernetes/release,
-#       ossf/scorecard, cli/cli, and prometheus/prometheus.
+#   (3) a broken security tool should not block builds (independent blast radius).
+# This matches the pattern used by kubernetes/release, ossf/scorecard,
+# cli/cli, and prometheus/prometheus.
+#
+# Implementation note: gosec and govulncheck are installed via `go install`
+# with pinned versions rather than via their respective GitHub Actions
+# (securego/gosec, golang/govulncheck-action) because the praetorian-inc
+# org restricts third-party actions to GitHub-owned, enterprise-owned, or
+# allowlisted patterns. Pinned `go install` sidesteps the allowlist and
+# still gives us deterministic, auditable tool versions.
 
 on:
   workflow_call:
@@ -45,17 +52,17 @@ on:
         type: string
         default: "."
 
-      go-version-file:
-        description: "Path to go.mod (relative to working-directory) used as Go version source of truth for govulncheck."
-        required: false
-        type: string
-        default: "go.mod"
-
       enable-gosec:
         description: "Whether to run gosec SAST scanner."
         required: false
         type: boolean
         default: true
+
+      gosec-version:
+        description: "Pinned gosec version (e.g. v2.22.11). Never use 'latest' — @latest has historically broken consumers when new gosec releases require newer Go than the CI toolchain provides."
+        required: false
+        type: string
+        default: "v2.22.11"
 
       gosec-args:
         description: "Arguments passed to gosec. Defaults to observe-only (never fails the job) with SARIF output. Override to enforce: e.g. '-severity=high -fmt sarif -out gosec-results.sarif ./...'."
@@ -68,6 +75,12 @@ on:
         required: false
         type: boolean
         default: true
+
+      govulncheck-version:
+        description: "Pinned govulncheck module version (golang.org/x/vuln/cmd/govulncheck@<version>)."
+        required: false
+        type: string
+        default: "v1.1.4"
 
       govulncheck-package:
         description: "Go package selector passed to govulncheck."
@@ -123,18 +136,24 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run gosec
-        uses: securego/gosec@b72378a2da300339c40788e1eddf1ddea6498558  # v2.22.11
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
         with:
-          args: ${{ inputs.gosec-args }}
+          go-version: "stable"
+          cache: false
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@${{ inputs.gosec-version }}
+
+      - name: Run gosec
+        working-directory: ${{ inputs.working-directory }}
+        run: gosec ${{ inputs.gosec-args }}
 
       - name: Upload gosec SARIF
         if: ${{ inputs.upload-sarif && always() }}
         uses: github/codeql-action/upload-sarif@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
         with:
-          # gosec runs in a Docker container that writes output to /github/workspace,
-          # which maps to the runner's workspace root regardless of `working-directory`.
-          sarif_file: gosec-results.sarif
+          sarif_file: ${{ inputs.working-directory }}/gosec-results.sarif
           category: gosec
 
   govulncheck:
@@ -157,29 +176,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417  # v6.3.0
+        with:
+          go-version: "stable"
+          cache: false
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@${{ inputs.govulncheck-version }}
+
       - name: Run govulncheck (SARIF)
         if: ${{ inputs.upload-sarif }}
-        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee  # v1.0.4
-        with:
-          work-dir: ${{ inputs.working-directory }}
-          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
-          go-package: ${{ inputs.govulncheck-package }}
-          output-format: sarif
-          output-file: govulncheck-results.sarif
-          repo-checkout: false
+        working-directory: ${{ inputs.working-directory }}
+        run: govulncheck -format sarif -show verbose ${{ inputs.govulncheck-package }} > govulncheck-results.sarif
 
       - name: Run govulncheck (text)
         if: ${{ !inputs.upload-sarif }}
-        uses: golang/govulncheck-action@b625fbe08f3bccbe446d94fbf87fcc875a4f50ee  # v1.0.4
-        with:
-          work-dir: ${{ inputs.working-directory }}
-          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
-          go-package: ${{ inputs.govulncheck-package }}
-          repo-checkout: false
+        working-directory: ${{ inputs.working-directory }}
+        run: govulncheck ${{ inputs.govulncheck-package }}
 
       - name: Upload govulncheck SARIF
         if: ${{ inputs.upload-sarif && always() }}
         uses: github/codeql-action/upload-sarif@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
         with:
-          sarif_file: govulncheck-results.sarif
+          sarif_file: ${{ inputs.working-directory }}/govulncheck-results.sarif
           category: govulncheck
