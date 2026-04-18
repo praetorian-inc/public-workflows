@@ -71,6 +71,61 @@ jobs:
 **Secrets:**
 - `CODECOV_TOKEN` — required only if `upload-coverage: true`
 
+### `go-security.yml` — Go security scanning (gosec + govulncheck)
+
+Reusable workflow for Go repositories that runs SAST (`gosec`) and Go vulnerability database scanning (`govulncheck`), optionally publishing SARIF findings to the GitHub Security tab. **Separate from `go-ci.yml`** so that:
+- callers only grant `security-events: write` when they want SARIF upload,
+- security scans can run on a different cadence (`schedule:`) than CI,
+- a broken security tool doesn't block builds (independent blast radius).
+
+This matches the pattern used by `ossf/scorecard`, `kubernetes/release`, `cli/cli`, and `prometheus/prometheus`.
+
+**Minimal caller** (drop this in `.github/workflows/security.yml` of a consumer repo):
+
+```yaml
+name: Security
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  schedule:
+    - cron: '0 6 * * 1'  # Mondays 06:00 UTC — weekly baseline
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v1.0.0
+    permissions:
+      contents: read
+      security-events: write  # required when upload-sarif: true (default)
+    secrets: inherit
+```
+
+**All inputs** (all optional with sensible defaults):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `working-directory` | `.` | Working dir for multi-module repos |
+| `go-version-file` | `go.mod` | Path to go.mod (relative to `working-directory`), drives govulncheck's Go version |
+| `enable-gosec` | `true` | Run gosec SAST scanner |
+| `gosec-args` | `-no-fail -fmt sarif -out gosec-results.sarif ./...` | Arguments passed to gosec. Defaults to observe-only. Override with e.g. `-severity=high -fmt sarif -out gosec-results.sarif ./...` to enforce. |
+| `enable-govulncheck` | `true` | Run govulncheck against the module |
+| `govulncheck-package` | `./...` | Package selector for govulncheck |
+| `upload-sarif` | `true` | Upload SARIF findings to the GitHub Security tab. When `true`, **the caller MUST grant `security-events: write`**. Set `false` to run as CI-only checks without publishing to the Security tab. |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as first step of every job |
+| `harden-runner-policy` | `audit` | `audit` (observe) or `block` (deny-by-default egress) |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated allowlist for block mode |
+
+**Pinned tool versions** (SHA-locked in the workflow, bumped via PR):
+
+| Tool | Version | Why pinned |
+|---|---|---|
+| `securego/gosec` | v2.22.11 | Docker-based action — sidesteps host Go version requirements (later gosec builds require Go 1.25+) |
+| `golang/govulncheck-action` | v1.0.4 | Stable; uses its own `stable` Go internally |
+| `github/codeql-action/upload-sarif` | v3.35.2 | Current SARIF upload action |
+
 ### `claude-code.yml` — Claude PR Assistant
 
 Runs Claude Code review on PRs. See the workflow file for input documentation.
@@ -101,7 +156,7 @@ Use [ratchet](https://github.com/sethvargo/ratchet) to auto-pin.
 ## Contributing
 
 1. Workflows in `.github/workflows/*.yml` must SHA-pin all `uses:` references. `ratchet lint` enforces this.
-2. The `test-go-ci.yml` self-test harness exercises `go-ci.yml` against the `_test-fixtures/go-minimal/` module on every PR — keep it passing.
+2. The `test-go-ci.yml` and `test-go-security.yml` self-test harnesses exercise `go-ci.yml` and `go-security.yml` against the `_test-fixtures/go-minimal/` module on every PR — keep them passing.
 3. Tag new major versions (`vX.Y.Z`) after merge; consumers pin to the SHA of that tagged commit.
 
 ## Supply chain context
