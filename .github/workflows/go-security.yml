@@ -151,7 +151,7 @@ jobs:
 
       - name: Upload gosec SARIF
         if: ${{ inputs.upload-sarif && always() }}
-        uses: github/codeql-action/upload-sarif@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0  # v4.35.2
         with:
           sarif_file: ${{ inputs.working-directory }}/gosec-results.sarif
           category: gosec
@@ -218,7 +218,7 @@ jobs:
 
       - name: Upload govulncheck SARIF
         if: ${{ inputs.upload-sarif && always() }}
-        uses: github/codeql-action/upload-sarif@b2f9ef845756500b97acbdaf5c1dd4e9c1d15734  # v3.35.2
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0  # v4.35.2
         with:
           sarif_file: ${{ inputs.working-directory }}/govulncheck-results.sarif
           category: govulncheck
