@@ -17,68 +17,45 @@ name: External Contribution Notify (Callable)
 #       types: [opened, assigned, closed]
 #   jobs:
 #     notify:
-#       uses: praetorian-inc/public-workflows/.github/workflows/external-contrib-notify.yml@<SHA>  # v1.0.0
-#       with:
-#         slack-channel-id: C08XXXXXXXX
-#         linear-team-id: 4bfbfdff-6fba-4b9d-833c-0e8bea37524a
+#       uses: praetorian-inc/public-workflows/.github/workflows/external-contrib-notify.yml@<SHA>  # v2.0.0
 #       secrets: inherit
 #
-# Requires org-level secrets (visibility: selected repositories in the 17
-# capability repos covered by ENG-3100):
-#   - EXTERNAL_CONTRIB_APP_ID
-#   - EXTERNAL_CONTRIB_APP_PRIVATE_KEY
+# Required secrets (typically org-level, visibility scoped to the consumer repos):
+#   - EXTERNAL_CONTRIB_APP_ID             (GitHub App ID / Client ID for praetorian-external-contrib-bot)
+#   - EXTERNAL_CONTRIB_APP_PRIVATE_KEY    (App private key, PEM)
 #   - LINEAR_API_KEY
 #   - SLACK_BOT_TOKEN
+#   - LINEAR_TEAM_ID                      (Linear team for created issues)
+#   - SLACK_CHANNEL_ID                    (Slack channel for notifications)
+#
+# Optional secrets:
+#   - LINEAR_ASSIGNEE_ID
+#   - LINEAR_PARENT_ISSUE_ID
+#
+# Why secrets rather than inputs for per-repo config: GitHub Actions prohibits
+# the `secrets` context in a reusable-workflow caller's `with:` block. Since
+# consumer repos store these IDs as secrets today, the cleanest path is for the
+# reusable to read them from `secrets.*` directly. `secrets: inherit` in the
+# caller forwards everything; no per-repo `with:` plumbing required.
 
 on:
   workflow_call:
     inputs:
-      slack-channel-id:
-        description: "Slack channel ID for the notification."
-        required: true
-        type: string
-
-      linear-team-id:
-        description: "Linear team ID that created issues are filed against."
-        required: true
-        type: string
-
-      linear-project-id:
-        description: "Optional Linear project ID."
-        required: false
-        type: string
-        default: ""
-
-      linear-assignee-id:
-        description: "Optional Linear user ID to assign created issues to."
-        required: false
-        type: string
-        default: ""
-
-      linear-parent-issue-id:
-        description: "Optional Linear parent issue ID. Created issues become sub-issues."
-        required: false
-        type: string
-        default: ""
-
       linear-state-name:
         description: "Linear state name for created issues."
         required: false
         type: string
         default: "Backlog"
-
       github-org:
         description: "GitHub organization to check membership against."
         required: false
         type: string
         default: "praetorian-inc"
-
       dry-run:
         description: "Log payloads instead of sending (for testing)."
         required: false
         type: boolean
         default: false
-
       auto-reply-enabled:
         description: "Post auto-reply GitHub comments on external contributions."
         required: false
@@ -87,10 +64,10 @@ on:
 
     secrets:
       EXTERNAL_CONTRIB_APP_ID:
-        description: "GitHub App ID for praetorian-external-contrib-bot (org Members:Read)."
+        description: "GitHub App ID (or Client ID) for praetorian-external-contrib-bot."
         required: true
       EXTERNAL_CONTRIB_APP_PRIVATE_KEY:
-        description: "GitHub App private key (PEM) paired with EXTERNAL_CONTRIB_APP_ID."
+        description: "GitHub App private key (PEM)."
         required: true
       LINEAR_API_KEY:
         description: "Linear API key for issue creation."
@@ -98,6 +75,21 @@ on:
       SLACK_BOT_TOKEN:
         description: "Slack bot token for channel notifications."
         required: true
+      LINEAR_TEAM_ID:
+        description: "Linear team ID (UUID) that created issues are filed against."
+        required: true
+      SLACK_CHANNEL_ID:
+        description: "Slack channel ID for the notification."
+        required: true
+      LINEAR_ASSIGNEE_ID:
+        description: "Optional Linear user ID to assign created issues to."
+        required: false
+      LINEAR_PARENT_ISSUE_ID:
+        description: "Optional Linear parent issue ID. Created issues become sub-issues."
+        required: false
+      LINEAR_PROJECT_ID:
+        description: "Optional Linear project ID."
+        required: false
 
 permissions:
   issues: write
@@ -117,12 +109,12 @@ jobs:
       - name: Run external-contrib-action
         uses: praetorian-inc/external-contrib-action@08e2bdbda0ab914fa00503b31a791a93213dc789  # v3.0.0
         with:
-          linear-team-id: ${{ inputs.linear-team-id }}
-          linear-project-id: ${{ inputs.linear-project-id }}
-          linear-assignee-id: ${{ inputs.linear-assignee-id }}
-          linear-parent-issue-id: ${{ inputs.linear-parent-issue-id }}
+          linear-team-id: ${{ secrets.LINEAR_TEAM_ID }}
+          linear-project-id: ${{ secrets.LINEAR_PROJECT_ID }}
+          linear-assignee-id: ${{ secrets.LINEAR_ASSIGNEE_ID }}
+          linear-parent-issue-id: ${{ secrets.LINEAR_PARENT_ISSUE_ID }}
           linear-state-name: ${{ inputs.linear-state-name }}
-          slack-channel-id: ${{ inputs.slack-channel-id }}
+          slack-channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
           github-org: ${{ inputs.github-org }}
           dry-run: ${{ inputs.dry-run }}
           auto-reply-enabled: ${{ inputs.auto-reply-enabled }}
