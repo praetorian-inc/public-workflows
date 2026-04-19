@@ -93,6 +93,10 @@ jobs:
           && contains(github.event.comment.body, '@claude'))
       )
     runs-on: ubuntu-latest
+    # Wall-clock ceiling. Preflight is a small gh-api + grep step; 5 min is
+    # >20x the p99. Cap blocks a runaway shell loop or a stuck gh-api retry
+    # from sitting on the runner for the 6-hour GitHub default.
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write  # needed to post the "skipped — non-code PR" status comment
@@ -187,6 +191,15 @@ jobs:
       )
 
     runs-on: ubuntu-latest
+
+    # Wall-clock ceiling on the Claude review job. `--max-turns 15` caps
+    # the number of tool-call turns, but NOT wall time (a long-running
+    # tool call or a slow Opus response can still burn runner minutes).
+    # An injection-induced loop or a wedged network call would otherwise
+    # sit on a runner for GitHub's 6-hour default. 15 min is ~5x the p99
+    # for our review prompt and is tight enough to make a stuck job
+    # noticeable without false-positive-failing legitimate large-PR reviews.
+    timeout-minutes: 15
 
     permissions:
       contents: read

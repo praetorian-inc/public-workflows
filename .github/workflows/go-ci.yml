@@ -117,7 +117,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: proxy.golang.org:443, sum.golang.org:443, github.com:443, api.github.com:443, release-assets.githubusercontent.com:443, objects.githubusercontent.com:443, storage.googleapis.com:443. If upload-coverage: true, also add: cli.codecov.io:443, api.codecov.io:443, storage.googleapis.com:443."
         required: false
         type: string
         default: ""
@@ -140,6 +140,7 @@ jobs:
   modcheck:
     name: Module integrity
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -176,6 +177,7 @@ jobs:
     name: Lint
     if: ${{ inputs.enable-lint }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -208,6 +210,7 @@ jobs:
     name: Test
     if: ${{ inputs.enable-test }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -248,6 +251,7 @@ jobs:
     name: Build
     if: ${{ inputs.enable-build && inputs.build-cmd-path != '' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
     strategy:

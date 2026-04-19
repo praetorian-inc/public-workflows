@@ -107,7 +107,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: proxy.golang.org:443, sum.golang.org:443, vuln.go.dev:443, github.com:443, api.github.com:443, release-assets.githubusercontent.com:443, objects.githubusercontent.com:443, storage.googleapis.com:443."
         required: false
         type: string
         default: ""
@@ -120,6 +120,7 @@ jobs:
     name: Gosec
     if: ${{ inputs.enable-gosec }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       security-events: write
@@ -160,6 +161,7 @@ jobs:
     name: Govulncheck
     if: ${{ inputs.enable-govulncheck }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
       security-events: write
