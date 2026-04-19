@@ -114,11 +114,8 @@ jobs:
         with:
           egress-policy: audit
 
-      # TODO: after ENG-3101 merges and v3 tag is cut, replace <SHA> below with
-      # the v3.0.0 commit SHA. Until then this workflow must not be pinned by
-      # downstream consumers — kept on the feat branch.
       - name: Run external-contrib-action
-        uses: praetorian-inc/external-contrib-action@REPLACE_WITH_V3_SHA  # v3.0.0
+        uses: praetorian-inc/external-contrib-action@08e2bdbda0ab914fa00503b31a791a93213dc789  # v3.0.0
         with:
           linear-team-id: ${{ inputs.linear-team-id }}
           linear-project-id: ${{ inputs.linear-project-id }}
