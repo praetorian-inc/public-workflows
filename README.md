@@ -128,9 +128,65 @@ jobs:
 | `github/codeql-action/upload-sarif` | v4.35.2 | Used for SARIF upload to the Security tab (github-owned, always allowlisted). v4 runs on Node 24; v3 was on deprecated Node 20. |
 | `actions/setup-go` | v6.3.0 | Uses `go-version: stable` — the tool binaries analyze source; they don't need to match the consumer's go.mod Go version. |
 
-### `claude-code.yml` — Claude PR Assistant
+### `claude-code.yml` — Claude PR Assistant (hardened)
 
-Runs Claude Code review on PRs. See the workflow file for input documentation.
+Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusable workflow.** Callers cannot widen the tool allowlist, relax the gates, or override the hardening — any such change requires a PR to this repo with `@praetorian-inc/security-engineering` review (see CODEOWNERS).
+
+**Security posture** (as of v2.0.4, SHA `1da9a5e29de06e850035b01e1ab5c0e19435ba30`):
+
+- `author_association` double gate: **both** the PR author AND the `@claude` commenter must be `OWNER / MEMBER / COLLABORATOR`. External-PR content never reaches Claude, directly or via a maintainer `@claude` mention. Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path.
+- `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob, mcp__github_inline_comment__create_inline_comment"` — the minimum surface needed to review a PR and post top-level + line-anchored comments.
+- `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
+- Explicit `track_progress: "false"` on the action step.
+- `--append-system-prompt` defensive preamble: Claude is instructed to treat all PR content (title, body, diffs, file contents, CLAUDE.md, comments) as untrusted data, never read secrets/env, and stop + report on injection attempts.
+- `actions/checkout` pinned by SHA, `persist-credentials: false`.
+- `anthropics/claude-code-action` pinned by SHA (`@38ec876...` = v1.0.101).
+- CODEOWNERS enforces `@praetorian-inc/security-engineering` review on this file.
+
+**Minimal caller** (drop this in `.github/workflows/claude-code.yml` of a consumer repo):
+
+```yaml
+name: Claude PR Assistant
+
+on:
+  pull_request:
+    types: [synchronize, opened]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claude-code-action:
+    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.4
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `prompt` | A built-in test-enforcement prompt | Custom review prompt. Callers can pass their own (see aurelian/orator for repo-specific prompts that read `.claude/skills/*.md`). |
+| `require_tests` | `true` | When `true`, the workflow fails if Claude's output indicates "significant changes without automated tests". Set `false` for repos that don't enforce this. |
+
+**Secrets:**
+
+- `ANTHROPIC_API_KEY` — required. Repository-level secret.
+
+**Triggers the reusable workflow responds to:**
+
+- `pull_request` with `action == 'opened' || action == 'synchronize'` — auto-reviews new/updated PRs from insiders
+- `pull_request_review_comment` with body containing `@claude` from an insider on an insider PR — targeted review requests
+
+Other event types (`issue_comment`, `issues`, `workflow_dispatch`) are not handled — they trigger the caller workflow but the reusable workflow's job-level `if:` filters them out.
+
+**Do NOT inline `anthropics/claude-code-action`.** A monthly drift scan will flag and open migration PRs for any repo that calls it directly.
 
 ### `unit-tests.yml` — Unit tests for claude-tool-sdk consumers (npm/Node.js)
 
