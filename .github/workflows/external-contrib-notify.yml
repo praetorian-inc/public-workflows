@@ -17,8 +17,21 @@ name: External Contribution Notify (Callable)
 #       types: [opened, assigned, closed]
 #   jobs:
 #     notify:
-#       uses: praetorian-inc/public-workflows/.github/workflows/external-contrib-notify.yml@<SHA>  # v2.0.0
+#       uses: praetorian-inc/public-workflows/.github/workflows/external-contrib-notify.yml@<SHA>  # v2.0.x
+#       permissions:
+#         contents: read
+#         issues: write
+#         pull-requests: write
 #       secrets: inherit
+#
+# NOTE: The `permissions:` block on the caller job is REQUIRED. Without it,
+# the reusable inherits the caller repo's default GITHUB_TOKEN permissions,
+# which at the praetorian-inc org level is read-only
+# (default_workflow_permissions: read). The reusable's own permissions block
+# can only RESTRICT further — it cannot elevate beyond what the caller grants.
+# Omitting the block causes 'Resource not accessible by integration' errors
+# when the action tries to post PR/issue comments.
+# Docs: https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
 #
 # Required secrets (typically org-level, visibility scoped to the consumer repos):
 #   - EXTERNAL_CONTRIB_APP_ID             (GitHub App ID / Client ID for praetorian-external-contrib-bot)
