@@ -1,0 +1,20 @@
+# CODEOWNERS for praetorian-inc/public-workflows
+#
+# Reusable workflows in this repo are called by 49+ repos across the org. A malicious
+# or careless change propagates immediately to every caller on `@main` and to any caller
+# pinned to a freshly-tagged SHA that includes the change. Security-sensitive files
+# require review from the security team regardless of author.
+#
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner — repo maintainer
+*                                           @nsportsman
+
+# Claude-code.yml reviews content from PRs (including CLAUDE.md, PR bodies, comments)
+# through Claude with a hardcoded, non-configurable tool allowlist. Any change to the
+# allowlist, trigger gates, or Claude invocation requires Security Engineering review
+# so we don't regress the prompt-injection defenses documented in the file's comments.
+#
+# Context: anthropics/claude-code-action#860 (track_progress silently widens allowlist),
+# Aikido PromptPwnd disclosure, tj-actions CVE-2025-30066.
+/.github/workflows/claude-code.yml          @praetorian-inc/security-engineering @nsportsman
