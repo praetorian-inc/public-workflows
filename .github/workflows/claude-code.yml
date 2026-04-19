@@ -112,11 +112,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -eu
-          FILES=$(gh pr view ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} --json files \
-            --jq '.files[].path')
 
-          echo "Changed files in PR:"
+          # Override path: `@claude` mention on a review comment always forces Claude
+          # to run, regardless of file types. The job's own if: (line ~82) already
+          # required contains(comment.body, '@claude'), so by the time preflight runs
+          # on a review_comment event, we know the reviewer explicitly asked for it.
+          # Respecting that override is the documented escape hatch for docs-only PRs.
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "🔔 @claude mention on a review comment — bypassing docs-only filter."
+            exit 0
+          fi
+
+          # Use the paginated `pulls/.../files` REST endpoint (not `gh pr view --json files`,
+          # which is capped at 100 files per cli/cli#5368 and can misclassify large PRs
+          # where code files appear after the first 100). --paginate iterates all pages.
+          FILES=$(gh api \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename')
+
+          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
           echo "$FILES" | sed 's/^/  /'
           echo
 
@@ -130,14 +145,12 @@ jobs:
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "⊘ Docs/config-only PR — Claude review will be skipped."
-            # Post a visible status comment so the reviewer knows why Claude isn't running.
-            # Only post for the pull_request event (not for @claude mentions, which
-            # force a full review anyway — there we WANT Claude to run even on docs).
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              gh pr comment ${{ github.event.pull_request.number }} \
-                --repo ${{ github.repository }} \
-                --body "Claude review skipped — non-code PR (only changed files matching \`docs/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@claude\` on a review comment to force a review."
-            fi
+            # Post a visible status comment so reviewers know why Claude isn't running.
+            # Only pull_request events reach this branch (review_comment short-circuits
+            # to has_code=true above), so we always post the skip comment here.
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --repo ${{ github.repository }} \
+              --body "Claude review skipped — non-code PR (only changed files matching \`docs/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@claude\` on a review comment to force a review."
           fi
 
   claude-code-action:
