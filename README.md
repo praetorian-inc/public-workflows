@@ -96,10 +96,11 @@ permissions:
 
 jobs:
   security:
-    uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v1.0.0
+    uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v2.0.12
     permissions:
       contents: read
       security-events: write  # required when upload-sarif: true (default)
+      actions: read           # required by codeql-action/upload-sarif for run metadata
     secrets: inherit
 ```
 
@@ -114,7 +115,7 @@ jobs:
 | `enable-govulncheck` | `true` | Run govulncheck against the module |
 | `govulncheck-version` | `v1.1.4` | Pinned govulncheck module version |
 | `govulncheck-package` | `./...` | Package selector for govulncheck |
-| `upload-sarif` | `true` | Upload SARIF findings to the GitHub Security tab. When `true`, **the caller MUST grant `security-events: write`**. Set `false` to run as CI-only checks without publishing to the Security tab. |
+| `upload-sarif` | `true` | Upload SARIF findings to the GitHub Security tab. When `true`, **the caller MUST grant both `security-events: write` and `actions: read`**. Missing `actions: read` surfaces as "Resource not accessible by integration" on the upload step even though the scan itself succeeded — `codeql-action/upload-sarif` needs to fetch workflow run metadata. Set `false` to run as CI-only checks without publishing to the Security tab. |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as first step of every job |
 | `harden-runner-policy` | `audit` | `audit` (observe) or `block` (deny-by-default egress) |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated allowlist for block mode |

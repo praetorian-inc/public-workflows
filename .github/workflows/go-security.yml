@@ -22,10 +22,11 @@ name: Go Security (Callable)
 #
 #   jobs:
 #     security:
-#       uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v1.1.0
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v2.0.12
 #       permissions:
 #         contents: read
 #         security-events: write  # required when upload-sarif: true (default)
+#         actions: read           # required by codeql-action/upload-sarif for run metadata
 #       secrets: inherit
 #
 # Design rationale: gosec+govulncheck live in their own reusable workflow
@@ -89,7 +90,7 @@ on:
         default: "./..."
 
       upload-sarif:
-        description: "Whether to upload SARIF findings to the GitHub Security tab. When true, the caller MUST grant 'security-events: write'."
+        description: "Whether to upload SARIF findings to the GitHub Security tab. When true, the caller MUST grant both 'security-events: write' (to upload SARIF) AND 'actions: read' (for codeql-action/upload-sarif to fetch workflow run metadata). Missing 'actions: read' surfaces as 'Resource not accessible by integration' on the upload step even when the scan succeeds."
         required: false
         type: boolean
         default: true
@@ -124,6 +125,13 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # `codeql-action/upload-sarif` calls `GET /repos/{owner}/{repo}/actions/runs/{run_id}`
+      # to attach SARIF findings to the triggering workflow run (and for telemetry).
+      # Without `actions: read` the SARIF upload step errors with
+      # "Resource not accessible by integration" and the gosec job fails,
+      # even though the scan itself succeeded. See caligula/cato/florian
+      # security.yml runs on 2026-04-19 for the failure signature.
+      actions: read
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -165,6 +173,8 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      # Required by `codeql-action/upload-sarif`. See gosec job above for rationale.
+      actions: read
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
