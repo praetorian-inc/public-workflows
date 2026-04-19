@@ -188,12 +188,33 @@ jobs:
       - name: Run govulncheck (SARIF)
         if: ${{ inputs.upload-sarif }}
         working-directory: ${{ inputs.working-directory }}
-        run: govulncheck -format sarif -show verbose ${{ inputs.govulncheck-package }} > govulncheck-results.sarif
+        # govulncheck exit codes: 0 = no vulns, 1 = internal error, 3 = vulns
+        # found in called code. Observe-only: don't fail CI on exit 3 (vulns);
+        # still fail on exit 1 (real errors). SARIF gets uploaded either way.
+        # Disable -e so we can capture exit 3 without aborting the step.
+        shell: bash
+        run: |
+          set +e
+          govulncheck -format sarif ${{ inputs.govulncheck-package }} > govulncheck-results.sarif
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ] && [ $rc -ne 3 ]; then
+            echo "govulncheck internal error (exit $rc)" >&2
+            exit $rc
+          fi
 
       - name: Run govulncheck (text)
         if: ${{ !inputs.upload-sarif }}
         working-directory: ${{ inputs.working-directory }}
-        run: govulncheck ${{ inputs.govulncheck-package }}
+        shell: bash
+        run: |
+          set +e
+          govulncheck ${{ inputs.govulncheck-package }}
+          rc=$?
+          set -e
+          if [ $rc -ne 0 ] && [ $rc -ne 3 ]; then
+            exit $rc
+          fi
 
       - name: Upload govulncheck SARIF
         if: ${{ inputs.upload-sarif && always() }}
