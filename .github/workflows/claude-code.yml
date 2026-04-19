@@ -42,39 +42,140 @@ on:
         type: boolean
         default: true
 
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.anthropic.com:443, statsig.anthropic.com:443, api.github.com:443, github.com:443, release-assets.githubusercontent.com:443, registry.npmjs.org:443."
+        required: false
+        type: string
+        default: ""
+
     secrets:
       ANTHROPIC_API_KEY:
         description: "Anthropic API key for Claude"
         required: true
 
 jobs:
-  claude-code-action:
-    # Block external-PR content from ever reaching Claude by requiring the PR's head
-    # repository to be this repo itself (i.e., same-repo branch PR, not a fork). This
-    # is strictly stronger than an `author_association` check because:
-    #   - author_association is computed per-repo and is unreliable — for PUBLIC repos
-    #     GitHub often reports org members as CONTRIBUTOR instead of MEMBER, silently
-    #     skipping the job. v2.0.3-v2.0.5 hit this bug.
-    #   - A fork PR author_association (FIRST_TIME_CONTRIBUTOR / NONE) would be blocked,
-    #     but relying on that field is fragile when the field itself isn't stable.
-    #   - head.repo check is deterministic: forks always have a different head.repo.
-    #
-    # Closes the "comment and control" attack path (CVSS 9.4, Anthropic bounty-
-    # acknowledged) — see https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/
-    # An external attacker opening a PR with an injection payload, plus a maintainer
-    # @claude-mentioning the PR, can no longer coerce Claude into reading external
-    # content: head.repo is the fork → workflow skipped for BOTH pull_request and
-    # pull_request_review_comment event branches.
-    #
-    # Tradeoff: org members using personal forks of praetorian-inc repos are also
-    # blocked. Accepted — encourages same-repo branching for internal work.
-    #
-    # Note: `synchronize` (new commits pushed to the PR) is INTENTIONALLY EXCLUDED
-    # from the pull_request trigger. Claude reviews only on first open. CodeRabbit
-    # and Codex already run on every push. Claude is the senior-engineer second
-    # opinion. Developers can re-request Claude's review anytime via a `@claude`
-    # mention on a PR review comment.
+  # Preflight: skip the Claude job entirely if the PR only touches docs / config /
+  # images. Saves ~$1-2 per docs-only PR (Opus run cost) at the price of ~30 seconds
+  # of GitHub-runner time. Callers don't need to configure anything — this is a
+  # central "what counts as code" policy.
+  #
+  # The skip patterns cover: markdown (.md / .markdown / .rst / .txt), all of /docs,
+  # license-like files (LICENSE, .gitignore, CODEOWNERS), and images
+  # (.png / .jpg / .jpeg / .svg / .gif / .webp / .ico). A PR that touches ANY file
+  # NOT matching these patterns is treated as a code PR and Claude runs.
+  #
+  # If a developer genuinely wants Claude review on a docs-only PR, they can post
+  # an `@claude` PR review comment to force one — the review_comment trigger is
+  # not path-filtered.
+  preflight:
+    # Same boundary checks as claude-code-action — don't spawn preflight for events
+    # we wouldn't review anyway (drafts, bots, external forks, wrong event type).
     if: |
+      github.event.pull_request.draft == false &&
+      !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        (github.event_name == 'pull_request' && github.event.action == 'opened')
+        ||
+        (github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, '@claude'))
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # needed to post the "skipped — non-code PR" status comment
+    outputs:
+      has_code: ${{ steps.check.outputs.has_code }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Check for code changes in the PR
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+
+          # Override path: `@claude` mention on a review comment always forces Claude
+          # to run, regardless of file types. The job's own if: (line ~82) already
+          # required contains(comment.body, '@claude'), so by the time preflight runs
+          # on a review_comment event, we know the reviewer explicitly asked for it.
+          # Respecting that override is the documented escape hatch for docs-only PRs.
+          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "🔔 @claude mention on a review comment — bypassing docs-only filter."
+            exit 0
+          fi
+
+          # Use the paginated `pulls/.../files` REST endpoint (not `gh pr view --json files`,
+          # which is capped at 100 files per cli/cli#5368 and can misclassify large PRs
+          # where code files appear after the first 100). --paginate iterates all pages.
+          FILES=$(gh api \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename')
+
+          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
+          echo "$FILES" | sed 's/^/  /'
+          echo
+
+          # SKIP_RE matches docs / licenses / images / config-like files.
+          # If ALL changed files match, we have a non-code PR.
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/'
+
+          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Code changes detected — Claude will review this PR."
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ Docs/config-only PR — Claude review will be skipped."
+            # Post a visible status comment so reviewers know why Claude isn't running.
+            # Only pull_request events reach this branch (review_comment short-circuits
+            # to has_code=true above), so we always post the skip comment here.
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --repo ${{ github.repository }} \
+              --body "Claude review skipped — non-code PR (only changed files matching \`docs/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@claude\` on a review comment to force a review."
+          fi
+
+  claude-code-action:
+    needs: preflight
+    # Primary gate: preflight detected real code changes. If preflight was SKIPPED
+    # (its if: rejected the event — bot/draft/fork/wrong event) `has_code` is undefined
+    # and this check is false, so this job also skips. If preflight ran and found the
+    # PR to be docs/config-only, same.
+    #
+    # Secondary gate: the same author/draft/bot/same-repo/event checks from the
+    # preflight, duplicated here as belt-and-suspenders defense-in-depth. If someone
+    # ever removes `needs: preflight` in a future edit, this still blocks forks and
+    # bots. CODEOWNERS requires security-engineering review on any change to this
+    # file so the duplication stays in sync.
+    #
+    # Design notes:
+    #   - head.repo.full_name == github.repository: strictly stronger than
+    #     author_association (which is unreliable for public repos — GitHub reports
+    #     org members as CONTRIBUTOR). Forks always have a different head.repo.
+    #     Closes the "comment and control" attack path (CVSS 9.4, oddguan.com).
+    #   - `synchronize` (new commits) is INTENTIONALLY EXCLUDED. Claude reviews only
+    #     on first open. CodeRabbit + Codex handle per-push feedback. Developers
+    #     can force re-review via `@claude` on a PR review comment.
+    if: |
+      needs.preflight.outputs.has_code == 'true' &&
       github.event.pull_request.draft == false &&
       !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
@@ -92,6 +193,13 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
