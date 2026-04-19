@@ -54,34 +54,35 @@ on:
 
 jobs:
   claude-code-action:
-    # Require BOTH the PR author AND the comment author (on review-comment trigger) to be
-    # repo/org insiders. This closes the "comment and control" attack path: an external
-    # attacker opens a PR with prompt-injection payload in the body/diff; a maintainer
-    # @claude-mentions it; without the PR-author check, Claude would run against the
-    # external content and could be coerced into exfiltrating secrets via its allowed
-    # posting tools. See:
-    #   https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/
-    #   (CVSS 9.4; Anthropic bounty-acknowledged). The defense: Claude must never see
-    #   external PR content — if review is needed, a maintainer opens an internal fix PR
-    #   mirroring the external changes, which is both reviewable and safe.
+    # Block external-PR content from ever reaching Claude by requiring the PR's head
+    # repository to be this repo itself (i.e., same-repo branch PR, not a fork). This
+    # is strictly stronger than an `author_association` check because:
+    #   - author_association is computed per-repo and is unreliable — for PUBLIC repos
+    #     GitHub often reports org members as CONTRIBUTOR instead of MEMBER, silently
+    #     skipping the job. v2.0.3-v2.0.5 hit this bug.
+    #   - A fork PR author_association (FIRST_TIME_CONTRIBUTOR / NONE) would be blocked,
+    #     but relying on that field is fragile when the field itself isn't stable.
+    #   - head.repo check is deterministic: forks always have a different head.repo.
+    #
+    # Closes the "comment and control" attack path (CVSS 9.4, Anthropic bounty-
+    # acknowledged) — see https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/
+    # An external attacker opening a PR with an injection payload, plus a maintainer
+    # @claude-mentioning the PR, can no longer coerce Claude into reading external
+    # content: head.repo is the fork → workflow skipped for BOTH pull_request and
+    # pull_request_review_comment event branches.
+    #
+    # Tradeoff: org members using personal forks of praetorian-inc repos are also
+    # blocked. Accepted — encourages same-repo branching for internal work.
     if: |
       github.event.pull_request.draft == false &&
       !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
       (
         (github.event_name == 'pull_request'
-          && (github.event.action == 'opened' || github.event.action == 'synchronize')
-          && (github.event.pull_request.author_association == 'OWNER'
-              || github.event.pull_request.author_association == 'MEMBER'
-              || github.event.pull_request.author_association == 'COLLABORATOR'))
+          && (github.event.action == 'opened' || github.event.action == 'synchronize'))
         ||
         (github.event_name == 'pull_request_review_comment'
-          && contains(github.event.comment.body, '@claude')
-          && (github.event.comment.author_association == 'OWNER'
-              || github.event.comment.author_association == 'MEMBER'
-              || github.event.comment.author_association == 'COLLABORATOR')
-          && (github.event.pull_request.author_association == 'OWNER'
-              || github.event.pull_request.author_association == 'MEMBER'
-              || github.event.pull_request.author_association == 'COLLABORATOR'))
+          && contains(github.event.comment.body, '@claude'))
       )
 
     runs-on: ubuntu-latest
