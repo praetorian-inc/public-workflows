@@ -62,6 +62,24 @@ on:
         type: boolean
         default: true
 
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step of the job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.github.com:443, api.linear.app:443, slack.com:443, hooks.slack.com:443."
+        required: false
+        type: string
+        default: ""
+
     secrets:
       EXTERNAL_CONTRIB_APP_ID:
         description: "GitHub App ID (or Client ID) for praetorian-external-contrib-bot."
@@ -102,9 +120,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Harden runner
+        if: ${{ inputs.enable-harden-runner }}
         uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
         with:
-          egress-policy: audit
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
 
       - name: Run external-contrib-action
         uses: praetorian-inc/external-contrib-action@08e2bdbda0ab914fa00503b31a791a93213dc789  # v3.0.0
