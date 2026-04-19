@@ -22,15 +22,32 @@ name: External Contribution Notify (Callable)
 #         contents: read
 #         issues: write
 #         pull-requests: write
-#       secrets: inherit
+#       secrets:
+#         EXTERNAL_CONTRIB_APP_ID: ${{ secrets.EXTERNAL_CONTRIB_APP_ID }}
+#         EXTERNAL_CONTRIB_APP_PRIVATE_KEY: ${{ secrets.EXTERNAL_CONTRIB_APP_PRIVATE_KEY }}
+#         LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+#         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+#         LINEAR_TEAM_ID: ${{ secrets.LINEAR_TEAM_ID }}
+#         SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+#         LINEAR_ASSIGNEE_ID: ${{ secrets.LINEAR_ASSIGNEE_ID }}
+#         LINEAR_PARENT_ISSUE_ID: ${{ secrets.LINEAR_PARENT_ISSUE_ID }}
+#         LINEAR_PROJECT_ID: ${{ secrets.LINEAR_PROJECT_ID }}
 #
-# NOTE: The `permissions:` block on the caller job is REQUIRED. Without it,
+# NOTE 1: The `permissions:` block on the caller job is REQUIRED. Without it,
 # the reusable inherits the caller repo's default GITHUB_TOKEN permissions,
 # which at the praetorian-inc org level is read-only
 # (default_workflow_permissions: read). The reusable's own permissions block
 # can only RESTRICT further — it cannot elevate beyond what the caller grants.
 # Omitting the block causes 'Resource not accessible by integration' errors
 # when the action tries to post PR/issue comments.
+#
+# NOTE 2: Prefer the explicit `secrets:` block above over `secrets: inherit`.
+# `inherit` forwards every repo + org secret the caller has access to;
+# explicit passing limits forwarding to only the 9 declared secrets, tightening
+# blast radius if the reusable is ever misconfigured or compromised. Matters
+# especially for a workflow running on pull_request_target (most sensitive
+# trigger).
+#
 # Docs: https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
 #
 # Required secrets (typically org-level, visibility scoped to the consumer repos):
@@ -48,8 +65,8 @@ name: External Contribution Notify (Callable)
 # Why secrets rather than inputs for per-repo config: GitHub Actions prohibits
 # the `secrets` context in a reusable-workflow caller's `with:` block. Since
 # consumer repos store these IDs as secrets today, the cleanest path is for the
-# reusable to read them from `secrets.*` directly. `secrets: inherit` in the
-# caller forwards everything; no per-repo `with:` plumbing required.
+# reusable to read them from `secrets.*` directly. Callers pass them through
+# explicitly (preferred) or via `secrets: inherit` (broader blast radius).
 
 on:
   workflow_call:
