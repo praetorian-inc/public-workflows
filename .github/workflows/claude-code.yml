@@ -93,10 +93,30 @@ jobs:
           # v1 idiom: use `prompt` (not deprecated `direct_prompt`) so the hardened-prompt
           # treatment of repo-supplied content (CLAUDE.md, PR body, comments) is applied.
           prompt: ${{ inputs.prompt }}
-          # Restrict Claude to read-only file access + the minimum gh commands needed to
-          # review a PR and post comments. Blocks Edit/Write/arbitrary Bash/WebFetch/etc.
+          # Hardened, non-configurable toolset. Callers cannot widen this — see
+          # praetorian-inc/public-workflows CODEOWNERS: any change requires AppSec review.
+          #
+          # Allow:
+          #   - Bash(gh pr {comment,diff,view}:*) — the minimum gh surface for PR review
+          #   - Read / Grep / Glob — read-only file access (prompts often reference
+          #     .claude/skills/*.md or repo docs)
+          #   - mcp__github_inline_comment__create_inline_comment — Anthropic's purpose-built
+          #     MCP for line-anchored review comments. Scoped to the current PR; cannot run
+          #     arbitrary API calls. Gives all callers CodeRabbit-style inline review.
+          #
+          # Deny (belt-and-suspenders vs anthropics/claude-code-action#860 class regressions
+          # where an upstream flag silently re-expands the allowlist via union-merge):
+          #   - Bash(curl:*) / Bash(wget:*) — exfiltration vectors
+          #   - Bash(gh api:*) / Bash(gh auth:*) — broad GitHub API / token access
+          #   - Write / Edit / MultiEdit — file mutation
+          #
+          # NEVER add `track_progress: true` here or in any caller's claude_args. It forces
+          # "tag mode" which union-merges write tools (Edit, MultiEdit, Write, git push, ...)
+          # into the allowlist and makes --allowedTools cosmetic. See
+          # anthropics/claude-code-action#860.
           claude_args: |
-            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
+            --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,mcp__github_inline_comment__create_inline_comment"
+            --disallowedTools "Bash(curl:*),Bash(wget:*),Bash(gh api:*),Bash(gh auth:*),Write,Edit,MultiEdit"
             --max-turns 10
 
       - name: Check Test Requirements
