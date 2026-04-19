@@ -1,0 +1,134 @@
+name: External Contribution Notify (Callable)
+# Reusable workflow for praetorian-inc open-source repos. Detects external
+# contributions (non-org-member PRs/Issues), creates a Linear issue, posts a
+# Slack notification, and auto-replies on the GitHub thread.
+#
+# Access: this workflow is invocable from any repo in the praetorian-inc org
+# (Settings -> Actions -> General -> Access -> Accessible from repositories in
+# the 'praetorian-inc' organization).
+#
+# Caller example (.github/workflows/external-contribution.yml):
+#
+#   name: External Contribution Notify
+#   on:
+#     issues:
+#       types: [opened, assigned, closed]
+#     pull_request_target:
+#       types: [opened, assigned, closed]
+#   jobs:
+#     notify:
+#       uses: praetorian-inc/public-workflows/.github/workflows/external-contrib-notify.yml@<SHA>  # v1.0.0
+#       with:
+#         slack-channel-id: C08XXXXXXXX
+#         linear-team-id: 4bfbfdff-6fba-4b9d-833c-0e8bea37524a
+#       secrets: inherit
+#
+# Requires org-level secrets (visibility: selected repositories in the 17
+# capability repos covered by ENG-3100):
+#   - EXTERNAL_CONTRIB_APP_ID
+#   - EXTERNAL_CONTRIB_APP_PRIVATE_KEY
+#   - LINEAR_API_KEY
+#   - SLACK_BOT_TOKEN
+
+on:
+  workflow_call:
+    inputs:
+      slack-channel-id:
+        description: "Slack channel ID for the notification."
+        required: true
+        type: string
+
+      linear-team-id:
+        description: "Linear team ID that created issues are filed against."
+        required: true
+        type: string
+
+      linear-project-id:
+        description: "Optional Linear project ID."
+        required: false
+        type: string
+        default: ""
+
+      linear-assignee-id:
+        description: "Optional Linear user ID to assign created issues to."
+        required: false
+        type: string
+        default: ""
+
+      linear-parent-issue-id:
+        description: "Optional Linear parent issue ID. Created issues become sub-issues."
+        required: false
+        type: string
+        default: ""
+
+      linear-state-name:
+        description: "Linear state name for created issues."
+        required: false
+        type: string
+        default: "Backlog"
+
+      github-org:
+        description: "GitHub organization to check membership against."
+        required: false
+        type: string
+        default: "praetorian-inc"
+
+      dry-run:
+        description: "Log payloads instead of sending (for testing)."
+        required: false
+        type: boolean
+        default: false
+
+      auto-reply-enabled:
+        description: "Post auto-reply GitHub comments on external contributions."
+        required: false
+        type: boolean
+        default: true
+
+    secrets:
+      EXTERNAL_CONTRIB_APP_ID:
+        description: "GitHub App ID for praetorian-external-contrib-bot (org Members:Read)."
+        required: true
+      EXTERNAL_CONTRIB_APP_PRIVATE_KEY:
+        description: "GitHub App private key (PEM) paired with EXTERNAL_CONTRIB_APP_ID."
+        required: true
+      LINEAR_API_KEY:
+        description: "Linear API key for issue creation."
+        required: true
+      SLACK_BOT_TOKEN:
+        description: "Slack bot token for channel notifications."
+        required: true
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Run external-contrib-action
+        uses: praetorian-inc/external-contrib-action@08e2bdbda0ab914fa00503b31a791a93213dc789  # v3.0.0
+        with:
+          linear-team-id: ${{ inputs.linear-team-id }}
+          linear-project-id: ${{ inputs.linear-project-id }}
+          linear-assignee-id: ${{ inputs.linear-assignee-id }}
+          linear-parent-issue-id: ${{ inputs.linear-parent-issue-id }}
+          linear-state-name: ${{ inputs.linear-state-name }}
+          slack-channel-id: ${{ inputs.slack-channel-id }}
+          github-org: ${{ inputs.github-org }}
+          dry-run: ${{ inputs.dry-run }}
+          auto-reply-enabled: ${{ inputs.auto-reply-enabled }}
+          github-app-id: ${{ secrets.EXTERNAL_CONTRIB_APP_ID }}
+          github-app-private-key: ${{ secrets.EXTERNAL_CONTRIB_APP_PRIVATE_KEY }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
