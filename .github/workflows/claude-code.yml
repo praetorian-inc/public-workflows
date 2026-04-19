@@ -42,6 +42,24 @@ on:
         type: boolean
         default: true
 
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.anthropic.com:443, statsig.anthropic.com:443, api.github.com:443, github.com:443, release-assets.githubusercontent.com:443, registry.npmjs.org:443."
+        required: false
+        type: string
+        default: ""
+
     secrets:
       ANTHROPIC_API_KEY:
         description: "Anthropic API key for Claude"
@@ -81,6 +99,13 @@ jobs:
     outputs:
       has_code: ${{ steps.check.outputs.has_code }}
     steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
       - name: Check for code changes in the PR
         id: check
         env:
@@ -155,6 +180,13 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
       - name: Checkout repository
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
