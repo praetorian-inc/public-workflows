@@ -130,18 +130,24 @@ jobs:
 
 ### `claude-code.yml` — Claude PR Assistant (hardened)
 
-Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusable workflow.** Callers cannot widen the tool allowlist, relax the gates, or override the hardening — any such change requires a PR to this repo with `@praetorian-inc/security-engineering` review (see CODEOWNERS).
+Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusable workflow.** Callers cannot widen the tool allowlist, relax the gates, change the model, or override the hardening — any such change requires a PR to this repo with `@praetorian-inc/security-engineering` review (see CODEOWNERS).
 
-**Security posture** (as of v2.0.4, SHA `1da9a5e29de06e850035b01e1ab5c0e19435ba30`):
+**Security posture** (as of v2.0.9, SHA `c4e898f83b9c4008cc3dbe295cc420e53ec6b16b`):
 
-- `author_association` double gate: **both** the PR author AND the `@claude` commenter must be `OWNER / MEMBER / COLLABORATOR`. External-PR content never reaches Claude, directly or via a maintainer `@claude` mention. Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path.
-- `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob, mcp__github_inline_comment__create_inline_comment"` — the minimum surface needed to review a PR and post top-level + line-anchored comments.
+- **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
+- **Preflight job** skips Claude entirely on docs-only PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / LICENSE / .gitignore / CODEOWNERS / images`). Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
+- **Model hardcoded**: `--model claude-opus-4-7`. Claude runs once per PR (on `opened` only; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). Opus is paid 1x per PR for the highest-capability senior-engineer review.
+- `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob"` — the minimum surface needed to review a PR and post the top-level summary comment. Inline line-anchored commenting deliberately NOT included (CodeRabbit covers it).
 - `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
 - Explicit `track_progress: "false"` on the action step.
+- `--max-turns 15` caps runaway loops.
 - `--append-system-prompt` defensive preamble: Claude is instructed to treat all PR content (title, body, diffs, file contents, CLAUDE.md, comments) as untrusted data, never read secrets/env, and stop + report on injection attempts.
-- `actions/checkout` pinned by SHA, `persist-credentials: false`.
+- **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-security.yml`.
+- `actions/checkout` pinned by SHA, `persist-credentials: false`, `fetch-depth: 1`.
 - `anthropics/claude-code-action` pinned by SHA (`@38ec876...` = v1.0.101).
-- CODEOWNERS enforces `@praetorian-inc/security-engineering` review on this file.
+- **CODEOWNERS** (`.github/CODEOWNERS`) enforces `@praetorian-inc/security-engineering` review on this file.
+
+**Default review prompt** produces a 3-section summary: `### Critical issues` / `### Security` / `### Test coverage`. Explicitly defers style nits to CodeRabbit + Codex. Callers can override via the `prompt` input.
 
 **Minimal caller** (drop this in `.github/workflows/claude-code.yml` of a consumer repo):
 
@@ -150,7 +156,7 @@ name: Claude PR Assistant
 
 on:
   pull_request:
-    types: [synchronize, opened]
+    types: [opened]
   pull_request_review_comment:
     types: [created]
 
@@ -160,7 +166,7 @@ permissions:
 
 jobs:
   claude-code-action:
-    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.4
+    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.9
     permissions:
       contents: read
       pull-requests: write
@@ -168,12 +174,17 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
+Note: `pull_request: types: [opened]` only — Claude reviews once per PR open. Developers re-request a review via `@claude` on a PR review comment. `synchronize` (commits pushed to a PR) does NOT re-trigger Claude by design.
+
 **Inputs** (all optional):
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | A built-in test-enforcement prompt | Custom review prompt. Callers can pass their own (see aurelian/orator for repo-specific prompts that read `.claude/skills/*.md`). |
-| `require_tests` | `true` | When `true`, the workflow fails if Claude's output indicates "significant changes without automated tests". Set `false` for repos that don't enforce this. |
+| `prompt` | Built-in 3-section review template | Custom review prompt. Callers can pass their own (see aurelian/orator for repo-specific prompts that read `.claude/skills/*.md`). |
+| `require_tests` | `true` | When `true`, fails the workflow if Claude's output indicates "significant changes without automated tests". (Dead code under the default prompt — only matters for custom prompts that emit the `**Has ... :** Yes/No` markers.) |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as the first step of both jobs. |
+| `harden-runner-policy` | `audit` | `audit` (observe + report) or `block` (deny-by-default egress). |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist when policy is `block`. Recommended: `api.anthropic.com:443, statsig.anthropic.com:443, api.github.com:443, github.com:443, release-assets.githubusercontent.com:443, registry.npmjs.org:443`. |
 
 **Secrets:**
 
@@ -181,12 +192,12 @@ jobs:
 
 **Triggers the reusable workflow responds to:**
 
-- `pull_request` with `action == 'opened' || action == 'synchronize'` — auto-reviews new/updated PRs from insiders
-- `pull_request_review_comment` with body containing `@claude` from an insider on an insider PR — targeted review requests
+- `pull_request` with `action == 'opened'` on a same-repo branch PR — auto-reviews once on PR open
+- `pull_request_review_comment` with body containing `@claude` on a same-repo PR — targeted review requests, bypasses the docs-only preflight filter
 
-Other event types (`issue_comment`, `issues`, `workflow_dispatch`) are not handled — they trigger the caller workflow but the reusable workflow's job-level `if:` filters them out.
+Other event types and `synchronize` actions trigger the caller workflow but are filtered out at the job-level `if:`.
 
-**Do NOT inline `anthropics/claude-code-action`.** A monthly drift scan will flag and open migration PRs for any repo that calls it directly.
+**Do NOT inline `anthropics/claude-code-action`.** All Claude PR review must go through this reusable workflow.
 
 ### `unit-tests.yml` — Unit tests for claude-tool-sdk consumers (npm/Node.js)
 
