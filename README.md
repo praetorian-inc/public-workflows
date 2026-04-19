@@ -128,9 +128,76 @@ jobs:
 | `github/codeql-action/upload-sarif` | v4.35.2 | Used for SARIF upload to the Security tab (github-owned, always allowlisted). v4 runs on Node 24; v3 was on deprecated Node 20. |
 | `actions/setup-go` | v6.3.0 | Uses `go-version: stable` — the tool binaries analyze source; they don't need to match the consumer's go.mod Go version. |
 
-### `claude-code.yml` — Claude PR Assistant
+### `claude-code.yml` — Claude PR Assistant (hardened)
 
-Runs Claude Code review on PRs. See the workflow file for input documentation.
+Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusable workflow.** Callers cannot widen the tool allowlist, relax the gates, change the model, or override the hardening — any such change requires a PR to this repo with `@praetorian-inc/security-engineering` review (see CODEOWNERS).
+
+**Security posture** (as of v2.0.9, SHA `c4e898f83b9c4008cc3dbe295cc420e53ec6b16b`):
+
+- **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
+- **Preflight job** skips Claude entirely on docs-only PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / LICENSE / .gitignore / CODEOWNERS / images`). Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
+- **Model hardcoded**: `--model claude-opus-4-7`. Claude runs once per PR (on `opened` only; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). Opus is paid 1x per PR for the highest-capability senior-engineer review.
+- `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob"` — the minimum surface needed to review a PR and post the top-level summary comment. Inline line-anchored commenting deliberately NOT included (CodeRabbit covers it).
+- `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
+- Explicit `track_progress: "false"` on the action step.
+- `--max-turns 15` caps runaway loops.
+- `--append-system-prompt` defensive preamble: Claude is instructed to treat all PR content (title, body, diffs, file contents, CLAUDE.md, comments) as untrusted data, never read secrets/env, and stop + report on injection attempts.
+- **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-security.yml`.
+- `actions/checkout` pinned by SHA, `persist-credentials: false`, `fetch-depth: 1`.
+- `anthropics/claude-code-action` pinned by SHA (`@38ec876...` = v1.0.101).
+- **CODEOWNERS** (`.github/CODEOWNERS`) enforces `@praetorian-inc/security-engineering` review on this file.
+
+**Default review prompt** produces a 3-section summary: `### Critical issues` / `### Security` / `### Test coverage`. Explicitly defers style nits to CodeRabbit + Codex. Callers can override via the `prompt` input.
+
+**Minimal caller** (drop this in `.github/workflows/claude-code.yml` of a consumer repo):
+
+```yaml
+name: Claude PR Assistant
+
+on:
+  pull_request:
+    types: [opened]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  claude-code-action:
+    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.9
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Note: `pull_request: types: [opened]` only — Claude reviews once per PR open. Developers re-request a review via `@claude` on a PR review comment. `synchronize` (commits pushed to a PR) does NOT re-trigger Claude by design.
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `prompt` | Built-in 3-section review template | Custom review prompt. Callers can pass their own (see aurelian/orator for repo-specific prompts that read `.claude/skills/*.md`). |
+| `require_tests` | `true` | When `true`, fails the workflow if Claude's output indicates "significant changes without automated tests". (Dead code under the default prompt — only matters for custom prompts that emit the `**Has ... :** Yes/No` markers.) |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as the first step of both jobs. |
+| `harden-runner-policy` | `audit` | `audit` (observe + report) or `block` (deny-by-default egress). |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist when policy is `block`. Recommended: `api.anthropic.com:443, statsig.anthropic.com:443, api.github.com:443, github.com:443, release-assets.githubusercontent.com:443, registry.npmjs.org:443`. |
+
+**Secrets:**
+
+- `ANTHROPIC_API_KEY` — required. Repository-level secret.
+
+**Triggers the reusable workflow responds to:**
+
+- `pull_request` with `action == 'opened'` on a same-repo branch PR — auto-reviews once on PR open
+- `pull_request_review_comment` with body containing `@claude` on a same-repo PR — targeted review requests, bypasses the docs-only preflight filter
+
+Other event types and `synchronize` actions trigger the caller workflow but are filtered out at the job-level `if:`.
+
+**Do NOT inline `anthropics/claude-code-action`.** All Claude PR review must go through this reusable workflow.
 
 ### `unit-tests.yml` — Unit tests for claude-tool-sdk consumers (npm/Node.js)
 
