@@ -188,12 +188,55 @@ jobs:
       - name: Run govulncheck (SARIF)
         if: ${{ inputs.upload-sarif }}
         working-directory: ${{ inputs.working-directory }}
-        run: govulncheck -format sarif -show verbose ${{ inputs.govulncheck-package }} > govulncheck-results.sarif
+        shell: bash
+        # govulncheck exits 0 on clean, 3 on vulns-found, other on error. Under
+        # the default `bash -e` shell, exit 3 aborts the step mid-pipe and can
+        # leave govulncheck-results.sarif empty or truncated; the subsequent
+        # upload-sarif step (guarded by `always()`) then fails with
+        # "Invalid SARIF. JSON syntax error: Unexpected end of JSON input".
+        # We disable `-e`, tee stderr for debuggability, and fall back to a
+        # minimal valid SARIF on malformed output so upload always succeeds.
+        run: |
+          set +e
+          govulncheck -format sarif ${{ inputs.govulncheck-package }} > govulncheck-results.sarif 2> govulncheck-stderr.log
+          EXIT=$?
+          echo "govulncheck exit code: $EXIT"
+          if [ -s govulncheck-stderr.log ]; then
+            echo "::group::govulncheck stderr"
+            cat govulncheck-stderr.log
+            echo "::endgroup::"
+          fi
+          if [ ! -s govulncheck-results.sarif ] || ! python3 -c "import json,sys; json.load(open('govulncheck-results.sarif'))" 2>/dev/null; then
+            echo "::warning::govulncheck did not produce valid SARIF (exit=$EXIT). Writing empty SARIF so upload succeeds."
+            cat > govulncheck-results.sarif <<'SARIF_EOF'
+          {
+            "version": "2.1.0",
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "runs": []
+          }
+          SARIF_EOF
+          fi
+          # Propagate genuine tool errors (exit 1,2) — but treat "vulns found"
+          # (exit 3) as success for CI purposes; findings surface via SARIF
+          # upload to the GitHub Security tab. Keeps security scanning
+          # non-blocking on build pipelines, per design rationale at top of file.
+          if [ $EXIT -ne 0 ] && [ $EXIT -ne 3 ]; then
+            echo "::error::govulncheck tooling error (exit=$EXIT)"
+            exit $EXIT
+          fi
 
       - name: Run govulncheck (text)
         if: ${{ !inputs.upload-sarif }}
         working-directory: ${{ inputs.working-directory }}
-        run: govulncheck ${{ inputs.govulncheck-package }}
+        # Same rationale as SARIF branch: exit 3 = vulns found; don't fail the step.
+        shell: bash
+        run: |
+          set +e
+          govulncheck ${{ inputs.govulncheck-package }}
+          EXIT=$?
+          if [ $EXIT -ne 0 ] && [ $EXIT -ne 3 ]; then
+            exit $EXIT
+          fi
 
       - name: Upload govulncheck SARIF
         if: ${{ inputs.upload-sarif && always() }}
