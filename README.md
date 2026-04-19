@@ -132,7 +132,7 @@ jobs:
 
 Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusable workflow.** Callers cannot widen the tool allowlist, relax the gates, change the model, or override the hardening — any such change requires a PR to this repo with `@praetorian-inc/security-engineering` review (see CODEOWNERS).
 
-**Security posture** (as of v2.0.9, SHA `c4e898f83b9c4008cc3dbe295cc420e53ec6b16b`):
+**Security posture** (as of v2.0.11):
 
 - **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
 - **Preflight job** skips Claude entirely on docs-only PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / LICENSE / .gitignore / CODEOWNERS / images`). Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
@@ -145,7 +145,10 @@ Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusabl
 - **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-security.yml`.
 - `actions/checkout` pinned by SHA, `persist-credentials: false`, `fetch-depth: 1`.
 - `anthropics/claude-code-action` pinned by SHA (`@38ec876...` = v1.0.101).
+- **Wall-clock ceiling**: `timeout-minutes: 5` on preflight, `15` on the claude-code-action job. `--max-turns 15` caps tool-call turns but not wall time; these ceilings bound a wedged network call, a stuck Opus response, or a prompt-injection-induced loop before it can sit on a runner for GitHub's 6-hour default.
 - **CODEOWNERS** (`.github/CODEOWNERS`) enforces `@praetorian-inc/security-engineering` review on this file.
+
+> ⚠️ **Do NOT enable `ACTIONS_STEP_DEBUG=true` on repos that call this reusable.** The upstream `claude-code-action` auto-enables `show_full_output` under debug logging, which can expose PR content, tool outputs, and the contents of the internal `execution_file` into Actions logs. On public repos those logs are world-readable; on private repos they're readable by anyone with repo read access. If you need to debug a Claude run, do it locally against a test repo, not by flipping debug on a production caller.
 
 **Default review prompt** produces a 3-section summary: `### Critical issues` / `### Security` / `### Test coverage`. Explicitly defers style nits to CodeRabbit + Codex. Callers can override via the `prompt` input.
 
@@ -166,7 +169,7 @@ permissions:
 
 jobs:
   claude-code-action:
-    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.9
+    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.11
     permissions:
       contents: read
       pull-requests: write
