@@ -108,23 +108,25 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `working-directory` | `.` | Working dir for multi-module repos |
-| `go-version-file` | `go.mod` | Path to go.mod (relative to `working-directory`), drives govulncheck's Go version |
 | `enable-gosec` | `true` | Run gosec SAST scanner |
+| `gosec-version` | `v2.22.11` | Pinned gosec version. Never use `latest` — floating `@latest` has historically broken consumers when new gosec releases require newer Go than the CI toolchain. |
 | `gosec-args` | `-no-fail -fmt sarif -out gosec-results.sarif ./...` | Arguments passed to gosec. Defaults to observe-only. Override with e.g. `-severity=high -fmt sarif -out gosec-results.sarif ./...` to enforce. |
 | `enable-govulncheck` | `true` | Run govulncheck against the module |
+| `govulncheck-version` | `v1.1.4` | Pinned govulncheck module version |
 | `govulncheck-package` | `./...` | Package selector for govulncheck |
 | `upload-sarif` | `true` | Upload SARIF findings to the GitHub Security tab. When `true`, **the caller MUST grant `security-events: write`**. Set `false` to run as CI-only checks without publishing to the Security tab. |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as first step of every job |
 | `harden-runner-policy` | `audit` | `audit` (observe) or `block` (deny-by-default egress) |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated allowlist for block mode |
 
-**Pinned tool versions** (SHA-locked in the workflow, bumped via PR):
+**Pinned tool versions** (overridable via inputs above):
 
-| Tool | Version | Why pinned |
+| Tool | Default pin | Notes |
 |---|---|---|
-| `securego/gosec` | v2.22.11 | Docker-based action — sidesteps host Go version requirements (later gosec builds require Go 1.25+) |
-| `golang/govulncheck-action` | v1.0.4 | Stable; uses its own `stable` Go internally |
-| `github/codeql-action/upload-sarif` | v3.35.2 | Current SARIF upload action |
+| `gosec` | v2.22.11 | Requires Go >= 1.24. Installed via `go install github.com/securego/gosec/v2/cmd/gosec@<version>` — the `securego/gosec` GitHub Action is not on the org allowlist, so we use a pinned `go install` instead. |
+| `govulncheck` | v1.1.4 | Requires Go >= 1.22. Installed via `go install golang.org/x/vuln/cmd/govulncheck@<version>`. |
+| `github/codeql-action/upload-sarif` | v3.35.2 | Used for SARIF upload to the Security tab (github-owned, always allowlisted). |
+| `actions/setup-go` | v6.3.0 | Uses `go-version: stable` — the tool binaries analyze source; they don't need to match the consumer's go.mod Go version. |
 
 ### `claude-code.yml` — Claude PR Assistant
 
