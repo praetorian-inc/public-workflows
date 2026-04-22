@@ -137,7 +137,7 @@ Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusabl
 
 - **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
 - **Preflight job** skips Claude entirely on docs-only PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / LICENSE / .gitignore / CODEOWNERS / images`). Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
-- **Model hardcoded**: `--model claude-opus-4-7`. Claude runs once per PR (on `opened` only; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). Opus is paid 1x per PR for the highest-capability senior-engineer review.
+- **Model hardcoded**: `--model claude-opus-4-7`. Claude runs once per PR (on `opened` or `ready_for_review`; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). `ready_for_review` covers PRs opened as drafts — without it, the `opened` event fires while `draft==true` (skipped) and the PR never gets a Claude review. Opus is paid 1x per PR for the highest-capability senior-engineer review.
 - `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob"` — the minimum surface needed to review a PR and post the top-level summary comment. Inline line-anchored commenting deliberately NOT included (CodeRabbit covers it).
 - `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
 - Explicit `track_progress: "false"` on the action step.
@@ -160,7 +160,7 @@ name: Claude PR Assistant
 
 on:
   pull_request:
-    types: [opened]
+    types: [opened, ready_for_review]
   pull_request_review_comment:
     types: [created]
 
@@ -178,7 +178,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-Note: `pull_request: types: [opened]` only — Claude reviews once per PR open. Developers re-request a review via `@claude` on a PR review comment. `synchronize` (commits pushed to a PR) does NOT re-trigger Claude by design.
+Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once per PR (on first open, or when a draft PR is marked ready). Developers re-request a review via `@claude` on a PR review comment. `synchronize` (commits pushed to a PR) does NOT re-trigger Claude by design.
 
 **Inputs** (all optional):
 
