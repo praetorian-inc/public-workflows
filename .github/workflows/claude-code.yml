@@ -87,7 +87,8 @@ jobs:
       !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       (
-        (github.event_name == 'pull_request' && github.event.action == 'opened')
+        (github.event_name == 'pull_request'
+          && (github.event.action == 'opened' || github.event.action == 'ready_for_review'))
         ||
         (github.event_name == 'pull_request_review_comment'
           && contains(github.event.comment.body, '@claude'))
@@ -176,15 +177,22 @@ jobs:
     #     org members as CONTRIBUTOR). Forks always have a different head.repo.
     #     Closes the "comment and control" attack path (CVSS 9.4, oddguan.com).
     #   - `synchronize` (new commits) is INTENTIONALLY EXCLUDED. Claude reviews only
-    #     on first open. CodeRabbit + Codex handle per-push feedback. Developers
-    #     can force re-review via `@claude` on a PR review comment.
+    #     on first open (or draft→ready conversion). CodeRabbit + Codex handle
+    #     per-push feedback. Developers can force re-review via `@claude` on a PR
+    #     review comment.
+    #   - `ready_for_review` (draft→ready conversion) IS included. Without it, PRs
+    #     opened as drafts never get a Claude review — the `opened` event fires
+    #     while draft==true (skipped), and `ready_for_review` was not in the allow
+    #     list. Callers must also list `ready_for_review` in their
+    #     on.pull_request.types for GitHub to deliver the event.
     if: |
       needs.preflight.outputs.has_code == 'true' &&
       github.event.pull_request.draft == false &&
       !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       (
-        (github.event_name == 'pull_request' && github.event.action == 'opened')
+        (github.event_name == 'pull_request'
+          && (github.event.action == 'opened' || github.event.action == 'ready_for_review'))
         ||
         (github.event_name == 'pull_request_review_comment'
           && contains(github.event.comment.body, '@claude'))
