@@ -18,3 +18,9 @@
 # Context: anthropics/claude-code-action#860 (track_progress silently widens allowlist),
 # Aikido PromptPwnd disclosure, tj-actions CVE-2025-30066.
 /.github/workflows/claude-code.yml          @praetorian-inc/security-engineering @nsportsman
+
+# Codex-code.yml runs OpenAI Codex in a read-only sandbox via openai/codex-action.
+# Same threat model as Claude: PR content is untrusted, sandbox and safety settings
+# are hardcoded, and the review job is permission-separated from the comment-posting
+# job. Any change requires Security Engineering review.
+/.github/workflows/codex-code.yml           @praetorian-inc/security-engineering @nsportsman
