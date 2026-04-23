@@ -203,6 +203,65 @@ Other event types and `synchronize` actions trigger the caller workflow but are 
 
 **Do NOT inline `anthropics/claude-code-action`.** All Claude PR review must go through this reusable workflow.
 
+### `gemini-code.yml` — Gemini PR Assistant (hardened)
+
+Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses an inline Python script (`google-genai` + `PyGithub`) for a single-shot review — no external action dependency.
+
+**Security posture** matches `claude-code.yml`:
+
+- **Same-repo-only gate**: Fork PRs blocked outright (`head.repo.full_name == github.repository`)
+- **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter
+- **Anti-injection prompt**: Gemini instructed to treat all PR content as untrusted data
+- **No write capabilities**: Script only reads diff and posts a comment — no file mutation, no git ops
+- **StepSecurity Harden-Runner** on every job (audit mode by default)
+- **SHA-pinned actions**: `actions/checkout`, `actions/setup-python`, `step-security/harden-runner`
+- **Wall-clock ceiling**: `timeout-minutes: 10` on the review job
+- **CODEOWNERS**: `@praetorian-inc/security-engineering` review required on any change
+
+**Minimal caller** (drop this in `.github/workflows/gemini-code.yml` of a consumer repo):
+
+```yaml
+name: Gemini PR Assistant
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: gemini-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gemini-review:
+    uses: praetorian-inc/public-workflows/.github/workflows/gemini-code.yml@<SHA>
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `prompt` | Built-in 3-section review template | Custom review prompt (diff appended automatically) |
+| `model` | `gemini-3.1-pro-preview` | Gemini model ID |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, pypi.org:443, files.pythonhosted.org:443` |
+
+**Secrets:**
+
+- `GEMINI_API_KEY` — required. Google AI Studio API key (org-level secret recommended).
+
+**Triggers:**
+
+- `pull_request` with `action == 'opened'` or `'ready_for_review'` — auto-reviews once on PR open
+- `pull_request_review_comment` with body containing `@gemini` — re-review on demand
+
 ### `unit-tests.yml` — Unit tests for claude-tool-sdk consumers (npm/Node.js)
 
 Callable workflow for repos that use the private `claude-tool-sdk` module. Generates a short-lived GitHub App token to fetch the private dependency, then runs `npm ci` + `npm test`.
