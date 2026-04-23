@@ -212,7 +212,7 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 - **Same-repo-only gate**: Fork PRs blocked outright (`head.repo.full_name == github.repository`)
 - **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter
 - **Anti-injection prompt**: Gemini instructed to treat all PR content as untrusted data
-- **No write capabilities**: Script only reads diff and posts a comment — no file mutation, no git ops
+- **No repository mutation**: Script reads diffs and posts a PR comment — no file edits, commits, or git operations
 - **StepSecurity Harden-Runner** on every job (audit mode by default)
 - **SHA-pinned actions**: `actions/checkout`, `actions/setup-python`, `step-security/harden-runner`
 - **Wall-clock ceiling**: `timeout-minutes: 10` on the review job

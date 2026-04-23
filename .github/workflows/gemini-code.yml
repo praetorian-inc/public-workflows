@@ -163,7 +163,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install --quiet google-genai PyGithub
+        run: pip install --quiet 'google-genai==1.73.1' 'PyGithub==2.9.1'
 
       - name: Run Gemini PR Review
         env:
@@ -185,7 +185,7 @@ jobs:
           MAX_DIFF_CHARS = 100_000
           MAX_RETRIES = 3
           SKIP_PATTERNS = {".md", ".markdown", ".rst", ".txt", ".png", ".jpg", ".jpeg",
-                          ".svg", ".gif", ".webp", ".ico", ".lock"}
+                          ".svg", ".gif", ".webp", ".ico"}
 
           def main():
               gemini_key = os.environ["GEMINI_API_KEY"]
@@ -208,9 +208,14 @@ jobs:
                       skipped_files += 1
                       continue
                   if not f.patch:
+                      skipped_files += 1
+                      diff_parts.append(f"## {f.filename} ({f.status}, +{f.additions}/-{f.deletions})\n[PATCH UNAVAILABLE — large or binary file omitted by GitHub API]")
                       continue
                   entry = f"## {f.filename} ({f.status}, +{f.additions}/-{f.deletions})\n{f.patch}"
                   if total_chars + len(entry) > MAX_DIFF_CHARS:
+                      clipped = entry[:MAX_DIFF_CHARS - total_chars]
+                      if clipped.strip():
+                          diff_parts.append(clipped + "\n\n[TRUNCATED — file clipped at token limit]")
                       diff_parts.append("\n\n[TRUNCATED — remaining files omitted to stay within token limits]")
                       break
                   diff_parts.append(entry)
@@ -279,7 +284,9 @@ jobs:
 
               try:
                   review = json.loads(response.text)
-              except (json.JSONDecodeError, AttributeError):
+                  if not isinstance(review, dict):
+                      raise ValueError("Expected JSON object")
+              except (json.JSONDecodeError, AttributeError, ValueError):
                   review = {
                       "summary": response.text[:500] if response and response.text else "Unable to parse review",
                       "critical_issues": [],
