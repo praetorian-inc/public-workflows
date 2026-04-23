@@ -39,10 +39,10 @@ on:
           - If nothing significant in any section: "No critical issues — LGTM pending human review."
 
       model:
-        description: "Codex model ID (codex-mini is recommended for cost-efficient reviews)"
+        description: "Codex model ID. gpt-5.4-mini is the recommended default for cost-efficient reviews. Use gpt-5.4 for deeper analysis or gpt-5.3-codex for complex multi-file reviews."
         required: false
         type: string
-        default: "codex-mini"
+        default: "gpt-5.4-mini"
 
       effort:
         description: "Reasoning effort level (minimal, low, medium, high)"
