@@ -9,7 +9,7 @@ name: "CLAUDE.md Drift Detection (Callable)"
 #   name: CLAUDE.md Drift Detection
 #   on:
 #     pull_request:
-#       types: [opened, synchronize]
+#       types: [opened, synchronize, reopened, ready_for_review]
 #   concurrency:
 #     group: claude-drift-${{ github.event.pull_request.number }}
 #     cancel-in-progress: true
