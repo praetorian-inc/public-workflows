@@ -217,7 +217,7 @@ jobs:
                   total_chars += len(entry)
 
               if not diff_parts:
-                  pr.create_issue_comment("## Gemini Review\n\nNo reviewable code changes detected in this PR.\n\n---\n*Reviewed by Gemini 3.1 Pro*")
+                  pr.create_issue_comment(f"## Gemini Review\n\nNo reviewable code changes detected in this PR.\n\n---\n*Reviewed by Gemini ({model_id})*")
                   return
 
               diff_text = "\n\n".join(diff_parts)
@@ -273,7 +273,7 @@ jobs:
                               "⚠️ Gemini review failed after 3 attempts. "
                               "A human reviewer should review this PR.\n\n"
                               f"Error: `{type(e).__name__}`\n\n"
-                              "---\n*Reviewed by Gemini 3.1 Pro*"
+                              f"---\n*Reviewed by Gemini ({model_id})*"
                           )
                           sys.exit(1)
 
@@ -287,11 +287,11 @@ jobs:
                       "suggestions": [],
                   }
 
-              comment = format_review(review, skipped_files)
+              comment = format_review(review, skipped_files, model_id)
               pr.create_issue_comment(comment)
               print(f"✅ Gemini review posted to PR #{pr_number}")
 
-          def format_review(review, skipped_files):
+          def format_review(review, skipped_files, model_id):
               lines = ["## Gemini Review", ""]
 
               summary = review.get("summary", "")
@@ -333,7 +333,7 @@ jobs:
               lines.append("")
 
               lines.append("---")
-              note = "*Reviewed by Gemini 3.1 Pro*"
+              note = f"*Reviewed by Gemini ({model_id})*"
               if skipped_files > 0:
                   note += f" · {skipped_files} non-code file(s) skipped"
               lines.append(note)
