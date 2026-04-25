@@ -266,6 +266,32 @@ jobs:
 
 Callable workflow for repos that use the private `claude-tool-sdk` module. Generates a short-lived GitHub App token to fetch the private dependency, then runs `npm ci` + `npm test`.
 
+**Caller example:**
+
+```yaml
+jobs:
+  test:
+    uses: praetorian-inc/public-workflows/.github/workflows/unit-tests.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+    secrets:
+      PLUGIN_CI_APP_ID: ${{ secrets.PLUGIN_CI_APP_ID }}
+      PLUGIN_CI_PRIVATE_KEY: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+```
+
+| Input | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enable-harden-runner` | boolean | `true` | Enable StepSecurity Harden-Runner |
+| `harden-runner-policy` | string | `"audit"` | Egress policy: `audit` or `block` |
+| `harden-runner-allowed-endpoints` | string | `""` | Newline-separated allowed endpoints for block mode |
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `PLUGIN_CI_APP_ID` | yes | GitHub App ID for private dependency access |
+| `PLUGIN_CI_PRIVATE_KEY` | yes | GitHub App private key |
+
+**Security posture:** Workflow-level `permissions: contents: read` ceiling. GitHub App token passed via `env:` (not inline `${{ }}`). Harden-Runner enabled by default. Runner pinned to `ubuntu-24.04`.
+
 ### `version-{bump,check,set}.yml` — Claude plugin version management
 
 Three workflows that manage `.claude-plugin/plugin.json` version lifecycle on PRs.
