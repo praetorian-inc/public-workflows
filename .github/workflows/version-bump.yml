@@ -2,6 +2,25 @@ name: Version Bump (Callable)
 
 on:
   workflow_call:
+    inputs:
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        required: false
+        type: string
+        default: ""
+
     secrets:
       VERSION_BUMPER_APP_ID:
         description: "GitHub App ID for praetorian-ci-version-bumper"
@@ -10,9 +29,12 @@ on:
         description: "GitHub App private key for praetorian-ci-version-bumper"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   version-bump:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     # Only run on PR open or when 'bump' label is added
     if: >-
@@ -23,6 +45,13 @@ jobs:
       contents: write
       pull-requests: write
     steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
       - name: Generate app token
         id: app-token
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
@@ -30,7 +59,7 @@ jobs:
           app-id: ${{ secrets.VERSION_BUMPER_APP_ID }}
           private-key: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 0
@@ -38,8 +67,9 @@ jobs:
 
       - name: Determine bump level from branch name
         id: bump
+        env:
+          BRANCH: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
           if [[ "$BRANCH" == release/* ]]; then
             BUMP="major"
           elif [[ "$BRANCH" == feat/* || "$BRANCH" == feature/* ]]; then
@@ -75,16 +105,20 @@ jobs:
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push to PR branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          NEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .claude-plugin/plugin.json
           git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
-          git push origin HEAD:${{ github.head_ref }}
+          git commit -m "chore: bump version to $NEW_VERSION"
+          git push origin "HEAD:$HEAD_REF"
 
       - name: Remove bump label
         if: github.event.action == 'labeled'
-        run: gh pr edit ${{ github.event.number }} --remove-label bump
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: gh pr edit "$PR_NUMBER" --remove-label bump
