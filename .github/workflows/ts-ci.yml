@@ -1,4 +1,4 @@
-name: TypeScript Verify (Callable)
+name: TypeScript CI (Callable)
 # Reusable workflow for TypeScript/Node.js repositories in the praetorian-inc org.
 # Provides consistent install + typecheck + lint + test + Harden-Runner across
 # all Claude plugin repos and other TypeScript projects.
@@ -13,7 +13,7 @@ name: TypeScript Verify (Callable)
 #     contents: read
 #   jobs:
 #     ci:
-#       uses: praetorian-inc/public-workflows/.github/workflows/ts-verify.yml@<SHA>  # vX.Y.Z
+#       uses: praetorian-inc/public-workflows/.github/workflows/ts-ci.yml@<SHA>  # vX.Y.Z
 #       permissions:
 #         contents: read
 #
@@ -21,7 +21,7 @@ name: TypeScript Verify (Callable)
 #
 #   jobs:
 #     ci:
-#       uses: praetorian-inc/public-workflows/.github/workflows/ts-verify.yml@<SHA>  # vX.Y.Z
+#       uses: praetorian-inc/public-workflows/.github/workflows/ts-ci.yml@<SHA>  # vX.Y.Z
 #       permissions:
 #         contents: read
 #       with:

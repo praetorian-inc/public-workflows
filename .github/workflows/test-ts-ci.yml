@@ -1,36 +1,36 @@
-name: "Test: ts-verify.yml"
+name: "Test: ts-ci.yml"
 
 on:
   pull_request:
     branches: [main]
     paths:
-      - ".github/workflows/ts-verify.yml"
-      - ".github/workflows/test-ts-verify.yml"
+      - ".github/workflows/ts-ci.yml"
+      - ".github/workflows/test-ts-ci.yml"
       - "_test-fixtures/ts-minimal/**"
   push:
     branches: [main]
     paths:
-      - ".github/workflows/ts-verify.yml"
-      - ".github/workflows/test-ts-verify.yml"
+      - ".github/workflows/ts-ci.yml"
+      - ".github/workflows/test-ts-ci.yml"
       - "_test-fixtures/ts-minimal/**"
 
 permissions:
   contents: read
 
 jobs:
-  call-ts-verify-defaults:
-    name: Call ts-verify (defaults)
+  call-ts-ci-defaults:
+    name: Call ts-ci (defaults)
     timeout-minutes: 20
-    uses: ./.github/workflows/ts-verify.yml
+    uses: ./.github/workflows/ts-ci.yml
     permissions:
       contents: read
     with:
       working-directory: _test-fixtures/ts-minimal
 
-  call-ts-verify-test-only:
-    name: Call ts-verify (test only, no lint/typecheck)
+  call-ts-ci-test-only:
+    name: Call ts-ci (test only, no lint/typecheck)
     timeout-minutes: 20
-    uses: ./.github/workflows/ts-verify.yml
+    uses: ./.github/workflows/ts-ci.yml
     permissions:
       contents: read
     with:
