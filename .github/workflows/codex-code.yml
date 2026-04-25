@@ -137,7 +137,7 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.github/|^\.claude-plugin/'
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.claude-plugin/'
 
           if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
@@ -147,7 +147,7 @@ jobs:
             echo "⊘ Docs/config-only PR — Codex review will be skipped."
             gh pr comment ${{ github.event.pull_request.number }} \
               --repo ${{ github.repository }} \
-              --body "Codex review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@codex\` on a review comment to force a review."
+              --body "Codex review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@codex\` on a review comment to force a review."
           fi
 
   # Codex review: run the Codex CLI in a read-only sandbox via openai/codex-action.

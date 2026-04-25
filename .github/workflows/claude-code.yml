@@ -73,9 +73,10 @@ jobs:
   #
   # The skip patterns cover: markdown (.md / .markdown / .rst / .txt), all of /docs,
   # license-like files (LICENSE, .gitignore, CODEOWNERS), images
-  # (.png / .jpg / .jpeg / .svg / .gif / .webp / .ico), CI config (.github/), and
-  # plugin metadata (.claude-plugin/). A PR that touches ANY file NOT matching these
-  # patterns is treated as a code PR and Claude runs.
+  # (.png / .jpg / .jpeg / .svg / .gif / .webp / .ico), and plugin metadata
+  # (.claude-plugin/). A PR that touches ANY file NOT matching these patterns is
+  # treated as a code PR and Claude runs. Note: .github/ is intentionally NOT
+  # skipped — CI config, permissions, and secrets passthrough deserve AI review.
   #
   # If a developer genuinely wants Claude review on a docs-only PR, they can post
   # an `@claude` PR review comment to force one — the review_comment trigger is
@@ -143,7 +144,7 @@ jobs:
 
           # SKIP_RE matches docs / licenses / images / config-like files.
           # If ALL changed files match, we have a non-code PR.
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.github/|^\.claude-plugin/'
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.claude-plugin/'
 
           if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
@@ -156,7 +157,7 @@ jobs:
             # to has_code=true above), so we always post the skip comment here.
             gh pr comment ${{ github.event.pull_request.number }} \
               --repo ${{ github.repository }} \
-              --body "Claude review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@claude\` on a review comment to force a review."
+              --body "Claude review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@claude\` on a review comment to force a review."
           fi
 
   claude-code-action:
