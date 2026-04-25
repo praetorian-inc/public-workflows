@@ -208,8 +208,17 @@ jobs:
         env:
           PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
+          set -eu
+          # Use a one-shot auth header via git -c (memory-only, NOT written to
+          # .git/config) so the fetch authenticates against private repos while
+          # persist-credentials: false is preserved. By the time the Codex
+          # sandbox starts in the next step, this token is gone from both disk
+          # and process memory.
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=$AUTH" \
+            fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
 
       - name: Run Codex
         id: run_codex
