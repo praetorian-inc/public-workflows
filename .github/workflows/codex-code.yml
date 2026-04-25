@@ -73,6 +73,9 @@ on:
         description: "OpenAI API key for Codex (pay-per-token billing)"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   # Preflight: skip the Codex job entirely if the PR only touches docs / config /
   # images. Same logic as the Claude and Gemini PR Assistants — saves API cost on
@@ -96,7 +99,7 @@ jobs:
         (github.event_name == 'pull_request_review_comment'
           && contains(github.event.comment.body, '@codex'))
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -106,7 +109,7 @@ jobs:
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
@@ -115,6 +118,9 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
 
@@ -122,7 +128,7 @@ jobs:
           # regardless of file types. The job's own if: already required
           # contains(comment.body, '@codex'), so by the time preflight runs on a
           # review_comment event, we know the reviewer explicitly asked for it.
-          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
+          if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
             echo "🔔 @codex mention on a review comment — bypassing docs-only filter."
             exit 0
@@ -130,7 +136,7 @@ jobs:
 
           # Paginated file list (handles PRs >100 files per cli/cli#5368).
           FILES=$(gh api \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            "repos/$REPO/pulls/$PR_NUMBER/files" \
             --paginate --jq '.[].filename')
 
           echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
@@ -145,8 +151,8 @@ jobs:
           else
             echo "has_code=false" >> "$GITHUB_OUTPUT"
             echo "⊘ Docs/config-only PR — Codex review will be skipped."
-            gh pr comment ${{ github.event.pull_request.number }} \
-              --repo ${{ github.repository }} \
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
               --body "Codex review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@codex\` on a review comment to force a review."
           fi
 
@@ -175,7 +181,7 @@ jobs:
           && contains(github.event.comment.body, '@codex'))
       )
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Wall-clock ceiling. codex-mini reviews complete in 2-5 minutes typically.
     # 10 minutes is ~3x the p99. Tight enough to catch a stuck run without
@@ -193,13 +199,13 @@ jobs:
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
 
       - name: Checkout repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           persist-credentials: false
@@ -251,7 +257,7 @@ jobs:
   post-feedback:
     needs: codex-review
     if: needs.codex-review.outputs.final_message != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       pull-requests: write
@@ -259,7 +265,7 @@ jobs:
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
