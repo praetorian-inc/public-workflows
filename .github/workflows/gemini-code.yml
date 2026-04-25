@@ -109,7 +109,7 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/'
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.github/|^\.claude-plugin/'
 
           if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
@@ -119,7 +119,7 @@ jobs:
             echo "⊘ Docs/config-only PR — Gemini review will be skipped."
             gh pr comment ${{ github.event.pull_request.number }} \
               --repo ${{ github.repository }} \
-              --body "Gemini review skipped — non-code PR (only changed files matching \`docs/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@gemini\` on a review comment to force a review."
+              --body "Gemini review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@gemini\` on a review comment to force a review."
           fi
 
   gemini-review:
