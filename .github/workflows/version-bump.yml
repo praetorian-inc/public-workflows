@@ -51,6 +51,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
 
       - name: Generate app token
         id: app-token

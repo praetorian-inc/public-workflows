@@ -160,6 +160,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
 
       - name: Run external-contrib-action
         uses: praetorian-inc/external-contrib-action@08e2bdbda0ab914fa00503b31a791a93213dc789  # v3.0.0
