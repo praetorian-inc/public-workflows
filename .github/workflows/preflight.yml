@@ -1,0 +1,138 @@
+name: Preflight (Callable)
+# Shared preflight for AI reviewer workflows (claude-code, codex-code,
+# gemini-code). Checks whether a PR has code changes worth reviewing.
+# Saves ~$1-2 per docs-only PR (LLM API cost) at ~30s of runner time.
+#
+# Consolidates the identical preflight logic that was previously inlined
+# in each AI reviewer workflow. One place to maintain the SKIP_RE pattern,
+# the file-change detection logic, and the skip-comment template.
+#
+# NOT intended for direct use by consumer repos — consumer repos call
+# the AI reviewer workflows (claude-code.yml, codex-code.yml,
+# gemini-code.yml), which call this internally.
+
+on:
+  workflow_call:
+    inputs:
+      mention_keyword:
+        description: "The @mention keyword that forces review (e.g., @claude, @codex, @gemini)."
+        required: true
+        type: string
+
+      reviewer_name:
+        description: "Human-readable reviewer name for skip comments (e.g., Claude, Codex, Gemini)."
+        required: true
+        type: string
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode."
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      has_code:
+        description: "Whether the PR contains code changes worth reviewing ('true' or 'false')."
+        value: ${{ jobs.check.outputs.has_code }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Gate: don't spawn preflight for events we wouldn't review anyway
+    # (drafts, bots, external forks, wrong event type).
+    #
+    # Design notes:
+    #   - head.repo.full_name == github.repository: strictly stronger than
+    #     author_association (which is unreliable for public repos — GitHub
+    #     reports org members as CONTRIBUTOR). Forks always have a different
+    #     head.repo. Closes the "comment and control" attack path.
+    #   - `synchronize` (new commits) is INTENTIONALLY EXCLUDED. AI reviewers
+    #     run only on first open (or draft→ready conversion).
+    #   - `ready_for_review` IS included so PRs opened as drafts get reviewed
+    #     when marked ready.
+    if: |
+      github.event.pull_request.draft == false &&
+      !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        (github.event_name == 'pull_request'
+          && (github.event.action == 'opened' || github.event.action == 'ready_for_review'))
+        ||
+        (github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, inputs.mention_keyword))
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      has_code: ${{ steps.check.outputs.has_code }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Check for code changes in the PR
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEWER_NAME: ${{ inputs.reviewer_name }}
+          MENTION_KEYWORD: ${{ inputs.mention_keyword }}
+        run: |
+          set -eu
+
+          # @mention on a review comment always forces the reviewer to run,
+          # regardless of file types. The job's own if: already required
+          # contains(comment.body, mention_keyword), so by the time we reach
+          # here on a review_comment event, the reviewer explicitly asked for it.
+          if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "🔔 $MENTION_KEYWORD mention on a review comment — bypassing docs-only filter."
+            exit 0
+          fi
+
+          # Use the paginated pulls/.../files REST endpoint (not gh pr view
+          # --json files, which is capped at 100 files per cli/cli#5368).
+          FILES=$(gh api \
+            "repos/$REPO/pulls/$PR_NUMBER/files" \
+            --paginate --jq '.[].filename')
+
+          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
+          echo "$FILES" | sed 's/^/  /'
+          echo
+
+          # SKIP_RE: docs, licenses, images, CI config, plugin metadata.
+          # If ALL changed files match, this is a non-code PR.
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.github/|^\.claude-plugin/'
+
+          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Code changes detected — $REVIEWER_NAME will review this PR."
+          else
+            echo "has_code=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ Docs/config-only PR — $REVIEWER_NAME review will be skipped."
+            gh pr comment "$PR_NUMBER" \
+              --repo "$REPO" \
+              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
+          fi
