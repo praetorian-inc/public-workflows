@@ -65,99 +65,23 @@ on:
         description: "Anthropic API key for Claude"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
-  # Preflight: skip the Claude job entirely if the PR only touches docs / config /
-  # images. Saves ~$1-2 per docs-only PR (Opus run cost) at the price of ~30 seconds
-  # of GitHub-runner time. Callers don't need to configure anything — this is a
-  # central "what counts as code" policy.
-  #
-  # The skip patterns cover: markdown (.md / .markdown / .rst / .txt), all of /docs,
-  # license-like files (LICENSE, .gitignore, CODEOWNERS), images
-  # (.png / .jpg / .jpeg / .svg / .gif / .webp / .ico), CI config (.github/), and
-  # plugin metadata (.claude-plugin/). A PR that touches ANY file NOT matching these
-  # patterns is treated as a code PR and Claude runs.
-  #
-  # If a developer genuinely wants Claude review on a docs-only PR, they can post
-  # an `@claude` PR review comment to force one — the review_comment trigger is
-  # not path-filtered.
+  # Preflight: shared reusable that skips the review job on docs-only PRs.
+  # See preflight.yml for the full logic (SKIP_RE, paginated file list, skip comment).
   preflight:
-    # Same boundary checks as claude-code-action — don't spawn preflight for events
-    # we wouldn't review anyway (drafts, bots, external forks, wrong event type).
-    if: |
-      github.event.pull_request.draft == false &&
-      !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (
-        (github.event_name == 'pull_request'
-          && (github.event.action == 'opened' || github.event.action == 'ready_for_review'))
-        ||
-        (github.event_name == 'pull_request_review_comment'
-          && contains(github.event.comment.body, '@claude'))
-      )
-    runs-on: ubuntu-latest
-    # Wall-clock ceiling. Preflight is a small gh-api + grep step; 5 min is
-    # >20x the p99. Cap blocks a runaway shell loop or a stuck gh-api retry
-    # from sitting on the runner for the 6-hour GitHub default.
-    timeout-minutes: 5
+    uses: ./.github/workflows/preflight.yml
     permissions:
       contents: read
-      pull-requests: write  # needed to post the "skipped — non-code PR" status comment
-    outputs:
-      has_code: ${{ steps.check.outputs.has_code }}
-    steps:
-      - name: Harden Runner
-        if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
-        with:
-          egress-policy: ${{ inputs.harden-runner-policy }}
-          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
-
-      - name: Check for code changes in the PR
-        id: check
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -eu
-
-          # Override path: `@claude` mention on a review comment always forces Claude
-          # to run, regardless of file types. The job's own if: (line ~82) already
-          # required contains(comment.body, '@claude'), so by the time preflight runs
-          # on a review_comment event, we know the reviewer explicitly asked for it.
-          # Respecting that override is the documented escape hatch for docs-only PRs.
-          if [ "${{ github.event_name }}" = "pull_request_review_comment" ]; then
-            echo "has_code=true" >> "$GITHUB_OUTPUT"
-            echo "🔔 @claude mention on a review comment — bypassing docs-only filter."
-            exit 0
-          fi
-
-          # Use the paginated `pulls/.../files` REST endpoint (not `gh pr view --json files`,
-          # which is capped at 100 files per cli/cli#5368 and can misclassify large PRs
-          # where code files appear after the first 100). --paginate iterates all pages.
-          FILES=$(gh api \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --paginate --jq '.[].filename')
-
-          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
-          echo "$FILES" | sed 's/^/  /'
-          echo
-
-          # SKIP_RE matches docs / licenses / images / config-like files.
-          # If ALL changed files match, we have a non-code PR.
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.github/|^\.claude-plugin/'
-
-          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
-            echo "has_code=true" >> "$GITHUB_OUTPUT"
-            echo "✓ Code changes detected — Claude will review this PR."
-          else
-            echo "has_code=false" >> "$GITHUB_OUTPUT"
-            echo "⊘ Docs/config-only PR — Claude review will be skipped."
-            # Post a visible status comment so reviewers know why Claude isn't running.
-            # Only pull_request events reach this branch (review_comment short-circuits
-            # to has_code=true above), so we always post the skip comment here.
-            gh pr comment ${{ github.event.pull_request.number }} \
-              --repo ${{ github.repository }} \
-              --body "Claude review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`@claude\` on a review comment to force a review."
-          fi
+      pull-requests: write
+    with:
+      mention_keyword: "@claude"
+      reviewer_name: "Claude"
+      enable-harden-runner: ${{ inputs.enable-harden-runner }}
+      harden-runner-policy: ${{ inputs.harden-runner-policy }}
+      harden-runner-allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
 
   claude-code-action:
     needs: preflight
@@ -199,7 +123,7 @@ jobs:
           && contains(github.event.comment.body, '@claude'))
       )
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     # Wall-clock ceiling on the Claude review job. `--max-turns 15` caps
     # the number of tool-call turns, but NOT wall time (a long-running
@@ -217,13 +141,13 @@ jobs:
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
 
       - name: Checkout repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 1
           persist-credentials: false
