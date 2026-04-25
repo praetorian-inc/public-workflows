@@ -124,7 +124,7 @@ jobs:
 
           # SKIP_RE: docs, licenses, images, CI config, plugin metadata.
           # If ALL changed files match, this is a non-code PR.
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^CODEOWNERS$|^docs/|^\.github/|^\.claude-plugin/'
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^docs/|^\.github/|^\.claude-plugin/'
 
           if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
