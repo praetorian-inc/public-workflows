@@ -1,7 +1,7 @@
-name: Test go-security.yml (self-test)
-# Self-test harness for the go-security.yml reusable workflow.
-# On every PR that touches go-security.yml or the test fixture, this workflow
-# invokes go-security.yml locally against _test-fixtures/go-minimal and
+name: Test go-sec.yml (self-test)
+# Self-test harness for the go-sec.yml reusable workflow.
+# On every PR that touches go-sec.yml or the test fixture, this workflow
+# invokes go-sec.yml locally against _test-fixtures/go-minimal and
 # confirms gosec + govulncheck paths run. This catches regressions before
 # consumers pull a new SHA.
 #
@@ -13,8 +13,8 @@ name: Test go-security.yml (self-test)
 on:
   pull_request:
     paths:
-      - '.github/workflows/go-security.yml'
-      - '.github/workflows/test-go-security.yml'
+      - '.github/workflows/go-sec.yml'
+      - '.github/workflows/test-go-sec.yml'
       - '_test-fixtures/go-minimal/**'
   workflow_dispatch:
 
@@ -22,19 +22,18 @@ permissions:
   contents: read
 
 jobs:
-  call-go-security-defaults:
-    name: Call go-security (defaults, SARIF off)
-    # Local reference — uses the workflow from THIS commit (caller and callee in same repo).
-    uses: ./.github/workflows/go-security.yml
+  call-go-sec-defaults:
+    name: Call go-sec (defaults, SARIF off)
+    uses: ./.github/workflows/go-sec.yml
     permissions:
       contents: read
     with:
       working-directory: _test-fixtures/go-minimal
       upload-sarif: false
 
-  call-go-security-gosec-only:
-    name: Call go-security (gosec only)
-    uses: ./.github/workflows/go-security.yml
+  call-go-sec-gosec-only:
+    name: Call go-sec (gosec only)
+    uses: ./.github/workflows/go-sec.yml
     permissions:
       contents: read
     with:
@@ -42,9 +41,9 @@ jobs:
       enable-govulncheck: false
       upload-sarif: false
 
-  call-go-security-govulncheck-only:
-    name: Call go-security (govulncheck only)
-    uses: ./.github/workflows/go-security.yml
+  call-go-sec-govulncheck-only:
+    name: Call go-sec (govulncheck only)
+    uses: ./.github/workflows/go-sec.yml
     permissions:
       contents: read
     with:

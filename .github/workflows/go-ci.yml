@@ -137,8 +137,61 @@ permissions:
   contents: read
 
 jobs:
+  # Preflight: skip CI entirely if the PR has no Go-relevant file changes.
+  # Always runs on push-to-main, schedule, and workflow_dispatch (non-PR events).
+  # Saves 3-5 min of runner time on docs/config-only PRs. Skipped jobs count
+  # as passing for required status checks (unlike paths: filters which leave
+  # checks stuck "Pending").
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      has_go: ${{ steps.check.outputs.has_go }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Check for Go changes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+
+          # Non-PR events (push to main, schedule, workflow_dispatch) always run.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Non-PR event (${{ github.event_name }}) — Go CI will run."
+            exit 0
+          fi
+
+          FILES=$(gh api \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename')
+
+          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
+          echo "$FILES" | sed 's/^/  /'
+          echo
+
+          GO_RE='\.(go|mod|sum)$|^\.golangci|^Makefile$'
+          if echo "$FILES" | grep -E "$GO_RE" | grep -q .; then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Go changes detected — CI will run."
+          else
+            echo "has_go=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ No Go changes — CI will be skipped."
+          fi
+
   modcheck:
     name: Module integrity
+    needs: preflight
+    if: needs.preflight.outputs.has_go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -175,7 +228,8 @@ jobs:
 
   lint:
     name: Lint
-    if: ${{ inputs.enable-lint }}
+    needs: preflight
+    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -208,7 +262,8 @@ jobs:
 
   test:
     name: Test
-    if: ${{ inputs.enable-test }}
+    needs: preflight
+    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -249,7 +304,8 @@ jobs:
 
   build:
     name: Build
-    if: ${{ inputs.enable-build && inputs.build-cmd-path != '' }}
+    needs: [preflight, test]
+    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-build && inputs.build-cmd-path != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

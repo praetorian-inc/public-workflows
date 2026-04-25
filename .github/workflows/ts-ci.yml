@@ -118,8 +118,58 @@ permissions:
   contents: read
 
 jobs:
+  # Preflight: skip CI entirely if the PR has no TypeScript/JS-relevant changes.
+  # Always runs on push-to-main, schedule, and workflow_dispatch.
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      has_ts: ${{ steps.check.outputs.has_ts }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Check for TypeScript/JS changes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+
+          # Non-PR events always run.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "has_ts=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Non-PR event (${{ github.event_name }}) — TS CI will run."
+            exit 0
+          fi
+
+          FILES=$(gh api \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename')
+
+          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
+          echo "$FILES" | sed 's/^/  /'
+          echo
+
+          TS_RE='\.(tsx|ts|jsx|js|mjs|cjs)$|^package\.json$|^package-lock\.json$|^tsconfig|^vitest\.config|^\.eslintrc|^eslint\.config'
+          if echo "$FILES" | grep -E "$TS_RE" | grep -q .; then
+            echo "has_ts=true" >> "$GITHUB_OUTPUT"
+            echo "✓ TypeScript/JS changes detected — CI will run."
+          else
+            echo "has_ts=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ No TypeScript/JS changes — CI will be skipped."
+          fi
+
   install:
     name: Install & cache
+    needs: preflight
+    if: needs.preflight.outputs.has_ts == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -180,8 +230,8 @@ jobs:
 
   typecheck:
     name: Type check
-    needs: install
-    if: ${{ inputs.enable-typecheck }}
+    needs: [preflight, install]
+    if: needs.preflight.outputs.has_ts == 'true' && inputs.enable-typecheck
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -223,8 +273,8 @@ jobs:
 
   lint:
     name: Lint
-    needs: install
-    if: ${{ inputs.enable-lint }}
+    needs: [preflight, install]
+    if: needs.preflight.outputs.has_ts == 'true' && inputs.enable-lint
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -266,8 +316,8 @@ jobs:
 
   test:
     name: Test
-    needs: install
-    if: ${{ inputs.enable-test }}
+    needs: [preflight, install]
+    if: needs.preflight.outputs.has_ts == 'true' && inputs.enable-test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
