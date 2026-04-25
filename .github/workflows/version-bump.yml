@@ -38,8 +38,9 @@ jobs:
 
       - name: Determine bump level from branch name
         id: bump
+        env:
+          BRANCH: ${{ github.head_ref }}
         run: |
-          BRANCH="${{ github.head_ref }}"
           if [[ "$BRANCH" == release/* ]]; then
             BUMP="major"
           elif [[ "$BRANCH" == feat/* || "$BRANCH" == feature/* ]]; then
@@ -75,16 +76,20 @@ jobs:
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push to PR branch
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          NEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .claude-plugin/plugin.json
           git diff --cached --quiet && echo "No changes to commit" && exit 0
-          git commit -m "chore: bump version to ${{ steps.version.outputs.version }}"
-          git push origin HEAD:${{ github.head_ref }}
+          git commit -m "chore: bump version to $NEW_VERSION"
+          git push origin "HEAD:$HEAD_REF"
 
       - name: Remove bump label
         if: github.event.action == 'labeled'
-        run: gh pr edit ${{ github.event.number }} --remove-label bump
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: gh pr edit "$PR_NUMBER" --remove-label bump
