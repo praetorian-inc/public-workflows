@@ -89,6 +89,7 @@ jobs:
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
 
       - name: Check for code changes in the PR
         id: check
