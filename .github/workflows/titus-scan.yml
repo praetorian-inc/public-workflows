@@ -1,0 +1,235 @@
+name: Titus Secrets Scan (Callable)
+# Reusable workflow that runs Titus (praetorian-inc/titus) against the
+# caller's repository to detect leaked secrets, credentials, and API keys.
+# Language-agnostic — works on Go, TypeScript, Python, YAML, or any repo.
+#
+# Access: invocable from any repo in the praetorian-inc org
+# (Settings -> Actions -> General -> Access -> Accessible from repositories
+# in the 'praetorian-inc' organization).
+#
+# Caller example (.github/workflows/secrets-scan.yml):
+#
+#   name: Secrets Scan
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#     schedule:
+#       - cron: '0 7 * * 1'  # weekly baseline
+#     workflow_dispatch: {}
+#   permissions:
+#     contents: read
+#   jobs:
+#     scan:
+#       uses: praetorian-inc/public-workflows/.github/workflows/titus-scan.yml@<SHA>
+#       permissions:
+#         contents: read
+#         security-events: write
+#         actions: read
+#       secrets: inherit
+#
+# Design rationale: Titus lives in its own reusable (separate from go-sec.yml)
+# because (1) it's language-agnostic (not Go-specific), (2) secrets scanning
+# applies to every repo in the org, and (3) independent blast radius — a
+# broken secrets scanner should not block builds or security SAST scans.
+
+on:
+  workflow_call:
+    inputs:
+      titus-version:
+        description: "Pinned Titus version. Never use 'latest'."
+        required: false
+        type: string
+        default: "v1.1.27"
+
+      scan-target:
+        description: "Target to scan (default: current directory)."
+        required: false
+        type: string
+        default: "."
+
+      scan-args:
+        description: "Additional arguments passed to 'titus scan'. Default produces SARIF output in observe-only mode."
+        required: false
+        type: string
+        default: "--format sarif --output :memory:"
+
+      scan-git-history:
+        description: "Whether to scan git history (--git flag). Slower but catches secrets in past commits."
+        required: false
+        type: boolean
+        default: false
+
+      upload-sarif:
+        description: "Upload SARIF findings to the GitHub Security tab. When true, the caller MUST grant 'security-events: write' and 'actions: read'."
+        required: false
+        type: boolean
+        default: true
+
+      fail-on-findings:
+        description: "Whether to fail the job if Titus finds secrets. Default false (observe-only — findings surface in Security tab)."
+        required: false
+        type: boolean
+        default: false
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Preflight: skip scanning if the PR only touches docs/images.
+  # Always runs on push-to-main, schedule, and workflow_dispatch.
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      should_scan: ${{ steps.check.outputs.should_scan }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Check for scannable changes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+
+          # Non-PR events always scan (push to main, schedule, workflow_dispatch).
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Non-PR event ($EVENT_NAME) — secrets scan will run."
+            exit 0
+          fi
+
+          FILES=$(gh api \
+            "repos/$REPO/pulls/$PR_NUMBER/files" \
+            --paginate --jq '.[].filename')
+
+          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
+          echo "$FILES" | sed 's/^/  /'
+          echo
+
+          # Only skip on pure docs/images — secrets can hide in any code or config file.
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE$|^docs/'
+          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Scannable changes detected — Titus will run."
+          else
+            echo "should_scan=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ Docs/images-only PR — secrets scan skipped."
+          fi
+
+  titus:
+    name: Titus Secrets Scan
+    needs: preflight
+    if: needs.preflight.outputs.should_scan == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          # Intentionally "stable": Titus is a tool install, not a build target.
+          # Latest Go ensures compatibility with the pinned Titus version.
+          go-version: "stable"
+          cache: false
+
+      - name: Install Titus
+        env:
+          TITUS_VERSION: ${{ inputs.titus-version }}
+        run: go install "github.com/praetorian-inc/titus/cmd/titus@$TITUS_VERSION"
+
+      - name: Run Titus scan
+        shell: bash
+        env:
+          SCAN_TARGET: ${{ inputs.scan-target }}
+          SCAN_ARGS: ${{ inputs.scan-args }}
+          SCAN_GIT: ${{ inputs.scan-git-history }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          set +e
+
+          GIT_FLAG=""
+          if [ "$SCAN_GIT" = "true" ]; then
+            GIT_FLAG="--git"
+          fi
+
+          titus scan $SCAN_TARGET $SCAN_ARGS $GIT_FLAG > titus-results.sarif 2> titus-stderr.log
+          EXIT=$?
+
+          echo "Titus exit code: $EXIT"
+          if [ -s titus-stderr.log ]; then
+            echo "::group::Titus stderr"
+            cat titus-stderr.log
+            echo "::endgroup::"
+          fi
+
+          # Validate SARIF output; write empty SARIF if malformed so upload succeeds.
+          if [ ! -s titus-results.sarif ] || ! python3 -c "import json,sys; json.load(open('titus-results.sarif'))" 2>/dev/null; then
+            echo "::warning::Titus did not produce valid SARIF (exit=$EXIT). Writing empty SARIF."
+            cat > titus-results.sarif <<'SARIF_EOF'
+          {
+            "version": "2.1.0",
+            "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+            "runs": []
+          }
+          SARIF_EOF
+          fi
+
+          # Fail the job only if configured to enforce.
+          if [ "$FAIL_ON_FINDINGS" = "true" ] && [ $EXIT -ne 0 ]; then
+            echo "::error::Titus found secrets (exit=$EXIT) and fail-on-findings is enabled."
+            exit $EXIT
+          fi
+
+      - name: Upload Titus SARIF
+        if: ${{ inputs.upload-sarif && always() }}
+        uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0  # v4.35.2
+        with:
+          sarif_file: titus-results.sarif
+          category: titus-secrets
