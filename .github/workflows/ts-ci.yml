@@ -260,10 +260,10 @@ jobs:
       - name: Lint
         working-directory: ${{ inputs.working-directory }}
         run: |
-          if npm run lint --if-present 2>/dev/null; then
-            echo "Lint passed"
+          if jq -e '.scripts.lint' package.json > /dev/null 2>&1; then
+            npm run lint
           else
-            echo "No lint script found or lint not configured — skipping"
+            echo "No lint script in package.json — skipping"
           fi
 
   test:
