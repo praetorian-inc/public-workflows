@@ -1,4 +1,8 @@
 # Built binaries from self-test / local runs
 _test-fixtures/**/minimal
 _test-fixtures/**/*-*
+!_test-fixtures/ts-minimal/**
 coverage.out
+
+# Node.js
+node_modules/

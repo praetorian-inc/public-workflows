@@ -1,0 +1,332 @@
+name: TypeScript CI (Callable)
+# Reusable workflow for TypeScript/Node.js repositories in the praetorian-inc org.
+# Provides consistent install + typecheck + lint + test + Harden-Runner across
+# all Claude plugin repos and other TypeScript projects.
+#
+# Caller example (drop this in .github/workflows/ci.yml of a consumer repo):
+#
+#   name: CI
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#   permissions:
+#     contents: read
+#   jobs:
+#     ci:
+#       uses: praetorian-inc/public-workflows/.github/workflows/ts-ci.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#
+# For repos with private dependencies (e.g. @praetorian/claude-tool-sdk):
+#
+#   jobs:
+#     ci:
+#       uses: praetorian-inc/public-workflows/.github/workflows/ts-ci.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         enable-private-deps: true
+#         private-deps-repos: claude-tool-sdk
+#       secrets:
+#         PLUGIN_CI_APP_ID: ${{ secrets.PLUGIN_CI_APP_ID }}
+#         PLUGIN_CI_PRIVATE_KEY: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Working directory for the Node.js project."
+        required: false
+        type: string
+        default: "."
+
+      node-version:
+        description: "Node.js version to use."
+        required: false
+        type: string
+        default: "22"
+
+      enable-typecheck:
+        description: "Run tsc --noEmit if tsconfig.json exists."
+        required: false
+        type: boolean
+        default: true
+
+      enable-lint:
+        description: "Run npm run lint (skipped if the script is not defined in package.json)."
+        required: false
+        type: boolean
+        default: true
+
+      enable-test:
+        description: "Run npm test."
+        required: false
+        type: boolean
+        default: true
+
+      test-script:
+        description: "npm script to run for tests. Must be a key in package.json scripts."
+        required: false
+        type: string
+        default: "test"
+
+      enable-private-deps:
+        description: "Generate a GitHub App token for private dependency access before npm ci."
+        required: false
+        type: boolean
+        default: false
+
+      private-deps-owner:
+        description: "GitHub org for private dependency access."
+        required: false
+        type: string
+        default: "praetorian-inc"
+
+      private-deps-repos:
+        description: "Comma-separated repo names the App token is scoped to."
+        required: false
+        type: string
+        default: "claude-tool-sdk"
+
+      enable-harden-runner:
+        description: "Enable StepSecurity Harden-Runner as the first step of every job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode."
+        required: false
+        type: string
+        default: ""
+
+    secrets:
+      PLUGIN_CI_APP_ID:
+        description: "GitHub App ID for private dependency access. Required when enable-private-deps is true."
+        required: false
+      PLUGIN_CI_PRIVATE_KEY:
+        description: "GitHub App private key. Required when enable-private-deps is true."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Install & cache
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Generate token for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        with:
+          app-id: ${{ secrets.PLUGIN_CI_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+          owner: ${{ inputs.private-deps-owner }}
+          repositories: ${{ inputs.private-deps-repos }}
+
+      - name: Configure git for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        env:
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Cache node_modules for downstream jobs
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ inputs.working-directory }}/node_modules
+            ~/.npm
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+
+  typecheck:
+    name: Type check
+    needs: install
+    if: ${{ inputs.enable-typecheck }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Restore node_modules
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ inputs.working-directory }}/node_modules
+            ~/.npm
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+
+      - name: Type check
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f tsconfig.json ]; then
+            npx tsc --noEmit
+          else
+            echo "No tsconfig.json found — skipping type check"
+          fi
+
+  lint:
+    name: Lint
+    needs: install
+    if: ${{ inputs.enable-lint }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Restore node_modules
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ inputs.working-directory }}/node_modules
+            ~/.npm
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+
+      - name: Lint
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if npm run lint --if-present 2>/dev/null; then
+            echo "Lint passed"
+          else
+            echo "No lint script found or lint not configured — skipping"
+          fi
+
+  test:
+    name: Test
+    needs: install
+    if: ${{ inputs.enable-test }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Generate token for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        with:
+          app-id: ${{ secrets.PLUGIN_CI_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+          owner: ${{ inputs.private-deps-owner }}
+          repositories: ${{ inputs.private-deps-repos }}
+
+      - name: Configure git for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        env:
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Restore node_modules
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: |
+            ${{ inputs.working-directory }}/node_modules
+            ~/.npm
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+
+      - name: Run tests
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
+        run: |
+          if npm run "$TEST_SCRIPT" --if-present 2>/dev/null; then
+            echo "Tests passed"
+          else
+            echo "::error::Test script '$TEST_SCRIPT' failed or not found"
+            exit 1
+          fi

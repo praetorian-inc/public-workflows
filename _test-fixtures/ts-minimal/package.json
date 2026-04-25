@@ -1,0 +1,13 @@
+{
+  "name": "ts-ci-test-fixture",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "lint": "echo 'no lint configured'"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.1",
+    "typescript": "^5.8.3"
+  }
+}
