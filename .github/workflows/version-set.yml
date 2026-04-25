@@ -12,6 +12,25 @@ on:
         required: false
         type: boolean
         default: false
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        required: false
+        type: string
+        default: ""
+
     secrets:
       VERSION_BUMPER_APP_ID:
         description: "GitHub App ID for praetorian-ci-version-bumper"
@@ -20,13 +39,23 @@ on:
         description: "GitHub App private key for praetorian-ci-version-bumper"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   set-version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
     steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+
       - name: Validate version format
         env:
           VERSION: ${{ inputs.version }}
@@ -44,7 +73,7 @@ jobs:
           private-key: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}
 
       - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
