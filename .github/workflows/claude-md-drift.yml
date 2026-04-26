@@ -117,15 +117,16 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          # ── Step 2: Filter to code-only changes ──
+          # ── Step 2: Filter to code-only changes (newline-safe for paths with spaces) ──
           code_changes=""
-          for f in $FILES; do
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
             ext=".${f##*.}"
             if ! echo ",$SKIP_EXTENSIONS," | grep -q ",$ext,"; then
-              code_changes="$code_changes $f"
+              code_changes="${code_changes}${f}"$'\n'
             fi
-          done
-          code_changes=$(echo "$code_changes" | xargs)
+          done <<< "$FILES"
+          code_changes=$(echo "$code_changes" | sed '/^$/d')
 
           if [ -z "$code_changes" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -133,8 +134,8 @@ jobs:
             exit 0
           fi
 
-          echo "Code changes ($(echo "$code_changes" | wc -w | tr -d ' ') files):"
-          echo "$code_changes" | tr ' ' '\n' | sed 's/^/  /'
+          echo "Code changes ($(echo "$code_changes" | wc -l | tr -d ' ') files):"
+          echo "$code_changes" | sed 's/^/  /'
           echo
 
           # ── Step 3: Find all CLAUDE.md files in repo ──
@@ -155,22 +156,23 @@ jobs:
           # is found. This correctly handles nested CLAUDE.md files (e.g.,
           # backend/CLAUDE.md is preferred over root CLAUDE.md for backend/ changes).
           relevant=""
-          for file in $code_changes; do
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
             dir=$(dirname "$file")
             while true; do
               candidate="$dir/CLAUDE.md"
               [ "$dir" = "." ] && candidate="CLAUDE.md"
               if echo "$all_mds" | grep -qx "$candidate" 2>/dev/null; then
-                relevant="$relevant $candidate"
+                relevant="${relevant}${candidate}"$'\n'
                 break
               fi
               [ "$dir" = "." ] && break
               dir=$(dirname "$dir")
             done
-          done
+          done <<< "$code_changes"
 
           # Deduplicate and clean
-          relevant=$(echo "$relevant" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ',' | sed 's/,$//')
+          relevant=$(echo "$relevant" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
 
           if [ -z "$relevant" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -180,12 +182,13 @@ jobs:
 
           # ── Step 5: Skip if PR already modifies ALL relevant CLAUDE.md files ──
           all_updated=true
-          for md in $(echo "$relevant" | tr ',' '\n'); do
-            if ! echo "$FILES" | grep -qx "$md"; then
+          while IFS= read -r md; do
+            [ -z "$md" ] && continue
+            if ! echo "$FILES" | grep -qxF "$md"; then
               all_updated=false
               break
             fi
-          done
+          done <<< "$(echo "$relevant" | tr ',' '\n')"
 
           if [ "$all_updated" = "true" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
