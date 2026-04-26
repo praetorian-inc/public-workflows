@@ -80,6 +80,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
       relevant_mds: ${{ steps.check.outputs.relevant_mds }}
@@ -265,8 +266,13 @@ jobs:
 
             OUTPUT:
             - If NO stale content is found, exit silently — do NOT post a comment.
-            - If stale content IS found, post exactly ONE PR comment via:
-              gh pr comment ${{ github.event.pull_request.number }} --body "..."
+            - If stale content IS found, post exactly ONE PR comment. First check
+              for an existing drift comment to update (idempotent on re-runs):
+              EXISTING=$(gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" --jq '.[] | select(.body | startswith("## CLAUDE.md Drift Detection")) | .id' | head -1)
+              If EXISTING is non-empty, update it:
+                gh api --method PATCH "repos/${{ github.repository }}/issues/comments/$EXISTING" -f body="..."
+              Otherwise create a new comment:
+                gh pr comment ${{ github.event.pull_request.number }} --body "..."
 
               Use this format:
               ## CLAUDE.md Drift Detection
