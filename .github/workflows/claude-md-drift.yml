@@ -9,13 +9,16 @@ name: "CLAUDE.md Drift Detection (Callable)"
 #   name: CLAUDE.md Drift Detection
 #   on:
 #     pull_request:
-#       types: [opened, synchronize, reopened, ready_for_review]
+#       types: [opened, synchronize, ready_for_review]
+#       # synchronize: intentional — re-check drift on every push since new
+#       # code changes may introduce new drift against CLAUDE.md.
 #   concurrency:
 #     group: claude-drift-${{ github.event.pull_request.number }}
 #     cancel-in-progress: true
 #   jobs:
 #     drift-check:
 #       uses: praetorian-inc/public-workflows/.github/workflows/claude-md-drift.yml@<SHA>
+#       timeout-minutes: 15
 #       permissions:
 #         contents: read
 #         pull-requests: write
@@ -55,6 +58,9 @@ on:
         description: "Anthropic API key for Claude"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   # ── Phase 1: Pre-filter ─────────────────────────────────────────────
   # Zero LLM cost. Determines which CLAUDE.md files (if any) are in scope
@@ -70,7 +76,7 @@ jobs:
       !contains(github.actor, '[bot]') &&
       !contains(github.actor, 'dependabot') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -80,13 +86,14 @@ jobs:
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
 
       - name: Checkout repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -96,12 +103,14 @@ jobs:
         env:
           SKIP_EXTENSIONS: ${{ inputs.skip_extensions }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -eu
 
           # ── Step 1: Get changed files via GitHub API (handles >100 files) ──
           FILES=$(gh api \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            "repos/$REPO/pulls/$PR_NUMBER/files" \
             --paginate --jq '.[].filename')
 
           echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
@@ -195,7 +204,7 @@ jobs:
   drift-check:
     needs: pre-filter
     if: needs.pre-filter.outputs.should_run == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -203,13 +212,14 @@ jobs:
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df  # v2.18.0
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
 
       - name: Checkout repository
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
