@@ -56,3 +56,21 @@ jobs:
           fi
 
           echo "Version bumped: $BASE_VERSION -> $PR_VERSION"
+
+          # If the repo also carries a package.json (plugin repos with TS
+          # wrappers — sales, marketing, finance, IT, engineering, etc.),
+          # enforce parity per Anthropic's claude-plugins-official pattern.
+          # Repos without package.json (orator, guard-core, capability tools
+          # without TS) are unaffected.
+          if [ -f package.json ] && jq -e 'has("version")' package.json >/dev/null 2>&1; then
+            PKG_VERSION=$(jq -r '.version' package.json)
+            if [ "$PKG_VERSION" != "$PR_VERSION" ]; then
+              echo "::error::package.json version ($PKG_VERSION) does not match plugin.json version ($PR_VERSION)."
+              echo "::error::Both files must be in sync. The version-bump auto-tool handles this on PR open;"
+              echo "::error::if the policy was added after the PR opened, add the 'bump' label to retry, or"
+              echo "::error::sync manually by running:"
+              echo "::error::  jq --arg v \"$PR_VERSION\" '.version = \$v' package.json > tmp.json && mv tmp.json package.json"
+              exit 1
+            fi
+            echo "package.json version matches plugin.json: $PKG_VERSION"
+          fi
