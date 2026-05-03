@@ -102,7 +102,21 @@ jobs:
           esac
 
           echo "New version: $NEW_VERSION (was $CURRENT, bump: ${{ steps.bump.outputs.level }})"
+
+          # Bump plugin.json (always present in plugin repos).
           jq --arg v "$NEW_VERSION" '.version = $v' .claude-plugin/plugin.json > tmp.json && mv tmp.json .claude-plugin/plugin.json
+
+          # Bump package.json if it exists with a "version" field. Plugin repos
+          # that ship TypeScript wrappers (sales, marketing, finance, IT, etc.)
+          # carry both files and policy is to keep them in sync. Anthropic's
+          # own claude-plugins-official agent bumps both — match that pattern.
+          # Conditional so non-plugin repos (orator, guard-core, capabilities
+          # without TS) are unaffected.
+          if [ -f package.json ] && jq -e 'has("version")' package.json >/dev/null 2>&1; then
+            jq --arg v "$NEW_VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
+            echo "Also bumped package.json to $NEW_VERSION"
+          fi
+
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Commit and push to PR branch
@@ -113,6 +127,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .claude-plugin/plugin.json
+          # Stage package.json too if it was bumped above (kept in sync with
+          # plugin.json per Anthropic's claude-plugins-official pattern).
+          if [ -f package.json ]; then
+            git add package.json
+          fi
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore: bump version to $NEW_VERSION"
           git push origin "HEAD:$HEAD_REF"
