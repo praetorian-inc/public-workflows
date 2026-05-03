@@ -1,0 +1,128 @@
+name: "AgentsMesh Drift Check (Callable)"
+# Reusable workflow for repositories that treat .agentsmesh/ as the canonical
+# source of truth for generated assistant configuration.
+#
+# Caller example:
+#
+#   jobs:
+#     agentsmesh-drift:
+#       uses: praetorian-inc/public-workflows/.github/workflows/agentsmesh-drift.yml@<SHA>
+#       permissions:
+#         contents: read
+#       with:
+#         enable-private-deps: true
+#       secrets:
+#         PLUGIN_CI_APP_ID: ${{ secrets.PLUGIN_CI_APP_ID }}
+#         PLUGIN_CI_PRIVATE_KEY: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Working directory for the Node.js project."
+        required: false
+        type: string
+        default: "."
+      node-version:
+        description: "Node.js version to use."
+        required: false
+        type: string
+        default: "22"
+      enable-private-deps:
+        description: "Generate a GitHub App token for private dependency access before npm ci."
+        required: false
+        type: boolean
+        default: false
+      private-deps-owner:
+        description: "GitHub org for private dependency access."
+        required: false
+        type: string
+        default: "praetorian-inc"
+      private-deps-repos:
+        description: "Comma-separated repo names the App token is scoped to."
+        required: false
+        type: string
+        default: "claude-tool-sdk"
+      enable-harden-runner:
+        description: "Enable StepSecurity Harden-Runner as the first step of the job."
+        required: false
+        type: boolean
+        default: true
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      PLUGIN_CI_APP_ID:
+        description: "GitHub App ID for private dependency access. Required when enable-private-deps is true."
+        required: false
+      PLUGIN_CI_PRIVATE_KEY:
+        description: "GitHub App private key. Required when enable-private-deps is true."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  agentsmesh-drift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Generate token for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        with:
+          app-id: ${{ secrets.PLUGIN_CI_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+          owner: ${{ inputs.private-deps-owner }}
+          repositories: ${{ inputs.private-deps-repos }}
+
+      - name: Configure git for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        env:
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: npm ci
+
+      - name: Check generated files are in sync
+        id: agentsmesh-check
+        working-directory: ${{ inputs.working-directory }}
+        run: npx agentsmesh generate --check
+
+      - name: Show drift diff
+        if: ${{ failure() && steps.agentsmesh-check.outcome == 'failure' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: npm run agentsmesh:diff
