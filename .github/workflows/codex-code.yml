@@ -185,11 +185,13 @@ jobs:
 
             ${{ inputs.prompt }}
 
-  # Post-feedback: minimal job that posts the Codex review as a PR comment.
+  # Post-feedback: minimal job that posts the Codex review as a PR review.
   #
   # Separated from codex-review for defense-in-depth: the Codex sandbox job has
   # no PR write access. This job has `pull-requests: write` but runs no untrusted
   # code — it only posts the final-message output from the previous job.
+  # Uses pulls.createReview with hardcoded event='COMMENT' so reviews appear in
+  # the PR Reviews tab. There is no path to APPROVE — the event is not configurable.
   post-feedback:
     needs: codex-review
     if: needs.codex-review.outputs.final_message != ''
@@ -219,10 +221,10 @@ jobs:
               console.log('No review message to post — skipping.');
               return;
             }
-            await github.rest.issues.createComment({
+            await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
+              pull_number: context.payload.pull_request.number,
               body: [
                 '## Codex Review',
                 '',
@@ -231,4 +233,5 @@ jobs:
                 '---',
                 `*Reviewed by Codex (${process.env.CODEX_MODEL})*`,
               ].join('\n'),
+              event: 'COMMENT',
             });
