@@ -174,7 +174,7 @@ jobs:
                   total_chars += len(entry)
 
               if not diff_parts:
-                  pr.create_issue_comment(f"## Gemini Review\n\nNo reviewable code changes detected in this PR.\n\n---\n*Reviewed by Gemini ({model_id})*")
+                  pr.create_review(body=f"## Gemini Review\n\nNo reviewable code changes detected in this PR.\n\n---\n*Reviewed by Gemini ({model_id})*", event="COMMENT")
                   return
 
               diff_text = "\n\n".join(diff_parts)
@@ -225,12 +225,15 @@ jobs:
                           print(f"Retrying in {wait}s...", file=sys.stderr)
                           time.sleep(wait)
                       else:
-                          pr.create_issue_comment(
-                              "## Gemini Review\n\n"
-                              "⚠️ Gemini review failed after 3 attempts. "
-                              "A human reviewer should review this PR.\n\n"
-                              f"Error: `{type(e).__name__}`\n\n"
-                              f"---\n*Reviewed by Gemini ({model_id})*"
+                          pr.create_review(
+                              body=(
+                                  "## Gemini Review\n\n"
+                                  "⚠️ Gemini review failed after 3 attempts. "
+                                  "A human reviewer should review this PR.\n\n"
+                                  f"Error: `{type(e).__name__}`\n\n"
+                                  f"---\n*Reviewed by Gemini ({model_id})*"
+                              ),
+                              event="COMMENT",
                           )
                           sys.exit(1)
 
@@ -247,7 +250,7 @@ jobs:
                   }
 
               comment = format_review(review, skipped_files, model_id)
-              pr.create_issue_comment(comment)
+              pr.create_review(body=comment, event="COMMENT")
               print(f"✅ Gemini review posted to PR #{pr_number}")
 
           def format_review(review, skipped_files, model_id):

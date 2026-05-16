@@ -181,6 +181,10 @@ jobs:
           #     beyond the diff (e.g., understanding a function being modified)
           #
           # Deliberately NOT allowed:
+          #   - Bash(gh pr review:*) — would allow the agent to APPROVE PRs under
+          #     prompt injection (T-AI-1). Claude posts via `gh pr comment` (issue
+          #     comment); a separate post-processing step converts it to a PR review
+          #     with hardcoded event='COMMENT'. This preserves the security boundary.
           #   - mcp__github_inline_comment__create_inline_comment — removed to cut MCP
           #     schema overhead (~3-5k tokens/turn) AND to avoid duplicating CodeRabbit's
           #     inline review feature. Claude posts a single top-level summary instead.
@@ -224,3 +228,55 @@ jobs:
             fi
           fi
           echo "✅ Test requirements satisfied"
+
+      # Convert Claude's issue comment to a PR review object so it appears
+      # in the Reviews tab alongside Codex and Gemini reviews. This step runs
+      # AFTER the test-requirements check to avoid blocking that security gate
+      # on conversion failures. It does NOT change Claude's tool surface —
+      # Claude still posts via `gh pr comment` (issue comment), then this
+      # deterministic post-processing step converts it. The `event: 'COMMENT'`
+      # is hardcoded — there is no path to APPROVE or REQUEST_CHANGES.
+      - name: Convert to PR review
+        if: always() && steps.claude-review.outcome == 'success'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          script: |
+            try {
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.pull_request.number,
+                  per_page: 100,
+                }
+              );
+
+              const claudeComment = comments
+                .filter(c => c.user.login === 'github-actions[bot]')
+                .filter(c => c.body.includes('## Claude Review'))
+                .pop();
+
+              if (!claudeComment) {
+                console.log('No Claude Review comment found — skipping conversion.');
+                return;
+              }
+
+              await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                body: claudeComment.body,
+                event: 'COMMENT',
+              });
+
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: claudeComment.id,
+              });
+
+              console.log(`Converted issue comment ${claudeComment.id} to PR review.`);
+            } catch (err) {
+              console.log(`Conversion failed (review may remain as issue comment): ${err.message}`);
+            }
