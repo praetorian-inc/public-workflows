@@ -1,0 +1,20 @@
+name: Gemini PR Assistant
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: gemini-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gemini-review:
+    uses: ./.github/workflows/gemini-code.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
