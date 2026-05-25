@@ -1,5 +1,9 @@
 name: Version Bump (Callable)
 
+# Post-merge version bump. Callers trigger on `push: branches: [main]`.
+# Each merge to main gets a unique version — no collision between concurrent PRs.
+# Old callers pinned to earlier SHAs still get the PR-open behavior from that SHA.
+
 on:
   workflow_call:
     inputs:
@@ -36,14 +40,12 @@ jobs:
   version-bump:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # Only run on PR open or when 'bump' label is added
-    if: >-
-      github.event.action == 'opened' ||
-      (github.event.action == 'labeled' &&
-       github.event.label.name == 'bump')
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
+    concurrency:
+      group: version-bump-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       contents: write
-      pull-requests: write
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -62,15 +64,18 @@ jobs:
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.head_ref }}
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Determine bump level from branch name
+      - name: Determine bump level from merged branch
         id: bump
-        env:
-          BRANCH: ${{ github.head_ref }}
         run: |
+          COMMIT_MSG=$(git log -1 --format=%s)
+          BRANCH=$(echo "$COMMIT_MSG" | sed -n 's|.*from [^/]*/\(.*\)|\1|p')
+          if [ -z "$BRANCH" ]; then
+            BRANCH="unknown"
+          fi
+
           if [[ "$BRANCH" == release/* ]]; then
             BUMP="major"
           elif [[ "$BRANCH" == feat/* || "$BRANCH" == feature/* ]]; then
@@ -79,12 +84,12 @@ jobs:
             BUMP="patch"
           fi
           echo "level=$BUMP" >> "$GITHUB_OUTPUT"
-          echo "Bump level: $BUMP (branch: $BRANCH)"
+          echo "Bump level: $BUMP (branch: $BRANCH, commit: $COMMIT_MSG)"
 
       - name: Bump version
         id: version
         run: |
-          CURRENT=$(git show origin/main:.claude-plugin/plugin.json | jq -r '.version')
+          CURRENT=$(jq -r '.version' .claude-plugin/plugin.json)
           MAJOR=$(echo "$CURRENT" | cut -d. -f1)
           MINOR=$(echo "$CURRENT" | cut -d. -f2)
           PATCH=$(echo "$CURRENT" | cut -d. -f3)
@@ -103,15 +108,8 @@ jobs:
 
           echo "New version: $NEW_VERSION (was $CURRENT, bump: ${{ steps.bump.outputs.level }})"
 
-          # Bump plugin.json (always present in plugin repos).
           jq --arg v "$NEW_VERSION" '.version = $v' .claude-plugin/plugin.json > tmp.json && mv tmp.json .claude-plugin/plugin.json
 
-          # Bump package.json if it exists with a "version" field. Plugin repos
-          # that ship TypeScript wrappers (sales, marketing, finance, IT, etc.)
-          # carry both files and policy is to keep them in sync. Anthropic's
-          # own claude-plugins-official agent bumps both — match that pattern.
-          # Conditional so non-plugin repos (orator, guard-core, capabilities
-          # without TS) are unaffected.
           if [ -f package.json ] && jq -e 'has("version")' package.json >/dev/null 2>&1; then
             jq --arg v "$NEW_VERSION" '.version = $v' package.json > tmp.json && mv tmp.json package.json
             echo "Also bumped package.json to $NEW_VERSION"
@@ -119,26 +117,16 @@ jobs:
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and push to PR branch
+      - name: Commit and push
         env:
-          HEAD_REF: ${{ github.head_ref }}
           NEW_VERSION: ${{ steps.version.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .claude-plugin/plugin.json
-          # Stage package.json too if it was bumped above (kept in sync with
-          # plugin.json per Anthropic's claude-plugins-official pattern).
           if [ -f package.json ]; then
             git add package.json
           fi
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "chore: bump version to $NEW_VERSION"
-          git push origin "HEAD:$HEAD_REF"
-
-      - name: Remove bump label
-        if: github.event.action == 'labeled'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.number }}
-        run: gh pr edit "$PR_NUMBER" --remove-label bump
+          git push origin main
