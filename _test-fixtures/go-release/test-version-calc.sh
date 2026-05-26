@@ -96,6 +96,30 @@ echo "--- Edge cases ---"
 assert_eq "v0.0.0 + patch → v0.0.1" "v0.0.1" "$(calc_version "v0.0.0" "fix: init")"
 assert_eq "v0.0.0 + major → v1.0.0" "v1.0.0" "$(calc_version "v0.0.0" "[major-release]")"
 
+
+echo "--- Custom TAG_PREFIX ---"
+_save_TAG_PREFIX="$TAG_PREFIX"
+TAG_PREFIX="release-"
+assert_eq "release-1.2.3 + fix → release-1.2.4" "release-1.2.4" "$(calc_version "release-1.2.3" "fix: something")"
+TAG_PREFIX="$_save_TAG_PREFIX"
+
+echo "--- Custom SEED_VERSION ---"
+_save_SEED_VERSION="$SEED_VERSION"
+SEED_VERSION="1.0.0"
+assert_eq "no tags + custom seed 1.0.0 → v1.0.0" "v1.0.0" "$(calc_version "" "fix: init")"
+SEED_VERSION="$_save_SEED_VERSION"
+
+echo "--- Custom DEFAULT_BUMP=minor ---"
+_save_DEFAULT_BUMP="$DEFAULT_BUMP"
+DEFAULT_BUMP="minor"
+assert_eq "v1.2.3 + chore + default minor → v1.3.0" "v1.3.0" "$(calc_version "v1.2.3" "chore: something")"
+DEFAULT_BUMP="$_save_DEFAULT_BUMP"
+
+echo "--- Malformed tag missing patch component ---"
+_malformed_result="$(calc_version "v1.2" "fix: something")"
+assert_eq "v1.2 (no patch) + fix → v1.2.1" "v1.2.1" "$_malformed_result"
+# NOTE: PATCH defaults to 0 when missing, so patch bump → v1.2.1
+
 echo ""
 echo "=== Results: $PASSED passed, $FAILED failed ==="
 
