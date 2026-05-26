@@ -292,9 +292,56 @@ jobs:
 
 **Security posture:** Workflow-level `permissions: contents: read` ceiling. GitHub App token passed via `env:` (not inline `${{ }}`). Harden-Runner enabled by default. Runner pinned to `ubuntu-24.04`.
 
-### `version-{bump,check,set}.yml` — Claude plugin version management
+### `version-bump.yml` — Claude plugin version management
 
-Three workflows that manage `.claude-plugin/plugin.json` version lifecycle on PRs.
+Bumps `.claude-plugin/plugin.json` (and `package.json` if present) after every merge to main. Each merge gets a unique version — no collision between concurrent PRs.
+
+**Caller workflow** (drop this in `.github/workflows/version-bump.yml`):
+
+```yaml
+name: Version Bump
+on:
+  push:
+    branches: [main]
+jobs:
+  version-bump:
+    uses: praetorian-inc/public-workflows/.github/workflows/version-bump.yml@SHA  # v3.0.0
+    permissions:
+      contents: write
+    secrets:
+      VERSION_BUMPER_APP_ID: ${{ secrets.VERSION_BUMPER_APP_ID }}
+      VERSION_BUMPER_PRIVATE_KEY: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}
+```
+
+**Bump level** is determined from the merged PR's branch name: `release/*` → major, `feat/*` → minor, everything else → patch. Falls back to patch if the branch can't be resolved.
+
+**Prerequisites for each repo:**
+
+1. The `praetorian-ci-version-bumper` GitHub App must be installed on the repo (Org Settings → Installed GitHub Apps → Configure → add repo)
+2. If the repo has old-style branch protection on `main`, add the App to "Allow specified actors to bypass required pull requests"
+3. If the repo has repository rulesets with `pull_request` rules, add the App (Integration ID `3393916`) to the bypass actors list
+4. Remove `version-check.yml` from the repo — it's obsolete with post-merge bumping
+
+**Migration from PR-based bumping (v2.x):**
+
+The old model bumped versions when PRs opened (`pull_request: [opened, labeled]`). This caused version collision when concurrent PRs got the same version number. The new model bumps after merge, eliminating collisions.
+
+To migrate: change the trigger from `pull_request` to `push`, pin to the v3.0.0 SHA, remove `version-check.yml`, and configure the App bypass (steps above).
+
+**Rollout status** (18 plugin repos):
+
+| Status | Repos |
+|--------|-------|
+| ✅ Migrated | `praetorian-core` |
+| ⬜ Pending | `praetorian-engineering`, `praetorian-capabilities`, `praetorian-sales`, `praetorian-marketing`, `praetorian-finance`, `praetorian-it`, `praetorian-pmo`, `praetorian-pm`, `praetorian-threat-modeling`, `praetorian-redteam`, `praetorian-cloud`, `praetorian-iot`, `praetorian-security`, `praetorian-mobile`, `praetorian-msp`, `praetorian-reporting`, `praetorian-offsec` |
+
+### `version-check.yml` — (deprecated, remove from migrated repos)
+
+Validated PR version bumps in the old PR-based model. Obsolete with post-merge bumping — the bump workflow handles both files atomically. Remove from repos that have migrated to `version-bump.yml` v3.0.0+.
+
+### `version-set.yml` — Manual version override
+
+Sets the version to an explicit value. Used for major version resets or manual corrections. Not affected by the bump model change.
 
 ## Pinning requirements
 
