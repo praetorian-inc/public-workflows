@@ -42,7 +42,7 @@ on:
         default: "[minor-release]"
 
       tag-prefix:
-        description: "Prefix for version tags (typically 'v')."
+        description: "Prefix for version tags (alphanumeric and hyphens only, typically 'v')."
         required: false
         type: string
         default: "v"
@@ -140,7 +140,7 @@ jobs:
           set -euo pipefail
 
           LATEST_TAG=$(git tag -l -- "${TAG_PREFIX}*" --sort=-v:refname \
-            | grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+" | head -n1)
+            | grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+(\.[0-9]+(-[a-zA-Z0-9._+-]+)?)?$" | head -n1)
 
           if [ -z "$LATEST_TAG" ]; then
             echo "No existing tags found. Seeding with ${TAG_PREFIX}${SEED_VERSION}"
@@ -151,6 +151,7 @@ jobs:
 
           echo "previous_version=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
 
+          # Patch component is optional — v1.2 is treated as v1.2.0 (intentional)
           VERSION=${LATEST_TAG#"$TAG_PREFIX"}
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+(-[a-zA-Z0-9._+-]+)?)?$ ]]; then
             echo "::error::Tag $LATEST_TAG is not valid semver. Expected ${TAG_PREFIX}MAJOR.MINOR.PATCH"
@@ -211,7 +212,7 @@ jobs:
             exit 0
           fi
 
-          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
-          git push origin "$NEW_TAG"
+          git tag -a -- "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin -- "$NEW_TAG"
           echo "tag_created=true" >> "$GITHUB_OUTPUT"
           echo "Created and pushed tag: $NEW_TAG"
