@@ -134,6 +134,8 @@ jobs:
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           SEED_VERSION: ${{ inputs.seed-version }}
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -150,6 +152,11 @@ jobs:
 
           # Strip prefix and any pre-release suffix to get clean major.minor.patch
           VERSION=${LATEST_TAG#"$TAG_PREFIX"}
+          # Validate semver format (require at least major.minor)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Tag $LATEST_TAG is not valid semver. Expected ${TAG_PREFIX}MAJOR.MINOR.PATCH"
+            exit 1
+          fi
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f2)
           # Strip pre-release suffix (e.g. 1-pre-guard-0 -> 1)
@@ -160,7 +167,7 @@ jobs:
           # Determine bump level: check commit message first, then branch name
           COMMIT_MSG=$(git log -1 --format=%s)
           BRANCH=""
-          if PR_JSON=$(gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/pulls" \
+          if PR_JSON=$(gh api "repos/${GH_REPO}/commits/${GH_SHA}/pulls" \
             --jq '.[0].head.ref // empty' 2>/dev/null); then
             BRANCH="$PR_JSON"
           fi
@@ -188,11 +195,12 @@ jobs:
 
       - name: Create and push tag
         id: tag
+        env:
+          NEW_TAG: ${{ steps.version.outputs.version }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          NEW_TAG="${{ steps.version.outputs.version }}"
 
           # Safety: don't create a tag that already exists
           if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
