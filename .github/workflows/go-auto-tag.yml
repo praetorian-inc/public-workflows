@@ -1,0 +1,215 @@
+name: Go Auto-Tag (Callable)
+
+# Auto-tags Go module repos on merge to main. Reads the latest semver tag,
+# determines bump level from the merged PR's branch name or commit message
+# convention, creates and pushes the new tag.
+#
+# Callers: any Go repo that wants automatic semver tags on every merge.
+# Tags created with GITHUB_TOKEN do NOT trigger other workflows (by design).
+# If the caller also needs a binary release, chain a build job via `needs:`
+# using the `version` output, or use a GitHub App token (secrets.APP_*)
+# to push the tag so it DOES trigger tag-based release workflows.
+#
+# Replaces the ad-hoc version logic previously copy-pasted into caligula
+# and trajan Makefiles. Single source of truth for version calculation.
+#
+# Caller example:
+#   jobs:
+#     auto-tag:
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-auto-tag.yml@<SHA>
+#       permissions:
+#         contents: write
+
+on:
+  workflow_call:
+    inputs:
+      default-bump:
+        description: "Default bump level when no convention is detected (patch, minor, major)."
+        required: false
+        type: string
+        default: "patch"
+
+      major-pattern:
+        description: "Commit message or branch pattern that triggers a major bump."
+        required: false
+        type: string
+        default: "[major-release]"
+
+      minor-pattern:
+        description: "Commit message or branch pattern that triggers a minor bump."
+        required: false
+        type: string
+        default: "[minor-release]"
+
+      tag-prefix:
+        description: "Prefix for version tags (typically 'v')."
+        required: false
+        type: string
+        default: "v"
+
+      seed-version:
+        description: "Initial version when no tags exist yet (without prefix)."
+        required: false
+        type: string
+        default: "0.1.0"
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when policy=block."
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      version:
+        description: "The new version tag that was created (e.g. v1.2.3)."
+        value: ${{ jobs.auto-tag.outputs.version }}
+      previous-version:
+        description: "The previous version tag (e.g. v1.2.2), empty if this is the first tag."
+        value: ${{ jobs.auto-tag.outputs.previous_version }}
+      tag-created:
+        description: "Whether a new tag was actually created ('true' or 'false')."
+        value: ${{ jobs.auto-tag.outputs.tag_created }}
+
+permissions:
+  contents: read
+
+jobs:
+  auto-tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    # Loop guard: skip when this push is the bot's own tag commit, or when
+    # the commit message starts with "chore: bump version" (Dependabot-style).
+    if: |
+      github.actor != 'github-actions[bot]' &&
+      !startsWith(github.event.head_commit.message, 'chore: bump version')
+
+    concurrency:
+      group: go-auto-tag-${{ github.repository }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      previous_version: ${{ steps.version.outputs.previous_version }}
+      tag_created: ${{ steps.tag.outputs.tag_created }}
+
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all tags
+        run: git fetch --tags --force
+
+      - name: Calculate version
+        id: version
+        env:
+          DEFAULT_BUMP: ${{ inputs.default-bump }}
+          MAJOR_PATTERN: ${{ inputs.major-pattern }}
+          MINOR_PATTERN: ${{ inputs.minor-pattern }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          SEED_VERSION: ${{ inputs.seed-version }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          LATEST_TAG=$(git tag -l "${TAG_PREFIX}*" --sort=-v:refname | head -n1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No existing tags found. Seeding with ${TAG_PREFIX}${SEED_VERSION}"
+            echo "version=${TAG_PREFIX}${SEED_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "previous_version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "previous_version=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+
+          # Strip prefix and any pre-release suffix to get clean major.minor.patch
+          VERSION=${LATEST_TAG#"$TAG_PREFIX"}
+          # Validate semver format (require at least major.minor)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Tag $LATEST_TAG is not valid semver. Expected ${TAG_PREFIX}MAJOR.MINOR.PATCH"
+            exit 1
+          fi
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          # Strip pre-release suffix (e.g. 1-pre-guard-0 -> 1)
+          PATCH=$(echo "$VERSION" | cut -d. -f3 | cut -d- -f1)
+
+          MAJOR=${MAJOR:-0}; MINOR=${MINOR:-0}; PATCH=${PATCH:-0}
+
+          # Determine bump level: check commit message first, then branch name
+          COMMIT_MSG=$(git log -1 --format=%s)
+          BRANCH=""
+          if PR_JSON=$(gh api "repos/${GH_REPO}/commits/${GH_SHA}/pulls" \
+            --jq '.[0].head.ref // empty' 2>/dev/null); then
+            BRANCH="$PR_JSON"
+          fi
+
+          BUMP="$DEFAULT_BUMP"
+          if echo "$COMMIT_MSG" | grep -qF "$MAJOR_PATTERN"; then
+            BUMP="major"
+          elif echo "$COMMIT_MSG" | grep -qF "$MINOR_PATTERN"; then
+            BUMP="minor"
+          elif [[ "$BRANCH" == release/* || "$BRANCH" == breaking/* ]]; then
+            BUMP="major"
+          elif [[ "$BRANCH" == feat/* || "$BRANCH" == feature/* ]]; then
+            BUMP="minor"
+          fi
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW_VERSION="${TAG_PREFIX}${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bump: $BUMP | $LATEST_TAG -> $NEW_VERSION (branch: ${BRANCH:-n/a}, msg: $COMMIT_MSG)"
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        id: tag
+        env:
+          NEW_TAG: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Safety: don't create a tag that already exists
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "::warning::Tag $NEW_TAG already exists. Skipping."
+            echo "tag_created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
+          echo "tag_created=true" >> "$GITHUB_OUTPUT"
+          echo "Created and pushed tag: $NEW_TAG"

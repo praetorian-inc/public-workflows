@@ -1,0 +1,433 @@
+name: Go Release (Callable)
+
+# Reusable workflow for Go binary releases in the praetorian-inc org.
+# Covers 90% of capability repos with security hardening baked in:
+# SHA-pinned GoReleaser, SBOM generation (Syft), artifact signing (cosign),
+# and build provenance attestation.
+#
+# Two release modes:
+#   tag-push (default)     — caller triggers on push: tags: ['v*']
+#   auto-tag-from-main     — caller triggers on push: branches: [main];
+#                            this workflow calculates the next semver tag,
+#                            creates it, then runs GoReleaser against it.
+#
+# Access: invocable from any repo in the praetorian-inc org.
+#
+# Caller examples:
+#
+#   # Mode 1: tag-push (most repos)
+#   on:
+#     push:
+#       tags: ['v*']
+#   jobs:
+#     release:
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-release.yml@<SHA>
+#       permissions:
+#         contents: write
+#         id-token: write
+#         attestations: write
+#
+#   # Mode 2: auto-tag-from-main (caligula/trajan pattern)
+#   on:
+#     push:
+#       branches: [main]
+#   jobs:
+#     release:
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-release.yml@<SHA>
+#       permissions:
+#         contents: write
+#         id-token: write
+#         attestations: write
+#       with:
+#         release-mode: auto-tag-from-main
+#
+# Parent: ENG-3079  |  Sibling: go-ci.yml (ENG-3092)
+# Ticket: ENG-3094  |  Blocks: ENG-3095 (per-repo migration sweep)
+
+on:
+  workflow_call:
+    inputs:
+      # ── Release mode ──────────────────────────────────────────
+      release-mode:
+        description: >
+          How the release is triggered.
+          'tag-push': caller triggers on push: tags: ['v*']. The tag already exists.
+          'auto-tag-from-main': caller triggers on push: branches: [main]. This
+          workflow calculates the next semver, creates the tag, then releases.
+        required: false
+        type: string
+        default: "tag-push"
+
+      # ── Auto-tag settings (only used when release-mode = auto-tag-from-main) ──
+      default-bump:
+        description: "Default bump level when no convention is detected (patch, minor, major)."
+        required: false
+        type: string
+        default: "patch"
+
+      major-pattern:
+        description: "Commit message substring that triggers a major bump."
+        required: false
+        type: string
+        default: "[major-release]"
+
+      minor-pattern:
+        description: "Commit message substring that triggers a minor bump."
+        required: false
+        type: string
+        default: "[minor-release]"
+
+      tag-prefix:
+        description: "Prefix for version tags."
+        required: false
+        type: string
+        default: "v"
+
+      seed-version:
+        description: "Initial version when no tags exist (without prefix)."
+        required: false
+        type: string
+        default: "0.1.0"
+
+      # ── GoReleaser ────────────────────────────────────────────
+      goreleaser-version:
+        description: "Pinned GoReleaser version. Never use 'latest'."
+        required: false
+        type: string
+        default: "v2.13.3"
+
+      goreleaser-config-path:
+        description: "Path to GoReleaser config file relative to repo root."
+        required: false
+        type: string
+        default: ".goreleaser.yaml"
+
+      goreleaser-args:
+        description: "Extra args passed to goreleaser release (e.g. '--clean --skip=validate')."
+        required: false
+        type: string
+        default: "release --clean"
+
+      # ── Supply chain security ─────────────────────────────────
+      enable-sbom:
+        description: "Generate Syft SBOMs per archive. Requires sboms: config in .goreleaser.yaml."
+        required: false
+        type: boolean
+        default: true
+
+      enable-sign:
+        description: "Sign checksums with cosign (keyless OIDC via Sigstore)."
+        required: false
+        type: boolean
+        default: true
+
+      enable-provenance:
+        description: "Generate build provenance attestation via actions/attest-build-provenance."
+        required: false
+        type: boolean
+        default: true
+
+      # ── Container publishing ──────────────────────────────────
+      publish-container:
+        description: "Build and push container image to ghcr.io. Requires dockers: config in .goreleaser.yaml."
+        required: false
+        type: boolean
+        default: false
+
+      # ── Runner ────────────────────────────────────────────────
+      runner:
+        description: "Runner label. Override for repos needing larger runners (e.g. 'ubuntu-large-public')."
+        required: false
+        type: string
+        default: "ubuntu-24.04"
+
+      # ── Working directory ─────────────────────────────────────
+      working-directory:
+        description: "Working directory for the Go module (useful for multi-module repos)."
+        required: false
+        type: string
+        default: "."
+
+      go-version-file:
+        description: "Path to go.mod (relative to working-directory)."
+        required: false
+        type: string
+        default: "go.mod"
+
+      # ── Harden-Runner ────────────────────────────────────────
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: >
+          Newline-separated allowed egress endpoints when policy=block.
+          Recommended: github.com:443 api.github.com:443
+          objects.githubusercontent.com:443 proxy.golang.org:443
+          sum.golang.org:443 storage.googleapis.com:443
+          fulcio.sigstore.dev:443 rekor.sigstore.dev:443
+          tuf-repo-cdn.sigstore.dev:443 ghcr.io:443
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      version:
+        description: "The version that was released (e.g. v1.2.3)."
+        value: ${{ jobs.resolve-version.outputs.version }}
+      tag-created:
+        description: "Whether a new tag was created (only true in auto-tag mode)."
+        value: ${{ jobs.resolve-version.outputs.tag_created }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ────────────────────────────────────────────────────────────
+  # Job 1: Resolve the version to release.
+  #
+  # In tag-push mode: extract the tag from GITHUB_REF.
+  # In auto-tag-from-main mode: calculate next semver, create and push tag.
+  # ────────────────────────────────────────────────────────────
+  resolve-version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    if: |
+      github.actor != 'github-actions[bot]' &&
+      !startsWith(github.event.head_commit.message, 'chore: bump version')
+
+    concurrency:
+      group: go-release-tag-${{ github.repository }}
+      cancel-in-progress: false
+
+    permissions:
+      contents: write
+
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag_created: ${{ steps.resolve.outputs.tag_created }}
+      should_release: ${{ steps.resolve.outputs.should_release }}
+
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Fetch all tags
+        run: git fetch --tags --force
+
+      - name: Resolve version
+        id: resolve
+        env:
+          RELEASE_MODE: ${{ inputs.release-mode }}
+          DEFAULT_BUMP: ${{ inputs.default-bump }}
+          MAJOR_PATTERN: ${{ inputs.major-pattern }}
+          MINOR_PATTERN: ${{ inputs.minor-pattern }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          SEED_VERSION: ${{ inputs.seed-version }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$RELEASE_MODE" = "tag-push" ]; then
+            # Tag already exists — extract from ref
+            if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+              echo "::error::tag-push mode requires a tag ref, got: $GITHUB_REF"
+              exit 1
+            fi
+            VERSION="${GITHUB_REF#refs/tags/}"
+            echo "Tag-push mode: releasing $VERSION"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag_created=false" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # ── auto-tag-from-main mode ──
+          LATEST_TAG=$(git tag -l "${TAG_PREFIX}*" --sort=-v:refname | head -n1)
+
+          if [ -z "$LATEST_TAG" ]; then
+            NEW_VERSION="${TAG_PREFIX}${SEED_VERSION}"
+            echo "No existing tags. Seeding with $NEW_VERSION"
+          else
+            VERSION=${LATEST_TAG#"$TAG_PREFIX"}
+            # Validate semver format (require at least major.minor)
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+ ]]; then
+              echo "::error::Tag $LATEST_TAG is not valid semver. Expected ${TAG_PREFIX}MAJOR.MINOR.PATCH"
+              exit 1
+            fi
+            MAJOR=$(echo "$VERSION" | cut -d. -f1)
+            MINOR=$(echo "$VERSION" | cut -d. -f2)
+            PATCH=$(echo "$VERSION" | cut -d. -f3 | cut -d- -f1)
+            MAJOR=${MAJOR:-0}; MINOR=${MINOR:-0}; PATCH=${PATCH:-0}
+
+            # Determine bump: commit message first, then branch name
+            COMMIT_MSG=$(git log -1 --format=%s)
+            BRANCH=""
+            if PR_JSON=$(gh api "repos/${GH_REPO}/commits/${GH_SHA}/pulls" \
+              --jq '.[0].head.ref // empty' 2>/dev/null); then
+              BRANCH="$PR_JSON"
+            fi
+
+            BUMP="$DEFAULT_BUMP"
+            if echo "$COMMIT_MSG" | grep -qF "$MAJOR_PATTERN"; then
+              BUMP="major"
+            elif echo "$COMMIT_MSG" | grep -qF "$MINOR_PATTERN"; then
+              BUMP="minor"
+            elif [[ "$BRANCH" == release/* || "$BRANCH" == breaking/* ]]; then
+              BUMP="major"
+            elif [[ "$BRANCH" == feat/* || "$BRANCH" == feature/* ]]; then
+              BUMP="minor"
+            fi
+
+            case "$BUMP" in
+              major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+              minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+              patch) PATCH=$((PATCH + 1)) ;;
+            esac
+
+            NEW_VERSION="${TAG_PREFIX}${MAJOR}.${MINOR}.${PATCH}"
+            echo "Auto-tag: $BUMP bump | $LATEST_TAG -> $NEW_VERSION"
+          fi
+
+          # Safety: skip if tag already exists
+          if git rev-parse "$NEW_VERSION" >/dev/null 2>&1; then
+            echo "::warning::Tag $NEW_VERSION already exists. Skipping release."
+            echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+            echo "tag_created=false" >> "$GITHUB_OUTPUT"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin "$NEW_VERSION"
+
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_created=true" >> "$GITHUB_OUTPUT"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────────────────
+  # Job 2: GoReleaser build + release.
+  #
+  # Runs against the resolved version tag. Produces binaries, checksums,
+  # and optionally SBOMs and container images (configured in .goreleaser.yaml).
+  # ────────────────────────────────────────────────────────────
+  goreleaser:
+    needs: resolve-version
+    if: needs.resolve-version.outputs.should_release == 'true'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: false
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-version.outputs.version }}
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache: true
+
+      - name: Install Syft (SBOM generator)
+        if: ${{ inputs.enable-sbom }}
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+
+      - name: Install cosign (artifact signing)
+        if: ${{ inputs.enable-sign }}
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb  # v3.8.2
+
+      - name: Login to GHCR
+        if: ${{ inputs.publish-container }}
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89  # v7.2.2
+        with:
+          version: ${{ inputs.goreleaser-version }}
+          args: ${{ inputs.goreleaser-args }} --config ${{ inputs.goreleaser-config-path }}
+          workdir: ${{ inputs.working-directory }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ needs.resolve-version.outputs.version }}
+
+      - name: Attest build provenance
+        if: ${{ inputs.enable-provenance }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: |
+            ${{ inputs.working-directory }}/dist/*.tar.gz
+            ${{ inputs.working-directory }}/dist/*.zip
+            ${{ inputs.working-directory }}/dist/checksums.txt
+
+  # ────────────────────────────────────────────────────────────
+  # Job 3: Cleanup on failure.
+  #
+  # If the release pipeline fails after creating a tag (auto-tag mode only),
+  # delete the draft release and tag so the next run can retry cleanly.
+  # ────────────────────────────────────────────────────────────
+  cleanup-on-failure:
+    needs: [resolve-version, goreleaser]
+    if: >
+      failure() &&
+      needs.resolve-version.outputs.tag_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Delete release and tag
+        env:
+          VERSION: ${{ needs.resolve-version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Cleaning up failed release $VERSION"
+          gh release delete "$VERSION" --yes 2>/dev/null || true
+          git push --delete origin "$VERSION" 2>/dev/null || true
