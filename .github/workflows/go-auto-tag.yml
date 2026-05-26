@@ -140,7 +140,7 @@ jobs:
           set -euo pipefail
 
           LATEST_TAG=$(git tag -l -- "${TAG_PREFIX}*" --sort=-v:refname \
-            | grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+(\.[0-9]+(-[a-zA-Z0-9._+-]+)?)?$" | head -n1)
+            | { grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+(\.[0-9]+(-[a-zA-Z0-9._+-]+)?)?$" || true; } | head -n1)
 
           if [ -z "$LATEST_TAG" ]; then
             echo "No existing tags found. Seeding with ${TAG_PREFIX}${SEED_VERSION}"
@@ -167,6 +167,7 @@ jobs:
             exit 1
           fi
 
+          # %s (subject only) is intentional — %B would false-match patterns in squash-merge bodies
           COMMIT_MSG=$(git log -1 --format=%s)
           BRANCH=""
           if PR_JSON=$(gh api "repos/${GH_REPO}/commits/${GH_SHA}/pulls" \
@@ -206,7 +207,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           # Safety: don't create a tag that already exists
-          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+          if git rev-parse --verify "refs/tags/$NEW_TAG" >/dev/null 2>&1; then
             echo "::warning::Tag $NEW_TAG already exists. Skipping."
             echo "tag_created=false" >> "$GITHUB_OUTPUT"
             exit 0
