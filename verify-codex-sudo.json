@@ -1,0 +1,3 @@
+{
+  "purpose": "throwaway: forces preflight has_code=true so codex-review actually runs and we can confirm the sudo-lockdown fix; PR closed + branch deleted after verification"
+}
