@@ -1,0 +1,16 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    uses: ./.github/workflows/go-auto-tag.yml
+    permissions:
+      contents: write
+    with:
+      default-bump: patch
