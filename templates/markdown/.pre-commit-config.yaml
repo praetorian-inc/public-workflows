@@ -15,8 +15,11 @@ repos:
       - id: markdownlint-cli2
         args: ["--fix"]
 
-  - repo: https://github.com/pre-commit/mirrors-prettier
-    rev: v4.0.0-alpha.8
+  - repo: local
     hooks:
       - id: prettier
+        name: prettier (markdown tables)
+        entry: prettier --write --parser markdown
+        language: node
         types: [markdown]
+        additional_dependencies: ['prettier@3.8.3']
