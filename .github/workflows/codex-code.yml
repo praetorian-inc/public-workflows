@@ -39,10 +39,10 @@ on:
           - If nothing significant in any section: "No critical issues — LGTM pending human review."
 
       model:
-        description: "Codex model ID. gpt-5.4-mini is the recommended default for cost-efficient reviews. Use gpt-5.4 for deeper analysis or gpt-5.3-codex for complex multi-file reviews."
+        description: "Codex model ID. gpt-5.5 is the standard default for reviews (validated accessible). Override per-caller only for special cases (e.g. gpt-5.4-mini for cost-sensitive repos, gpt-5.3-codex for complex multi-file reviews)."
         required: false
         type: string
-        default: "gpt-5.4-mini"
+        default: "gpt-5.5"
 
       effort:
         description: "Reasoning effort level (minimal, low, medium, high)"
@@ -164,9 +164,12 @@ jobs:
 
       - name: Run Codex
         id: run_codex
-        uses: openai/codex-action@c25d10f3f498316d4b2496cc4c6dd58057a7b031  # v1
+        uses: openai/codex-action@c25d10f3f498316d4b2496cc4c6dd58057a7b031  # v1.6 (2026-03-16)
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          # Pin CLI+proxy: empty/unset installs @latest, whose --server-info handshake
+          # intermittently breaks vs this action SHA ("Failed to read server info" -> exit 1).
+          codex-version: "0.135.0"
           model: ${{ inputs.model }}
           effort: ${{ inputs.effort }}
           # Hardcoded — callers cannot override. read-only prevents file mutation,
@@ -235,3 +238,4 @@ jobs:
               ].join('\n'),
               event: 'COMMENT',
             });
+
