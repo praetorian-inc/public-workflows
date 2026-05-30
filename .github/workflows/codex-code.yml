@@ -138,7 +138,18 @@ jobs:
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
-          disable-sudo-and-containers: true
+          # Do NOT disable sudo on THIS job. openai/codex-action manages sudo itself:
+          # it uses `sudo chmod 444 / sudo chown root` to lock its responses-api-proxy
+          # server-info file as root, then IRREVERSIBLY drops sudo via
+          # `safety-strategy: drop-sudo` (below) before the untrusted Codex CLI runs.
+          # Pre-disabling sudo here makes that chmod fail ("sudo: a password is
+          # required") and the action exits 1 before any review happens — this is what
+          # broke every caller pinned to v2.1.0+ (the #56 "disable-sudo on all 22
+          # instances" change). drop-sudo provides the equivalent secret-protection
+          # guarantee (blocks reading OPENAI_API_KEY via /proc/*/environ). Only trusted
+          # first-party steps run while sudo exists; Codex runs only after it's dropped.
+          # The post-feedback job (no codex-action) keeps disable-sudo-and-containers.
+          disable-sudo-and-containers: false
 
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
