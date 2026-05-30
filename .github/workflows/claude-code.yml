@@ -170,7 +170,7 @@ jobs:
           # Hardened, non-configurable toolset. Callers cannot widen this — see
           # praetorian-inc/public-workflows CODEOWNERS: any change requires AppSec review.
           #
-          # Model: claude-opus-4-7 is used as the senior-engineer review model. Since
+          # Model: claude-opus-4-8 is used as the senior-engineer review model. Since
           # Claude runs once per PR (on open, not on every push — CodeRabbit and Codex
           # handle per-push coverage), the per-turn Opus cost is paid ~1x per PR and
           # we get the highest-capability reasoning for the security/bug/test-gap read.
@@ -200,7 +200,7 @@ jobs:
           # "tag mode" which union-merges write tools into the allowlist. See
           # anthropics/claude-code-action#860.
           claude_args: |
-            --model claude-opus-4-7
+            --model claude-opus-4-8
             --allowedTools "Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
             --disallowedTools "Bash(curl:*),Bash(wget:*),Bash(gh api:*),Bash(gh auth:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git rm:*),Write,Edit,MultiEdit"
             --max-turns 15
@@ -280,3 +280,4 @@ jobs:
             } catch (err) {
               console.log(`Conversion failed (review may remain as issue comment): ${err.message}`);
             }
+

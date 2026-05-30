@@ -2,6 +2,8 @@
 _test-fixtures/**/minimal
 _test-fixtures/**/*-*
 !_test-fixtures/ts-minimal/**
+!_test-fixtures/go-release/
+!_test-fixtures/go-release/**
 coverage.out
 
 # Node.js
