@@ -138,7 +138,26 @@ jobs:
         with:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
-          disable-sudo-and-containers: true
+          # Do NOT disable sudo on THIS job. openai/codex-action manages sudo
+          # itself: it `sudo chmod 444 / sudo chown root`-locks its responses-api-
+          # proxy server-info file, then IRREVERSIBLY drops sudo via
+          # `safety-strategy: drop-sudo` (below) before the untrusted Codex CLI
+          # runs. Pre-disabling sudo here makes that chmod fail ("sudo: a password
+          # is required") and the action exits 1 before any review happens — that
+          # is what broke every caller pinned to v2.1.0+ (the #56 "disable-sudo on
+          # all 22 instances" change). All codex-action versions still require sudo,
+          # so there is no bump that avoids this.
+          #
+          # IMPORTANT: `disable-sudo-and-containers` is a COMBINED control — there
+          # is no Harden-Runner option to disable containers while leaving sudo on.
+          # codex-action's drop-sudo removes the runner's sudo/admin group but NOT
+          # its `docker` group, so leaving containers enabled would reopen
+          # CVE-2025-32955 (a prompt-injected Codex could `docker run --privileged
+          # -v /:/host` to regain root before the review is posted). We therefore
+          # restore the container lockdown manually in the dedicated step below,
+          # while sudo is still available and before Codex runs. The post-feedback
+          # job (no codex-action) keeps disable-sudo-and-containers: true.
+          disable-sudo-and-containers: false
 
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -161,6 +180,25 @@ jobs:
           AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
           git -c "http.https://github.com/.extraheader=$AUTH" \
             fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
+
+      # Replicate the container half of Harden-Runner's `disable-sudo-and-containers`
+      # that we had to turn off so codex-action could use (and then drop) sudo.
+      # The runner user is in the `docker` group, and drop-sudo does NOT remove
+      # that membership, so without this a prompt-injected Codex could escape via
+      # the Docker socket (CVE-2025-32955: `docker run --privileged -v /:/host`).
+      # This runs while sudo is still available and BEFORE Codex executes; once
+      # codex-action drops sudo, Codex has neither sudo nor a container runtime.
+      - name: Lock down container runtime (preserve CVE-2025-32955 protection)
+        run: |
+          set -u
+          sudo systemctl stop docker.socket docker.service containerd.service 2>/dev/null || true
+          sudo systemctl mask docker.socket docker.service containerd.service 2>/dev/null || true
+          sudo rm -f /var/run/docker.sock /run/docker.sock 2>/dev/null || true
+          # Evidence (job log) that the runtime is gone before untrusted Codex runs:
+          echo "docker.socket: $(systemctl is-active docker.socket 2>/dev/null || echo inactive)"
+          echo "containerd:    $(systemctl is-active containerd 2>/dev/null || echo inactive)"
+          if [ -S /var/run/docker.sock ]; then echo "WARN: docker socket still present"; else echo "OK: docker socket removed"; fi
+          if timeout 5 docker info >/dev/null 2>&1; then echo "WARN: docker daemon still reachable"; else echo "OK: docker daemon unreachable"; fi
 
       - name: Run Codex
         id: run_codex

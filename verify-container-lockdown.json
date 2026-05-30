@@ -1,0 +1,3 @@
+{
+  "purpose": "throwaway: force preflight has_code=true to verify the container-lockdown step + codex-review still passes; PR closed after verification"
+}
