@@ -169,7 +169,7 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           # Pin CLI+proxy: empty/unset installs @latest, whose --server-info handshake
           # intermittently breaks vs this action SHA ("Failed to read server info" -> exit 1).
-          codex-version: "0.115.0"
+          codex-version: "0.135.0"
           model: ${{ inputs.model }}
           effort: ${{ inputs.effort }}
           # Hardcoded — callers cannot override. read-only prevents file mutation,
