@@ -218,7 +218,11 @@ jobs:
             exit 0
           fi
 
-          git tag -a -- "$NEW_TAG" -m "Release $NEW_TAG"
-          git push origin -- "$NEW_TAG"
+          # No `--` here: `git tag -a` parses -m as an option, and a `--` before the
+          # tag name pushes -m past end-of-options ("fatal: too many arguments").
+          # Push an explicit refs/tags/ refspec so the tag name can never be read as
+          # an option. NEW_TAG is computed as vN.N.N, so it never starts with '-'.
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "refs/tags/$NEW_TAG"
           echo "tag_created=true" >> "$GITHUB_OUTPUT"
           echo "Created and pushed tag: $NEW_TAG"

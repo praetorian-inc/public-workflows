@@ -332,8 +332,11 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a -- "$NEW_VERSION" -m "Release $NEW_VERSION"
-          git push origin -- "$NEW_VERSION"
+          # No `--`: `git tag -a` parses -m as an option and a leading `--` pushes it
+          # past end-of-options ("fatal: too many arguments"). Push an explicit
+          # refs/tags/ refspec; NEW_VERSION is vN.N.N so it never starts with '-'.
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin "refs/tags/$NEW_VERSION"
 
           echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag_created=true" >> "$GITHUB_OUTPUT"
