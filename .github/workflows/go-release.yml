@@ -265,7 +265,10 @@ jobs:
           fi
 
           # ── auto-tag-from-main mode ──
-          LATEST_TAG=$(git tag -l -- "${TAG_PREFIX}*" --sort=-v:refname \
+          # --sort MUST precede `--`; after `--` it's parsed as a pattern, so the sort
+          # is dropped and head -n1 returns the lexicographically-first tag (v1.0.0)
+          # instead of the highest semver. Same bug fixed in go-auto-tag.yml.
+          LATEST_TAG=$(git tag -l --sort=-v:refname -- "${TAG_PREFIX}*" \
             | { grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+(\.[0-9]+(-[a-zA-Z0-9._+-]+)?)?$" || true; } | head -n1)
 
           if [ -z "$LATEST_TAG" ]; then

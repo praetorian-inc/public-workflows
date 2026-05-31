@@ -139,7 +139,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          LATEST_TAG=$(git tag -l -- "${TAG_PREFIX}*" --sort=-v:refname \
+          # NOTE: --sort MUST come before `--`. Anything after `--` is treated as a
+          # pattern (end-of-options), so `git tag -l -- "v*" --sort=-v:refname` silently
+          # ignored the sort, fell back to lexicographic order, and picked v1.0.0 as
+          # "latest" — bumping to v1.0.1 (which exists) and skipping every run. The job
+          # reported success while never tagging. See the loop guard / "already exists".
+          LATEST_TAG=$(git tag -l --sort=-v:refname -- "${TAG_PREFIX}*" \
             | { grep -E "^${TAG_PREFIX}[0-9]+\.[0-9]+(\.[0-9]+(-[a-zA-Z0-9._+-]+)?)?$" || true; } | head -n1)
 
           if [ -z "$LATEST_TAG" ]; then
