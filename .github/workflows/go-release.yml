@@ -187,6 +187,20 @@ on:
         description: "Whether a new tag was created (only true in auto-tag mode)."
         value: ${{ jobs.resolve-version.outputs.tag_created }}
 
+    secrets:
+      VERSION_BUMPER_APP_ID:
+        description: >
+          Optional GitHub App ID (e.g. praetorian-ci-version-bumper). When set,
+          the auto-tag-from-main tag is created/pushed as the App, so it can
+          bypass a Protected-Version-Tags ruleset that blocks GITHUB_TOKEN. Only
+          used in auto-tag-from-main mode; tag-push mode never creates a tag.
+          Falls back to GITHUB_TOKEN when unset (callers without a tag ruleset
+          need nothing).
+        required: false
+      VERSION_BUMPER_PRIVATE_KEY:
+        description: "Private key for the App above. Required only when VERSION_BUMPER_APP_ID is set."
+        required: false
+
 permissions:
   contents: read
 
@@ -218,6 +232,11 @@ jobs:
       tag_created: ${{ steps.resolve.outputs.tag_created }}
       should_release: ${{ steps.resolve.outputs.should_release }}
 
+    # Mapped from the secret so the optional app-token step can be gated in `if:`
+    # (the secrets context is not available in step conditionals).
+    env:
+      VB_APP_ID: ${{ secrets.VERSION_BUMPER_APP_ID }}
+
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -227,10 +246,24 @@ jobs:
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
           disable-sudo-and-containers: true
 
+      # Optional: only in auto-tag-from-main mode when a caller passes the App
+      # secrets. Lets the tag be pushed as the App (a creation bypass actor)
+      # instead of GITHUB_TOKEN, which a Protected-Version-Tags ruleset rejects.
+      - name: Generate app token
+        id: app-token
+        if: ${{ inputs.release-mode == 'auto-tag-from-main' && env.VB_APP_ID != '' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0
+        with:
+          app-id: ${{ secrets.VERSION_BUMPER_APP_ID }}
+          private-key: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
+          # App token (when configured) persists as the push credential so the
+          # tag push is authorized as the bypass-actor App. Falls back to GITHUB_TOKEN.
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Fetch all tags
         run: git fetch --tags --force
