@@ -1,0 +1,28 @@
+{
+  // Shared markdownlint config for Praetorian markdown-heavy repos.
+  // Source: praetorian-inc/public-workflows/templates/markdown/
+  //
+  // Used by:
+  //   - pre-commit hooks (markdownlint-cli2 --fix)
+  //   - CI workflow (markdown-quality.yml generates this as default if missing)
+  //
+  // Copy to your repo root alongside .pre-commit-config.yaml.
+  "config": {
+    // MD013: Line length — disabled.
+    // Skills have long SQL payloads, table rows, and URLs that regularly exceed 80 chars.
+    // Wrapping these harms readability more than long lines do.
+    "MD013": false,
+
+    // MD033: Inline HTML — disabled.
+    // Skills and docs use <details>, <summary>, and HTML tables for progressive disclosure.
+    "MD033": false,
+
+    // MD041: First line should be a top-level heading — disabled.
+    // Skills start with YAML frontmatter (---), not a heading.
+    "MD041": false,
+
+    // MD024: Duplicate headings — allowed in sibling sections.
+    // Skills reuse headings like "Step 1", "Usage", "Example" under different parent sections.
+    "MD024": { "siblings_only": true }
+  }
+}

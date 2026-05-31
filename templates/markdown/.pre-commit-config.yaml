@@ -1,0 +1,25 @@
+# Canonical pre-commit config for Praetorian markdown-heavy repos.
+# Source: praetorian-inc/public-workflows/templates/markdown/
+#
+# Copy this file to your repo root, then:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Hooks run with --fix/--write: commits go in already formatted.
+# CI (markdown-quality.yml) runs the same checks in --check mode as the gate.
+
+repos:
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.22.1
+    hooks:
+      - id: markdownlint-cli2
+        args: ["--fix"]
+
+  - repo: local
+    hooks:
+      - id: prettier
+        name: prettier (markdown tables)
+        entry: prettier --write --parser markdown
+        language: node
+        types: [markdown]
+        additional_dependencies: ['prettier@3.8.3']

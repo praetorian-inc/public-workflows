@@ -292,6 +292,43 @@ jobs:
 
 **Security posture:** Workflow-level `permissions: contents: read` ceiling. GitHub App token passed via `env:` (not inline `${{ }}`). Harden-Runner enabled by default. Runner pinned to `ubuntu-24.04`.
 
+### `markdown-quality.yml` — Markdown lint + format check
+
+Reusable workflow for markdown-heavy repositories (skills, docs, plugin libraries). Runs markdownlint (structural quality) + prettier (table/format alignment) in check mode. Designed for repos with no `package.json` — uses `npx` to download tools on demand.
+
+**Minimal caller** (drop this in `.github/workflows/markdown-quality.yml` of a consumer repo):
+
+```yaml
+name: Markdown Quality
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+permissions:
+  contents: read
+jobs:
+  quality:
+    uses: praetorian-inc/public-workflows/.github/workflows/markdown-quality.yml@<SHA>
+    permissions:
+      contents: read
+```
+
+**All inputs** (all optional with sensible defaults):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `working-directory` | `.` | Working dir for the markdown project |
+| `glob` | `**/*.md` | Glob pattern for markdown files |
+| `node-version` | `22` | Node.js version for npx |
+| `enable-markdownlint` | `true` | Run markdownlint-cli2 |
+| `markdownlint-version` | `0.22.1` | Pinned markdownlint-cli2 version |
+| `enable-prettier` | `true` | Run prettier table/format check |
+| `prettier-version` | `3.8.3` | Pinned prettier version |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+**Pre-commit hooks (local auto-fix):** See [`templates/markdown/`](templates/markdown/) for canonical `.pre-commit-config.yaml` and `.markdownlint-cli2.jsonc` that run the same checks with `--fix`/`--write` on commit. CI is the enforcement gate; pre-commit hooks are developer convenience.
+
 ### `version-bump.yml` — Claude plugin version management
 
 Bumps `.claude-plugin/plugin.json` (and `package.json` if present) after every merge to main. Each merge gets a unique version — no collision between concurrent PRs.
