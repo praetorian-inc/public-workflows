@@ -424,12 +424,12 @@ jobs:
 
       - name: Install cosign (artifact signing)
         if: ${{ inputs.enable-sign }}
-        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb  # v3.8.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6  # v4.1.2
         with:
-          # Pin cosign v3 so signing emits the modern Sigstore bundle
-          # (.sigstore.json). cosign-installer defaults to v2.4.3 (which lacks
-          # --new-bundle-format default); capability .goreleaser.yaml signs:
-          # stanzas use the v3 'sign-blob --bundle' form, so cosign must be v3.
+          # cosign-installer v4 is REQUIRED to install cosign v3 (the v3.x installer
+          # cannot — per cosign-installer v4.0.0 release notes). cosign v3 emits the
+          # modern Sigstore .sigstore.json bundle via 'sign-blob --bundle'; capability
+          # .goreleaser.yaml signs: stanzas use that v3 form. Pinned (not 'latest').
           cosign-release: v3.0.6
 
       - name: Login to GHCR
