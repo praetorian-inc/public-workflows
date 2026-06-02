@@ -1,0 +1,122 @@
+name: Verify Action Pins (Callable)
+# Reusable workflow that verifies first-party `praetorian-inc/public-workflows`
+# `uses:` pins in the CALLER's workflows are honest:
+#   (1) every pinned 40-char SHA carries a version comment (`# vX.Y.Z`),
+#   (2) that tag actually exists, and
+#   (3) the tag points at EXACTLY that SHA.
+#
+# Prevents the "lying pin comment" failure mode — a hand-edited `@<sha>  # vX.Y.Z`
+# where the tag doesn't exist or resolves to a different commit. A lying label
+# defeats audits and Dependabot and masks real pin divergence across a fleet.
+#
+# Scope: first-party public-workflows pins only (that is the recurrence we are
+# guarding). Third-party pins (actions/checkout, etc.) are out of scope — verifying
+# those needs cross-repo tag lookups and is better handled by Dependabot/zizmor.
+#
+# Caller example (.github/workflows/verify-pins.yml):
+#
+#   name: Verify Pins
+#   on:
+#     pull_request: { paths: ['.github/workflows/**'] }
+#     push: { branches: [main], paths: ['.github/workflows/**'] }
+#   permissions:
+#     contents: read
+#   jobs:
+#     verify:
+#       uses: praetorian-inc/public-workflows/.github/workflows/verify-pins.yml@<SHA>  # <tag>
+#       permissions:
+#         contents: read
+
+on:
+  workflow_call:
+    inputs:
+      owner-repo:
+        description: "First-party repo whose tags the pins are verified against."
+        required: false
+        type: string
+        default: "praetorian-inc/public-workflows"
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-pins:
+    name: Verify Action Pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify first-party pins
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER_REPO: ${{ inputs.owner-repo }}
+        run: |
+          set -euo pipefail
+          fail=0
+          checked=0
+
+          # Every line that pins OWNER_REPO to a 40-char SHA (comment kept for parsing).
+          while IFS= read -r line; do
+            sha="$(printf '%s\n' "$line" | sed -nE 's/.*@([0-9a-fA-F]{40}).*/\1/p')"
+            [ -n "$sha" ] || continue
+            tag="$(printf '%s\n' "$line" | sed -nE 's/.*#[[:space:]]*([A-Za-z0-9._-]+).*/\1/p')"
+            checked=$((checked + 1))
+
+            if [ -z "$tag" ]; then
+              echo "::error::$OWNER_REPO is pinned to @$sha with no version comment. Add '# vX.Y.Z'."
+              fail=1; continue
+            fi
+
+            # Resolve tag -> commit SHA (dereference annotated tags).
+            # gh api exits non-zero on 404, so a missing tag is caught cleanly here
+            # rather than letting the 404 body leak into the parsed value.
+            if ! ref_json="$(gh api "repos/$OWNER_REPO/git/ref/tags/$tag" 2>/dev/null)"; then
+              echo "::error::Pin comment '# $tag' (for $OWNER_REPO@$sha) names a tag that does not exist."
+              fail=1; continue
+            fi
+            otype="$(printf '%s' "$ref_json" | jq -r '.object.type')"
+            osha="$(printf '%s' "$ref_json" | jq -r '.object.sha')"
+            if [ "$otype" = "tag" ]; then
+              csha="$(gh api "repos/$OWNER_REPO/git/tags/$osha" --jq '.object.sha')"
+            else
+              csha="$osha"
+            fi
+
+            if [ "$csha" != "$sha" ]; then
+              echo "::error::Pin mismatch: $OWNER_REPO@$sha is commented '# $tag', but $tag points at $csha."
+              fail=1; continue
+            fi
+            echo "✓ $OWNER_REPO@${sha:0:12} is honestly pinned to $tag"
+          done < <(grep -rhE "uses:[[:space:]]*${OWNER_REPO}/[^@]*@[0-9a-fA-F]{40}" .github/workflows/ 2>/dev/null || true)
+
+          echo "Checked $checked first-party pin(s) against $OWNER_REPO tags."
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::One or more first-party pin comments are dishonest. Fix the SHA or the version comment."
+            exit 1
+          fi
