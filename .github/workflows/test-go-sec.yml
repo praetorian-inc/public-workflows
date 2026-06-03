@@ -31,6 +31,9 @@ jobs:
     uses: ./.github/workflows/go-sec.yml
     permissions:
       contents: read
+      pull-requests: read     # go-sec.yml preflight reads PR files + repo tree
+      security-events: write  # gosec/govulncheck jobs statically declare it — grant even with upload-sarif:false, else startup_failure
+      actions: read           # required by codeql-action/upload-sarif metadata fetch
     with:
       working-directory: _test-fixtures/go-minimal
       upload-sarif: false
@@ -40,6 +43,9 @@ jobs:
     uses: ./.github/workflows/go-sec.yml
     permissions:
       contents: read
+      pull-requests: read     # go-sec.yml preflight reads PR files + repo tree
+      security-events: write  # gosec/govulncheck jobs statically declare it — grant even with upload-sarif:false, else startup_failure
+      actions: read           # required by codeql-action/upload-sarif metadata fetch
     with:
       working-directory: _test-fixtures/go-minimal
       enable-govulncheck: false
@@ -50,6 +56,9 @@ jobs:
     uses: ./.github/workflows/go-sec.yml
     permissions:
       contents: read
+      pull-requests: read     # go-sec.yml preflight reads PR files + repo tree
+      security-events: write  # gosec/govulncheck jobs statically declare it — grant even with upload-sarif:false, else startup_failure
+      actions: read           # required by codeql-action/upload-sarif metadata fetch
     with:
       working-directory: _test-fixtures/go-minimal
       enable-gosec: false
