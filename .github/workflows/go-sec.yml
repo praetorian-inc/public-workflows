@@ -309,8 +309,26 @@ jobs:
           if [ "$FAIL_ON_FINDINGS" = "true" ]; then
             ARGS="${ARGS//-no-fail/}"
           fi
+          set +e
           # shellcheck disable=SC2086
           gosec $ARGS
+          EXIT=$?
+          set -e
+          # Mirror findings from the SARIF file into the job log. gosec writes only
+          # SARIF (-fmt sarif -out ...), so on internal/private repos where the SARIF
+          # upload is skipped (no GHAS) the findings would otherwise be invisible —
+          # a red fail-on-findings build with zero detail. Printing them here keeps
+          # findings actionable everywhere (parallels govulncheck text-mode below),
+          # and surfaces them in observe-only mode too. Does not affect the exit code.
+          if [ -s gosec-results.sarif ]; then
+            COUNT=$(jq "[.runs[]?.results[]?] | length" gosec-results.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::group::gosec findings ($COUNT)"
+              jq -r ".runs[]?.results[]? | \"\(.ruleId // \"?\") [\(.level // \"warning\")] \(.message.text // \"\") — \(.locations[0].physicalLocation.artifactLocation.uri // \"?\"):\(.locations[0].physicalLocation.region.startLine // 0)\"" gosec-results.sarif 2>/dev/null || true
+              echo "::endgroup::"
+            fi
+          fi
+          exit "$EXIT"
 
       # Announce (don't silently swallow) when upload is skipped on a non-public repo.
       - name: Note gosec SARIF upload skipped
