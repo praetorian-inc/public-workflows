@@ -154,6 +154,7 @@ jobs:
       pull-requests: read
     outputs:
       has_go: ${{ steps.check.outputs.has_go }}
+      has_go_sources: ${{ steps.gosrc.outputs.has_go_sources }}
       visibility: ${{ steps.repo.outputs.visibility }}
     steps:
       - name: Harden Runner
@@ -178,6 +179,43 @@ jobs:
           [ -n "$VIS" ] || VIS="unknown"
           echo "visibility=$VIS" >> "$GITHUB_OUTPUT"
           echo "Repository visibility: $VIS"
+
+      # Detect whether the repository contains ANY Go sources (go.mod or *.go),
+      # anywhere in the tree — not just under working-directory. A repo with zero
+      # Go (e.g. a freshly-created capability skeleton like nero) has nothing to
+      # scan: gosec exits 1 with "No packages found" (which -no-fail does NOT
+      # suppress) and govulncheck errors "no go.mod file". We skip both jobs
+      # cleanly instead of red-failing. Whole-repo scope is deliberate: if Go
+      # exists somewhere but NOT under working-directory, that is a
+      # misconfiguration we must NOT mask — gosec is left to surface "No packages
+      # found" there. Fail-safe: on any API error or a truncated tree we assume
+      # Go is present and scan (never skip on uncertainty).
+      - name: Detect Go sources in repository
+        id: gosrc
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          RESP=$(gh api "repos/$REPO/git/trees/$SHA?recursive=1" 2>/dev/null || echo "")
+          if [ -z "$RESP" ]; then
+            echo "has_go_sources=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not enumerate the repository tree — assuming Go sources are present and scanning."
+            exit 0
+          fi
+          TRUNCATED=$(printf '%s' "$RESP" | jq -r '.truncated // false')
+          GO_COUNT=$(printf '%s' "$RESP" | jq '[.tree[]? | select(.type=="blob") | select(.path | test("(^|/)go\\.mod$|\\.go$"))] | length')
+          if [ "$TRUNCATED" = "true" ]; then
+            echo "has_go_sources=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Repository tree was truncated by the API — assuming Go sources are present and scanning."
+          elif [ "$GO_COUNT" -gt 0 ]; then
+            echo "has_go_sources=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Repository contains Go sources ($GO_COUNT go.mod/*.go entries) — security scan will run."
+          else
+            echo "has_go_sources=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Go sources (go.mod or *.go) found anywhere in the repository — skipping gosec/govulncheck. The jobs pass; scanning resumes automatically once Go files are added."
+          fi
 
       - name: Check for Go changes
         id: check
@@ -216,7 +254,7 @@ jobs:
   gosec:
     name: Gosec
     needs: preflight
-    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-gosec
+    if: needs.preflight.outputs.has_go == 'true' && needs.preflight.outputs.has_go_sources == 'true' && inputs.enable-gosec
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -295,7 +333,7 @@ jobs:
   govulncheck:
     name: Govulncheck
     needs: preflight
-    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-govulncheck
+    if: needs.preflight.outputs.has_go == 'true' && needs.preflight.outputs.has_go_sources == 'true' && inputs.enable-govulncheck
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
