@@ -155,7 +155,7 @@ jobs:
 
       - name: Run Claude PR Action
         id: claude-review
-        uses: anthropics/claude-code-action@38ec876110f9fbf8b950c79f534430740c3ac009  # v1.0.101
+        uses: anthropics/claude-code-action@e34df8781c2370c1c9d3b83ae47286a7ae2d1ea6  # v1.0.135
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
