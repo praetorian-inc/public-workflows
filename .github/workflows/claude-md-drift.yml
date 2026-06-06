@@ -56,7 +56,7 @@ on:
         description: "Maximum number of Claude conversation turns for drift analysis"
         required: false
         type: number
-        default: 20
+        default: 30
     secrets:
       ANTHROPIC_API_KEY:
         description: "Anthropic API key for Claude"
