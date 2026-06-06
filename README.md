@@ -205,16 +205,18 @@ Other event types and `synchronize` actions trigger the caller workflow but are 
 
 ### `gemini-code.yml` — Gemini PR Assistant (hardened)
 
-Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses an inline Python script (`google-genai` + `PyGithub`) for a single-shot review — no external action dependency.
+Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses [`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli) to run the Gemini CLI as an **agent** — like Claude and Codex, it reads past the diff to open the surrounding code (definitions, callers, sibling modules) for real context. It loads Praetorian's curated review skills natively from [`praetorian-inc/public-skills`](https://github.com/praetorian-inc/public-skills) (`.gemini/skills/`, pinned by SHA).
 
-**Security posture** matches `claude-code.yml`:
+**Security posture** follows `codex-code.yml`'s two-job defense-in-depth split:
 
+- **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and the agent step carries **no GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The diff is materialized in a deterministic step via a one-shot in-memory git auth header that is never persisted and is gone before the agent runs.
+- **Read-only tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `search_file_content`, `list_directory`) plus `activate_skill`; shell/write/edit/web tools are excluded.
+- **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
+- **Separate post-feedback job**: A minimal `pull-requests: write` job (runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` — no APPROVE path.
 - **Same-repo-only gate**: Fork PRs blocked outright (`head.repo.full_name == github.repository`)
 - **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter
-- **Anti-injection prompt**: Gemini instructed to treat all PR content as untrusted data
-- **No repository mutation**: Script reads diffs and posts a PR comment — no file edits, commits, or git operations
-- **StepSecurity Harden-Runner** on every job (audit mode by default)
-- **SHA-pinned actions**: `actions/checkout`, `actions/setup-python`, `step-security/harden-runner`
+- **Anti-injection prompt**: Gemini instructed to treat all PR content (including `GEMINI.md`) as untrusted data
+- **Pinned**: `run-gemini-cli` action SHA-pinned; `gemini_cli_version` pins the CLI itself (reproducible review behavior); `public-skills` checkout pinned by commit SHA
 - **Wall-clock ceiling**: `timeout-minutes: 10` on the review job
 - **CODEOWNERS**: `@praetorian-inc/security-engineering` review required on any change
 
@@ -247,11 +249,12 @@ jobs:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Custom review prompt (diff appended automatically) |
+| `prompt` | Built-in 3-section review template | Custom review prompt (the PR diff is materialized to `.gemini-review/pr.diff` for the agent to read) |
 | `model` | `gemini-3.1-pro-preview` | Gemini model ID |
+| `gemini_cli_version` | `0.45.2` | Pinned `@google/gemini-cli` version (Agent Skills stable since 0.26.0) |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
-| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, pypi.org:443, files.pythonhosted.org:443` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443` |
 
 **Secrets:**
 
