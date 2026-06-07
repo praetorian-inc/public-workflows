@@ -133,6 +133,21 @@ jobs:
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
           disable-sudo-and-containers: true
 
+      # Network-free input check (runs after Harden-Runner so hardening is still
+      # first). Fail fast with a clear message instead of an opaque mid-run egress
+      # error: block mode with no allowlist denies pypi.org and breaks pipx install.
+      - name: Validate inputs
+        env:
+          HR: ${{ inputs.enable-harden-runner }}
+          POLICY: ${{ inputs.harden-runner-policy }}
+          ENDPOINTS: ${{ inputs.harden-runner-allowed-endpoints }}
+        run: |
+          set -eu
+          if [ "$HR" = "true" ] && [ "$POLICY" = "block" ] && [ -z "${ENDPOINTS//[[:space:]]/}" ]; then
+            echo "::error::harden-runner-policy 'block' requires harden-runner-allowed-endpoints (it is empty). This workflow needs at least: pypi.org:443, files.pythonhosted.org:443, github.com:443, api.github.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443"
+            exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -189,8 +204,16 @@ jobs:
           #  - it has NO '--' end-of-options separator (a stray '--' is silently
           #    ignored), so we cannot defend the path that way;
           #  - repeated --out is last-wins, so we append our forced --out last.
+          # Also enforce the documented contract that extract-path is RELATIVE to and
+          # CONTAINED WITHIN the checkout: graphify resolves the path with
+          # Path(...).resolve(), so an absolute path or '..' would otherwise let the
+          # build scan and publish a graph for files outside $GITHUB_WORKSPACE.
           case "$EXTRACT_PATH" in
             -*) echo "::error::extract-path must not begin with '-' (got '$EXTRACT_PATH')"; exit 1 ;;
+            /*) echo "::error::extract-path must be relative to the repo root, not absolute (got '$EXTRACT_PATH')"; exit 1 ;;
+          esac
+          case "/$EXTRACT_PATH/" in
+            */../*) echo "::error::extract-path must not contain '..' path traversal (got '$EXTRACT_PATH')"; exit 1 ;;
           esac
 
           # Parse extract-args as a newline-delimited list, ONE argv token per
@@ -217,20 +240,24 @@ jobs:
           # broken artifact consumers cannot query. No '?' fallback — under
           # `set -euo pipefail` a parse error aborts here. (encoding pinned for
           # non-ASCII robustness across runner locales.)
-          NODES=$(python3 -c "import json; n=json.load(open('graphify-out/graph.json', encoding='utf-8')).get('nodes'); assert isinstance(n, list), 'graph.json missing nodes list'; print(len(n))")
+          # python3 -I (isolated): do NOT add the repo cwd to sys.path, so a
+          # repo-planted graphify-out/json.py etc. cannot shadow the stdlib json
+          # module and hijack this interpreter.
+          NODES=$(python3 -I -c "import json; n=json.load(open('graphify-out/graph.json', encoding='utf-8')).get('nodes'); assert isinstance(n, list), 'graph.json missing nodes list'; print(len(n))")
           echo "nodes=$NODES" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         if: always()
         env:
           NAME: ${{ steps.resolve.outputs.name }}
+          NODES: ${{ steps.build.outputs.nodes }}
         run: |
           {
             echo "### graphify graph: \`$NAME\`"
             echo ""
             if [ -s graphify-out/graph.json ]; then
               echo "- size: \`$(du -h graphify-out/graph.json | cut -f1)\`"
-              echo "- nodes: \`${{ steps.build.outputs.nodes }}\`"
+              echo "- nodes: \`${NODES}\`"
             else
               echo "- ⚠️ graph.json not produced"
             fi
