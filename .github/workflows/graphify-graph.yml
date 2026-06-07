@@ -46,12 +46,14 @@ name: Graphify Graph (Callable)
 #   gh run download -R <owner>/<repo> -n <repo>-graph -D graphify-out
 #
 # Supply-chain posture: graphifyy is PINNED (never 'latest'/--upgrade) so CI never
-# auto-pulls an unreviewed release. `graphifyy` is the legitimate PyPI name for the
-# 61k-star safishamsi/graphify (the single-y `graphify` does not exist on PyPI — any
-# "typosquat" flag is a false positive). Bump `graphify-version` deliberately, in
-# lockstep with the GRAPHIFY_VERSION pin in the separate praetorian-claude monorepo
-# Makefile and the vendored skill's pinned install (both live in other repos — this
-# repo has no Makefile). No secrets are used — only the auto-granted GITHUB_TOKEN.
+# auto-pulls an unreviewed release. Note the package name is `graphifyy` (double 'y'):
+# it is the distribution the graphify author publishes to PyPI for
+# github.com/safishamsi/graphify, and the single-y `graphify` is unregistered on PyPI.
+# Confirm the publisher out-of-band before changing the pin. Bump `graphify-version`
+# deliberately, in lockstep with the GRAPHIFY_VERSION pin in the separate
+# praetorian-claude monorepo Makefile and the vendored skill's pinned install (both
+# live in other repos — this repo has no Makefile). No secrets are used — only the
+# auto-granted GITHUB_TOKEN.
 
 on:
   workflow_call:
