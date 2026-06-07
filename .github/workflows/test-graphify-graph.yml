@@ -1,0 +1,71 @@
+name: Test graphify-graph.yml (self-test)
+# Self-test harness for the graphify-graph.yml reusable workflow.
+# On every PR that touches graphify-graph.yml or the fixture, this invokes the
+# reusable locally against _test-fixtures/go-minimal and confirms a non-empty
+# graph artifact is produced. Catches regressions before consumers pull a new SHA.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/graphify-graph.yml'
+      - '.github/workflows/test-graphify-graph.yml'
+      - '_test-fixtures/go-minimal/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  call-graphify-graph:
+    name: Call graphify-graph (go-minimal fixture)
+    # Local reference — uses the workflow from THIS commit (caller and callee in same repo).
+    uses: ./.github/workflows/graphify-graph.yml
+    permissions:
+      contents: read
+    with:
+      extract-path: _test-fixtures/go-minimal
+      artifact-name: selftest-go-minimal-graph
+      retention-days: 1
+
+  assert-outputs:
+    name: Assert reusable outputs
+    needs: call-graphify-graph
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # Contract check: graph-nodes must be a positive integer (the build makes a
+      # corrupt/empty graph fatal, so a healthy run always emits a real count), and
+      # artifact-name must echo back what we asked for.
+      - name: Check outputs
+        env:
+          NODES: ${{ needs.call-graphify-graph.outputs.graph-nodes }}
+          ARTIFACT: ${{ needs.call-graphify-graph.outputs.artifact-name }}
+        run: |
+          set -euo pipefail
+          echo "graph-nodes=$NODES  artifact-name=$ARTIFACT"
+          case "$NODES" in
+            ''|*[!0-9]*) echo "::error::graph-nodes not a non-negative integer: '$NODES'"; exit 1 ;;
+          esac
+          [ "$NODES" -gt 0 ] || { echo "::error::graph-nodes is 0 — fixture produced an empty graph"; exit 1; }
+          [ "$ARTIFACT" = "selftest-go-minimal-graph" ] || { echo "::error::artifact-name mismatch: '$ARTIFACT'"; exit 1; }
+          echo "outputs OK"
+
+      # Verify the artifact was actually published (not just that outputs were set):
+      # a regression that drops/renames the upload step would otherwise pass.
+      - name: Download published artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: selftest-go-minimal-graph
+          path: downloaded
+      - name: Verify artifact contents
+        run: |
+          set -euo pipefail
+          test -s downloaded/graph.json
+          # Confirm the uploaded graph is the parseable graph.json with a nodes list.
+          python3 -I -c "import json; n=json.load(open('downloaded/graph.json', encoding='utf-8')).get('nodes'); assert isinstance(n, list) and len(n) > 0, 'uploaded graph.json has no nodes'; print('uploaded graph OK:', len(n), 'nodes')"

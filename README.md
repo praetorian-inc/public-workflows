@@ -384,6 +384,34 @@ Validated PR version bumps in the old PR-based model. Obsolete with post-merge b
 
 Sets the version to an explicit value. Used for major version resets or manual corrections. Not affected by the bump model change.
 
+### `graphify-graph.yml` — Code knowledge graph builder + artifact publisher
+
+Builds a repo's [graphify](https://github.com/safishamsi/graphify) code knowledge graph (`graphify-out/graph.json`) and publishes it as a downloadable artifact, so engineers and agents query the latest graph without each rebuilding the (often 50k+ node) graph locally. graphify has no server — the graph is a file that `graphify query` reads; this workflow is the shared-distribution mechanism (build once in CI, everyone pulls the same artifact). The build is code-only and keyless: `--no-cluster` skips clustering, but graphify still routes any doc/paper/image files to LLM-backed semantic extraction and aborts without an API key — so keyless requires a `.graphifyignore` that excludes those files (which the caller repos ship) and/or a code-only `extract-path`. No LLM key is passed.
+
+```yaml
+name: graphify-graph
+on:
+  push:
+    branches: [main]
+    paths: ['**/*.go', '.graphifyignore', '.github/workflows/graphify-graph.yml']
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  graph:
+    uses: praetorian-inc/public-workflows/.github/workflows/graphify-graph.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+```
+
+Pull the published graph from a consumer machine: `gh run download -R <owner>/<repo> -n <repo>-graph -D graphify-out`.
+
+**Inputs:** `extract-path` (default `.`; must not begin with `-`), `extract-args` (extra `graphify extract` args, **one token per line** — newline-delimited so a token may contain spaces without quoting; default `--no-cluster`; the workflow always appends `--out .`), `artifact-name` (default `<repo>-graph`; chars `A-Z a-z 0-9 . _ -`), `graphify-version`, `retention-days`, and Harden-Runner controls. (`extract-args` tokens are passed through verbatim; graphify silently ignores unrecognized flags, so a typo is skipped rather than erroring.) **Outputs:** `graph-nodes` — the node count, always a non-negative integer on success (the build fails before it is set if `graph.json` is missing, empty, or unparseable); `artifact-name` — the resolved artifact name (default `<repo>-graph`; chars `A-Z a-z 0-9 . _ -`).
+
+**Supply-chain:** `graphifyy` is PINNED via the `graphify-version` input (default `0.8.35`) — never `latest`/`--upgrade`. Bump deliberately, in lockstep with the `GRAPHIFY_VERSION` pin in the separate `praetorian-claude` monorepo Makefile (this repo has no Makefile). No secrets used (GITHUB_TOKEN only).
+
 ## Pinning requirements
 
 Consumers **must** pin reusable workflow references by SHA (not tag or branch) per the org's supply-chain hardening policy:

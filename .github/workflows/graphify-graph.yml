@@ -1,0 +1,282 @@
+name: Graphify Graph (Callable)
+# Reusable workflow for praetorian-inc repos. Builds a repo's code knowledge graph
+# with graphify and publishes graph.json as a downloadable artifact, so engineers
+# and agents query the latest graph without each rebuilding the (often 50k+ node)
+# graph locally.
+#
+# graphify has no server/daemon — the graph is a file (graphify-out/graph.json) that
+# `graphify query` reads. This workflow is the shared-distribution mechanism: build
+# once in CI, everyone pulls the same artifact.
+#
+# KEYLESS REQUIRES A code-only TREE. The build passes no LLM API key, so it must be
+# code-only: `--no-cluster` skips community clustering, but graphify still routes any
+# doc/paper/image files to *semantic* (LLM) extraction and aborts with "no LLM API key
+# found" if any reach it. Keep the graph keyless by ensuring the repo's .graphifyignore
+# excludes doc/paper/image files (and/or point extract-path at a code-only subtree).
+# Our caller repos ship exactly such a .graphifyignore.
+#
+# Access: invocable from any repo in the praetorian-inc org
+# (Settings -> Actions -> General -> Access -> Accessible from repositories in the
+# 'praetorian-inc' organization).
+#
+# Caller example (recommended placement: .github/workflows/graphify-graph.yml):
+#
+#   name: graphify-graph
+#   on:
+#     push:
+#       branches: [main]
+#       paths:                       # tune to the repo's source layout
+#         - '**/*.go'
+#         - '.graphifyignore'
+#         - '.github/workflows/graphify-graph.yml'
+#     schedule:
+#       - cron: '0 7 * * 1'          # Mondays 07:00 UTC
+#     workflow_dispatch: {}
+#
+#   permissions:
+#     contents: read
+#
+#   jobs:
+#     graph:
+#       uses: praetorian-inc/public-workflows/.github/workflows/graphify-graph.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#
+# Pull the published graph from a consumer machine:
+#   gh run download -R <owner>/<repo> -n <repo>-graph -D graphify-out
+#
+# Supply-chain posture: graphifyy is PINNED (never 'latest'/--upgrade) so CI never
+# auto-pulls an unreviewed release. Note the package name is `graphifyy` (double 'y'):
+# it is the distribution the graphify author publishes to PyPI for
+# github.com/safishamsi/graphify, and the single-y `graphify` is unregistered on PyPI.
+# Confirm the publisher out-of-band before changing the pin. Bump `graphify-version`
+# deliberately, in lockstep with the GRAPHIFY_VERSION pin in the separate
+# praetorian-claude monorepo Makefile and the vendored skill's pinned install (both
+# live in other repos — this repo has no Makefile). No secrets are used — only the
+# auto-granted GITHUB_TOKEN.
+
+on:
+  workflow_call:
+    inputs:
+      graphify-version:
+        description: "Pinned graphifyy version from PyPI. Never 'latest' — the build must use a reviewed release. Bump in lockstep with the GRAPHIFY_VERSION pin in the praetorian-claude monorepo Makefile (a different repo)."
+        required: false
+        type: string
+        default: "0.8.35"
+
+      extract-path:
+        description: "Path to extract, relative to the repo root. Must not begin with '-' (graphify treats a dash-leading path as 'no path')."
+        required: false
+        type: string
+        default: "."
+
+      extract-args:
+        description: "Extra args for `graphify extract`, ONE token per line (newline-delimited, NOT space-separated), so a token may contain spaces without quoting (e.g. line 1 '--exclude', line 2 'vendor/my dir/**'). Blank lines ignored. Default '--no-cluster' = keyless code-only extraction (no LLM API key, no clustering). The workflow always appends '--out .' itself. Tokens are passed through verbatim — graphify silently ignores unrecognized flags, so a typo'd flag is skipped rather than erroring; double-check flag spelling."
+        required: false
+        type: string
+        default: "--no-cluster"
+
+      artifact-name:
+        description: "Name of the uploaded graph artifact (allowed characters: A-Z a-z 0-9 . _ -). Defaults to '<repo>-graph' when empty."
+        required: false
+        type: string
+        default: ""
+
+      retention-days:
+        description: "Artifact retention period in days."
+        required: false
+        type: number
+        default: 30
+
+      enable-harden-runner:
+        description: "Install StepSecurity Harden-Runner as the first step of the job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: pypi.org:443, files.pythonhosted.org:443, github.com:443, api.github.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443."
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      artifact-name:
+        description: "Name of the uploaded graph artifact."
+        value: ${{ jobs.build.outputs.artifact-name }}
+      graph-nodes:
+        description: "Node count in the produced graph (always a non-negative integer). The build fails before this is set if graph.json is missing, empty, or unparseable."
+        value: ${{ jobs.build.outputs.graph-nodes }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact-name: ${{ steps.resolve.outputs.name }}
+      graph-nodes: ${{ steps.build.outputs.nodes }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      # Network-free input check (runs after Harden-Runner so hardening is still
+      # first). Fail fast with a clear message instead of an opaque mid-run egress
+      # error: block mode with no allowlist denies pypi.org and breaks pipx install.
+      - name: Validate inputs
+        env:
+          HR: ${{ inputs.enable-harden-runner }}
+          POLICY: ${{ inputs.harden-runner-policy }}
+          ENDPOINTS: ${{ inputs.harden-runner-allowed-endpoints }}
+        run: |
+          set -eu
+          if [ "$HR" = "true" ] && [ "$POLICY" = "block" ] && [ -z "${ENDPOINTS//[[:space:]]/}" ]; then
+            echo "::error::harden-runner-policy 'block' requires harden-runner-allowed-endpoints (it is empty). This workflow needs at least: pypi.org:443, files.pythonhosted.org:443, github.com:443, api.github.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443"
+            exit 1
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve artifact name
+        id: resolve
+        env:
+          NAME_IN: ${{ inputs.artifact-name }}
+        run: |
+          set -eu
+          NAME="$NAME_IN"
+          # Derive from $GITHUB_REPOSITORY ("owner/repo"), not
+          # github.event.repository.name, which is empty on schedule events.
+          [ -n "$NAME" ] || NAME="${GITHUB_REPOSITORY##*/}-graph"
+          # Validate the artifact name against a strict allowlist before writing
+          # it to $GITHUB_OUTPUT. A value containing a newline cannot pass this
+          # gate, so this also closes GITHUB_OUTPUT injection (a crafted
+          # artifact-name with an embedded newline could otherwise smuggle extra
+          # step outputs). The set is also the safe subset for artifact names.
+          case "$NAME" in
+            ""|*[!A-Za-z0-9._-]*)
+              echo "::error::Invalid artifact-name '$NAME' (allowed characters: A-Z a-z 0-9 . _ -)"
+              exit 1
+              ;;
+          esac
+          printf 'name=%s\n' "$NAME" >> "$GITHUB_OUTPUT"
+          echo "Artifact name: $NAME"
+
+      - name: Install graphify (pinned)
+        env:
+          VERSION: ${{ inputs.graphify-version }}
+        run: |
+          set -euo pipefail
+          # Pinned for supply-chain hygiene: never auto-pull an unreviewed release.
+          pipx install "graphifyy==${VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # $GITHUB_PATH only affects SUBSEQUENT steps, so call the binary by its
+          # absolute path here to log the installed version reliably in this step.
+          "$HOME/.local/bin/graphify" --version 2>&1 | head -1 || true
+
+      - name: Build graph (code-only, keyless)
+        id: build
+        env:
+          EXTRACT_PATH: ${{ inputs.extract-path }}
+          EXTRACT_ARGS: ${{ inputs.extract-args }}
+        run: |
+          set -euo pipefail
+
+          # graphify's `extract` uses a hand-rolled argv parser, not argparse:
+          #  - the scan path must be the FIRST token after `extract` (argv[2]);
+          #    if it begins with '-' the parser assumes "no path" and silently
+          #    scans '.', so reject a dash-leading extract-path up front;
+          #  - it has NO '--' end-of-options separator (a stray '--' is silently
+          #    ignored), so we cannot defend the path that way;
+          #  - repeated --out is last-wins, so we append our forced --out last.
+          case "$EXTRACT_PATH" in
+            -*) echo "::error::extract-path must not begin with '-' (got '$EXTRACT_PATH')"; exit 1 ;;
+          esac
+          # Enforce the documented contract that extract-path is CONTAINED WITHIN the
+          # checkout. graphify resolves the path with Path(...).resolve(), so a lexical
+          # check is insufficient — an absolute path, '..', OR a checked-in symlink
+          # could resolve outside $GITHUB_WORKSPACE and publish a graph for files
+          # outside the repo. Canonicalize (follows symlinks + '..') and require the
+          # result to stay under the workspace.
+          WS=$(realpath -m -- "${GITHUB_WORKSPACE:-$PWD}")
+          RESOLVED=$(realpath -m -- "$EXTRACT_PATH")
+          case "$RESOLVED" in
+            "$WS"|"$WS"/*) : ;;
+            *) echo "::error::extract-path resolves outside the checkout ('$EXTRACT_PATH' -> '$RESOLVED')"; exit 1 ;;
+          esac
+
+          # Parse extract-args as a newline-delimited list, ONE argv token per
+          # line, into an array. Quoted array expansion (no word-splitting) lets a
+          # single token contain spaces — e.g. `--exclude` then `vendor/my dir/**`
+          # on the next line — which the old unquoted $EXTRACT_ARGS could not do.
+          # Blank lines are ignored. The default ("--no-cluster") is one line.
+          EXTRA_ARGS=()
+          while IFS= read -r _line; do
+            _line="${_line#"${_line%%[![:space:]]*}"}"   # ltrim
+            _line="${_line%"${_line##*[![:space:]]}"}"    # rtrim
+            [ -n "$_line" ] && EXTRA_ARGS+=("$_line")
+          done <<< "$EXTRACT_ARGS"
+
+          # Force --out to the repo root (appended LAST so it wins over any caller
+          # --out) so the graph always lands at ./graphify-out/ regardless of
+          # extract-path. graphify's default --out is <path>, which for a
+          # sub-directory extract-path would write graphify-out/ INSIDE that subdir
+          # and the upload below would miss it.
+          graphify extract "$EXTRACT_PATH" "${EXTRA_ARGS[@]}" --out . 2>&1 | tee /tmp/graphify-build.log
+          test -s graphify-out/graph.json
+          # Validate the graph is parseable JSON with a nodes list BEFORE the upload
+          # step. A present-but-corrupt graph.json must FAIL the build, not publish a
+          # broken artifact consumers cannot query. No '?' fallback — under
+          # `set -euo pipefail` a parse error aborts here. (encoding pinned for
+          # non-ASCII robustness across runner locales.)
+          # python3 -I (isolated): do NOT add the repo cwd to sys.path, so a
+          # repo-planted graphify-out/json.py etc. cannot shadow the stdlib json
+          # module and hijack this interpreter.
+          NODES=$(python3 -I -c "import json; n=json.load(open('graphify-out/graph.json', encoding='utf-8')).get('nodes'); assert isinstance(n, list), 'graph.json missing nodes list'; print(len(n))")
+          echo "nodes=$NODES" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        env:
+          NAME: ${{ steps.resolve.outputs.name }}
+          NODES: ${{ steps.build.outputs.nodes }}
+        run: |
+          {
+            echo "### graphify graph: \`$NAME\`"
+            echo ""
+            if [ -s graphify-out/graph.json ]; then
+              echo "- size: \`$(du -h graphify-out/graph.json | cut -f1)\`"
+              echo "- nodes: \`${NODES}\`"
+            else
+              echo "- ⚠️ graph.json not produced"
+            fi
+            echo ""
+            echo '```'
+            # Neutralize backticks so a stray ``` in the log can't break out of
+            # this fenced block and inject markdown into the step summary.
+            tail -8 /tmp/graphify-build.log 2>/dev/null | tr '`' "'" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload graph artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
+        with:
+          name: ${{ steps.resolve.outputs.name }}
+          path: graphify-out/graph.json
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error
