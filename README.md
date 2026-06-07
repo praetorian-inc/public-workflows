@@ -408,7 +408,9 @@ jobs:
 
 Pull the published graph from a consumer machine: `gh run download -R <owner>/<repo> -n <repo>-graph -D graphify-out`.
 
-**Supply-chain:** `graphifyy` is PINNED via the `graphify-version` input (default `0.8.35`) — never `latest`/`--upgrade`. Bump deliberately, in lockstep with the monorepo Makefile's `GRAPHIFY_VERSION`. No secrets used (GITHUB_TOKEN only).
+**Inputs:** `extract-path` (default `.`; must not begin with `-`), `extract-args` (extra `graphify extract` args, **one token per line** — newline-delimited so a token may contain spaces without quoting; default `--no-cluster`; the workflow always appends `--out .`), `artifact-name` (default `<repo>-graph`; chars `A-Z a-z 0-9 . _ -`), `graphify-version`, `retention-days`, and Harden-Runner controls. Output `graph-nodes` is the node count (`?` only if `graph.json` is present-but-unparseable; a missing/empty graph fails the build).
+
+**Supply-chain:** `graphifyy` is PINNED via the `graphify-version` input (default `0.8.35`) — never `latest`/`--upgrade`. Bump deliberately, in lockstep with the `GRAPHIFY_VERSION` pin in the separate `praetorian-claude` monorepo Makefile (this repo has no Makefile). No secrets used (GITHUB_TOKEN only).
 
 ## Pinning requirements
 

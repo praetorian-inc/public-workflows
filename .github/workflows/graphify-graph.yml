@@ -43,32 +43,33 @@ name: Graphify Graph (Callable)
 # auto-pulls an unreviewed release. `graphifyy` is the legitimate PyPI name for the
 # 61k-star safishamsi/graphify (the single-y `graphify` does not exist on PyPI — any
 # "typosquat" flag is a false positive). Bump `graphify-version` deliberately, in
-# lockstep with the monorepo Makefile's GRAPHIFY_VERSION and the vendored skill's
-# pinned install. No secrets are used — only the auto-granted GITHUB_TOKEN.
+# lockstep with the GRAPHIFY_VERSION pin in the separate praetorian-claude monorepo
+# Makefile and the vendored skill's pinned install (both live in other repos — this
+# repo has no Makefile). No secrets are used — only the auto-granted GITHUB_TOKEN.
 
 on:
   workflow_call:
     inputs:
       graphify-version:
-        description: "Pinned graphifyy version from PyPI. Never 'latest' — the build must use a reviewed release. Bump in lockstep with the monorepo Makefile GRAPHIFY_VERSION."
+        description: "Pinned graphifyy version from PyPI. Never 'latest' — the build must use a reviewed release. Bump in lockstep with the GRAPHIFY_VERSION pin in the praetorian-claude monorepo Makefile (a different repo)."
         required: false
         type: string
         default: "0.8.35"
 
       extract-path:
-        description: "Path to extract, relative to the repo root."
+        description: "Path to extract, relative to the repo root. Must not begin with '-' (graphify treats a dash-leading path as 'no path')."
         required: false
         type: string
         default: "."
 
       extract-args:
-        description: "Arguments passed to `graphify extract`. Default '--no-cluster' = keyless code-only extraction (no LLM API key, no clustering)."
+        description: "Extra args for `graphify extract`, ONE token per line (newline-delimited, NOT space-separated), so a token may contain spaces without quoting (e.g. line 1 '--exclude', line 2 'vendor/my dir/**'). Blank lines ignored. Default '--no-cluster' = keyless code-only extraction (no LLM API key, no clustering). The workflow always appends '--out .' itself."
         required: false
         type: string
         default: "--no-cluster"
 
       artifact-name:
-        description: "Name of the uploaded graph artifact. Defaults to '<repo>-graph' when empty."
+        description: "Name of the uploaded graph artifact (allowed characters: A-Z a-z 0-9 . _ -). Defaults to '<repo>-graph' when empty."
         required: false
         type: string
         default: ""
@@ -102,7 +103,7 @@ on:
         description: "Name of the uploaded graph artifact."
         value: ${{ jobs.build.outputs.artifact-name }}
       graph-nodes:
-        description: "Node count in the produced graph (best-effort; '?' if unparseable)."
+        description: "Node count in the produced graph. '?' only if graph.json is present but its JSON is unparseable — a missing or empty graph fails the build step instead."
         value: ${{ jobs.build.outputs.graph-nodes }}
 
 permissions:
@@ -133,12 +134,24 @@ jobs:
         id: resolve
         env:
           NAME_IN: ${{ inputs.artifact-name }}
-          REPO: ${{ github.event.repository.name }}
         run: |
           set -eu
           NAME="$NAME_IN"
-          [ -n "$NAME" ] || NAME="${REPO}-graph"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          # Derive from $GITHUB_REPOSITORY ("owner/repo"), not
+          # github.event.repository.name, which is empty on schedule events.
+          [ -n "$NAME" ] || NAME="${GITHUB_REPOSITORY##*/}-graph"
+          # Validate the artifact name against a strict allowlist before writing
+          # it to $GITHUB_OUTPUT. A value containing a newline cannot pass this
+          # gate, so this also closes GITHUB_OUTPUT injection (a crafted
+          # artifact-name with an embedded newline could otherwise smuggle extra
+          # step outputs). The set is also the safe subset for artifact names.
+          case "$NAME" in
+            ""|*[!A-Za-z0-9._-]*)
+              echo "::error::Invalid artifact-name '$NAME' (allowed characters: A-Z a-z 0-9 . _ -)"
+              exit 1
+              ;;
+          esac
+          printf 'name=%s\n' "$NAME" >> "$GITHUB_OUTPUT"
           echo "Artifact name: $NAME"
 
       - name: Install graphify (pinned)
@@ -158,12 +171,36 @@ jobs:
           EXTRACT_ARGS: ${{ inputs.extract-args }}
         run: |
           set -euo pipefail
-          # Force --out to the repo root so the graph always lands at ./graphify-out/
-          # regardless of extract-path. graphify's default --out is <path>, which for a
-          # sub-directory extract-path would write graphify-out/ INSIDE that subdir and
-          # the upload below would miss it.
-          # shellcheck disable=SC2086
-          graphify extract "$EXTRACT_PATH" --out . $EXTRACT_ARGS 2>&1 | tee /tmp/graphify-build.log
+
+          # graphify's `extract` uses a hand-rolled argv parser, not argparse:
+          #  - the scan path must be the FIRST token after `extract` (argv[2]);
+          #    if it begins with '-' the parser assumes "no path" and silently
+          #    scans '.', so reject a dash-leading extract-path up front;
+          #  - it has NO '--' end-of-options separator (a stray '--' is silently
+          #    ignored), so we cannot defend the path that way;
+          #  - repeated --out is last-wins, so we append our forced --out last.
+          case "$EXTRACT_PATH" in
+            -*) echo "::error::extract-path must not begin with '-' (got '$EXTRACT_PATH')"; exit 1 ;;
+          esac
+
+          # Parse extract-args as a newline-delimited list, ONE argv token per
+          # line, into an array. Quoted array expansion (no word-splitting) lets a
+          # single token contain spaces — e.g. `--exclude` then `vendor/my dir/**`
+          # on the next line — which the old unquoted $EXTRACT_ARGS could not do.
+          # Blank lines are ignored. The default ("--no-cluster") is one line.
+          EXTRA_ARGS=()
+          while IFS= read -r _line; do
+            _line="${_line#"${_line%%[![:space:]]*}"}"   # ltrim
+            _line="${_line%"${_line##*[![:space:]]}"}"    # rtrim
+            [ -n "$_line" ] && EXTRA_ARGS+=("$_line")
+          done <<< "$EXTRACT_ARGS"
+
+          # Force --out to the repo root (appended LAST so it wins over any caller
+          # --out) so the graph always lands at ./graphify-out/ regardless of
+          # extract-path. graphify's default --out is <path>, which for a
+          # sub-directory extract-path would write graphify-out/ INSIDE that subdir
+          # and the upload below would miss it.
+          graphify extract "$EXTRACT_PATH" "${EXTRA_ARGS[@]}" --out . 2>&1 | tee /tmp/graphify-build.log
           test -s graphify-out/graph.json
           NODES=$(python3 -c "import json,sys; sys.stdout.write(str(len(json.load(open('graphify-out/graph.json')).get('nodes',[]))))" 2>/dev/null || echo '?')
           echo "nodes=$NODES" >> "$GITHUB_OUTPUT"
