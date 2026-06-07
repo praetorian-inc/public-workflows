@@ -169,24 +169,38 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
+      - name: Verify merge-ref parents are present
+        run: |
+          set -euo pipefail
+          # The hardcoded review scope is `git diff HEAD^1 HEAD`, which needs both
+          # merge parents. depth: 2 provides them today; fail fast (rather than hand
+          # Codex an unusable scope) if GitHub ever changes merge-ref shallow-fetch.
+          git rev-parse --verify HEAD^1 >/dev/null
+          git rev-parse --verify HEAD^2 >/dev/null
+
       - name: Purge PR-supplied agent config (before staging trusted skills)
         run: |
           set -euo pipefail
-          # Codex auto-discovers agent config from the repo root: .agents/skills (skills,
-          # implicit invocation) and AGENTS.override.md / AGENTS.md (instructions, the
-          # override read in PREFERENCE to AGENTS.md). A same-repo PR could plant any of
-          # these to steer the review, so purge them from the PR tree BEFORE the trusted
+          # Codex auto-discovers agent config — .agents/skills (skills, implicit
+          # invocation) and AGENTS.override.md / AGENTS.md (instructions; the override
+          # read in PREFERENCE to AGENTS.md). A same-repo PR could plant any of these to
+          # steer the review, so purge them from the PR tree BEFORE the trusted
           # public-skills checkout — the curated set is then never in scope of this sweep,
           # and the only surviving agent config is public-skills + this workflow's prompt.
-          #   rm -rf .agents : root skills dir. Codex scans .agents/skills upward (CWD->repo
-          #     root) and CWD IS the repo root, so nested .agents below root are never
-          #     discovered — a root purge is sufficient.
-          #   find -exec rm -rf : both AGENTS.md AND AGENTS.override.md. No -type f so a
-          #     *symlinked* variant is removed (not skipped); -iname covers case variants;
-          #     -exec rm -rf (not -delete) so a dir named AGENTS.md can't crash the sweep
-          #     under set -e.
-          rm -rf .agents
-          find . \( -iname 'AGENTS.md' -o -iname 'AGENTS.override.md' \) -exec rm -rf {} +
+          # RECURSIVE, not root-only: Codex re-derives discovery context if its cwd moves
+          # into a subdirectory mid-run, so a nested .agents could otherwise re-enter scope.
+          # find flags:
+          #   - skip .git (speed; never an agent-config source).
+          #   - no -type f, so a *symlinked* AGENTS.md is removed (not skipped); -iname
+          #     covers case variants.
+          #   - -prune on matches so find does NOT descend into a matched directory: with
+          #     -exec rm -rf {} + an ARG_MAX flush could otherwise delete a parent dir
+          #     mid-traversal and crash find under set -e.
+          #   - -exec rm -rf {} + (not -delete) removes files, symlinks, AND directories
+          #     uniformly, so a dir named AGENTS.md can't break the sweep.
+          find . -name .git -prune -o \
+            \( -iname '.agents' -o -iname 'AGENTS.md' -o -iname 'AGENTS.override.md' \) \
+            -prune -exec rm -rf {} +
 
       # Curated review skills, auto-discovered by the Codex CLI from `.agents/skills`
       # in the CWD (implicit, task-matched invocation — developers.openai.com/codex/skills).
