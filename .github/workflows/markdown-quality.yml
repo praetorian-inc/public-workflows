@@ -19,6 +19,7 @@ name: Markdown Quality (Callable)
 #       uses: praetorian-inc/public-workflows/.github/workflows/markdown-quality.yml@<SHA>
 #       permissions:
 #         contents: read
+#         pull-requests: read   # preflight scopes checks to PRs that touch markdown
 #
 # For repos with a custom markdownlint config, place .markdownlint-cli2.jsonc
 # or .markdownlint.jsonc in the repo root. The workflow uses it automatically.
@@ -98,6 +99,13 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      # The "Check for markdown changes" step below calls
+      # `gh api repos/{repo}/pulls/{n}/files` to scope checks to PRs that touch
+      # markdown. On private/internal repos that endpoint requires pull-requests:read;
+      # without it gh returns HTTP 403 and the `set -eu` step fails the whole run.
+      # A reusable job's permissions block is the ceiling for its GITHUB_TOKEN, so
+      # this MUST be declared here — a caller grant alone cannot add the scope.
+      pull-requests: read
     outputs:
       has_md: ${{ steps.check.outputs.has_md }}
     steps:
