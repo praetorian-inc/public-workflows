@@ -1,0 +1,193 @@
+name: Graphify Graph (Callable)
+# Reusable workflow for praetorian-inc repos. Builds a repo's code knowledge graph
+# with graphify and publishes graph.json as a downloadable artifact, so engineers
+# and agents query the latest graph without each rebuilding the (often 50k+ node)
+# graph locally.
+#
+# graphify has no server/daemon — the graph is a file (graphify-out/graph.json) that
+# `graphify query` reads. This workflow is the shared-distribution mechanism: build
+# once in CI, everyone pulls the same artifact. The build is code-only and keyless
+# (`--no-cluster` AST extraction respecting the repo's .graphifyignore, no LLM key).
+#
+# Access: invocable from any repo in the praetorian-inc org
+# (Settings -> Actions -> General -> Access -> Accessible from repositories in the
+# 'praetorian-inc' organization).
+#
+# Caller example (recommended placement: .github/workflows/graphify-graph.yml):
+#
+#   name: graphify-graph
+#   on:
+#     push:
+#       branches: [main]
+#       paths:                       # tune to the repo's source layout
+#         - '**/*.go'
+#         - '.graphifyignore'
+#         - '.github/workflows/graphify-graph.yml'
+#     schedule:
+#       - cron: '0 7 * * 1'          # Mondays 07:00 UTC
+#     workflow_dispatch: {}
+#
+#   permissions:
+#     contents: read
+#
+#   jobs:
+#     graph:
+#       uses: praetorian-inc/public-workflows/.github/workflows/graphify-graph.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#
+# Pull the published graph from a consumer machine:
+#   gh run download -R <owner>/<repo> -n <repo>-graph -D graphify-out
+#
+# Supply-chain posture: graphifyy is PINNED (never 'latest'/--upgrade) so CI never
+# auto-pulls an unreviewed release. `graphifyy` is the legitimate PyPI name for the
+# 61k-star safishamsi/graphify (the single-y `graphify` does not exist on PyPI — any
+# "typosquat" flag is a false positive). Bump `graphify-version` deliberately, in
+# lockstep with the monorepo Makefile's GRAPHIFY_VERSION and the vendored skill's
+# pinned install. No secrets are used — only the auto-granted GITHUB_TOKEN.
+
+on:
+  workflow_call:
+    inputs:
+      graphify-version:
+        description: "Pinned graphifyy version from PyPI. Never 'latest' — the build must use a reviewed release. Bump in lockstep with the monorepo Makefile GRAPHIFY_VERSION."
+        required: false
+        type: string
+        default: "0.8.35"
+
+      extract-path:
+        description: "Path to extract, relative to the repo root."
+        required: false
+        type: string
+        default: "."
+
+      extract-args:
+        description: "Arguments passed to `graphify extract`. Default '--no-cluster' = keyless code-only extraction (no LLM API key, no clustering)."
+        required: false
+        type: string
+        default: "--no-cluster"
+
+      artifact-name:
+        description: "Name of the uploaded graph artifact. Defaults to '<repo>-graph' when empty."
+        required: false
+        type: string
+        default: ""
+
+      retention-days:
+        description: "Artifact retention period in days."
+        required: false
+        type: number
+        default: 30
+
+      enable-harden-runner:
+        description: "Install StepSecurity Harden-Runner as the first step of the job."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: pypi.org:443, files.pythonhosted.org:443, github.com:443, api.github.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443."
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      artifact-name:
+        description: "Name of the uploaded graph artifact."
+        value: ${{ jobs.build.outputs.artifact-name }}
+      graph-nodes:
+        description: "Node count in the produced graph (best-effort; '?' if unparseable)."
+        value: ${{ jobs.build.outputs.graph-nodes }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact-name: ${{ steps.resolve.outputs.name }}
+      graph-nodes: ${{ steps.build.outputs.nodes }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Resolve artifact name
+        id: resolve
+        env:
+          NAME_IN: ${{ inputs.artifact-name }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -eu
+          NAME="$NAME_IN"
+          [ -n "$NAME" ] || NAME="${REPO}-graph"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "Artifact name: $NAME"
+
+      - name: Install graphify (pinned)
+        env:
+          VERSION: ${{ inputs.graphify-version }}
+        run: |
+          set -euo pipefail
+          # Pinned for supply-chain hygiene: never auto-pull an unreviewed release.
+          pipx install "graphifyy==${VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          graphify --version 2>&1 | head -1 || true
+
+      - name: Build graph (code-only, keyless)
+        id: build
+        env:
+          EXTRACT_PATH: ${{ inputs.extract-path }}
+          EXTRACT_ARGS: ${{ inputs.extract-args }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          graphify extract "$EXTRACT_PATH" $EXTRACT_ARGS 2>&1 | tee /tmp/graphify-build.log
+          test -s graphify-out/graph.json
+          NODES=$(python3 -c "import json,sys; sys.stdout.write(str(len(json.load(open('graphify-out/graph.json')).get('nodes',[]))))" 2>/dev/null || echo '?')
+          echo "nodes=$NODES" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        if: always()
+        env:
+          NAME: ${{ steps.resolve.outputs.name }}
+        run: |
+          {
+            echo "### graphify graph: \`$NAME\`"
+            echo ""
+            if [ -s graphify-out/graph.json ]; then
+              echo "- size: \`$(du -h graphify-out/graph.json | cut -f1)\`"
+              echo "- nodes: \`${{ steps.build.outputs.nodes }}\`"
+            else
+              echo "- ⚠️ graph.json not produced"
+            fi
+            echo ""
+            echo '```'
+            tail -8 /tmp/graphify-build.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload graph artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
+        with:
+          name: ${{ steps.resolve.outputs.name }}
+          path: graphify-out/graph.json
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: error

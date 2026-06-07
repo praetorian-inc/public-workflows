@@ -384,6 +384,32 @@ Validated PR version bumps in the old PR-based model. Obsolete with post-merge b
 
 Sets the version to an explicit value. Used for major version resets or manual corrections. Not affected by the bump model change.
 
+### `graphify-graph.yml` — Code knowledge graph builder + artifact publisher
+
+Builds a repo's [graphify](https://github.com/safishamsi/graphify) code knowledge graph (`graphify-out/graph.json`) and publishes it as a downloadable artifact, so engineers and agents query the latest graph without each rebuilding the (often 50k+ node) graph locally. graphify has no server — the graph is a file that `graphify query` reads; this workflow is the shared-distribution mechanism (build once in CI, everyone pulls the same artifact). The build is code-only and keyless (`--no-cluster` AST extraction respecting the repo's `.graphifyignore`, no LLM key).
+
+```yaml
+name: graphify-graph
+on:
+  push:
+    branches: [main]
+    paths: ['**/*.go', '.graphifyignore', '.github/workflows/graphify-graph.yml']
+  schedule:
+    - cron: '0 7 * * 1'
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  graph:
+    uses: praetorian-inc/public-workflows/.github/workflows/graphify-graph.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+```
+
+Pull the published graph from a consumer machine: `gh run download -R <owner>/<repo> -n <repo>-graph -D graphify-out`.
+
+**Supply-chain:** `graphifyy` is PINNED via the `graphify-version` input (default `0.8.35`) — never `latest`/`--upgrade`. Bump deliberately, in lockstep with the monorepo Makefile's `GRAPHIFY_VERSION`. No secrets used (GITHUB_TOKEN only).
+
 ## Pinning requirements
 
 Consumers **must** pin reusable workflow references by SHA (not tag or branch) per the org's supply-chain hardening policy:
