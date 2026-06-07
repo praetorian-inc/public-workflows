@@ -206,8 +206,21 @@ jobs:
           #     cwd; a PR-supplied registry override is a supply-chain vector.
           # The agent's settings + skills then come ONLY from the action input and the
           # SHA-pinned public-skills checkout.
-          rm -rf .gemini .agents .npmrc .yarnrc .yarnrc.yml
-          find . -type f \( -name 'GEMINI.md' -o -name 'AGENTS.md' -o -name '.geminiignore' \) -delete
+          # One robust recursive sweep for the discovery dirs (.gemini/.agents) and the
+          # instruction/ignore files (GEMINI.md/AGENTS.md/.geminiignore). find flags:
+          #   - no -type f, so a *symlinked* GEMINI.md/AGENTS.md is removed (not skipped);
+          #     gemini-cli would otherwise resolve the link. -iname covers case variants.
+          #   - -prune on matches so find does NOT descend into a matched directory: with
+          #     -exec rm -rf {} + an ARG_MAX flush could otherwise delete a parent dir
+          #     mid-traversal and crash find under set -e.
+          #   - -exec rm -rf {} + (not -delete) removes files, symlinks AND directories
+          #     uniformly, so a dir named GEMINI.md can't break the sweep.
+          #   - skip .git (speed) and .pr-skills (the trusted curated tree, staged below).
+          # .npmrc/.yarnrc* are root-only supply-chain files, removed directly.
+          rm -rf .npmrc .yarnrc .yarnrc.yml
+          find . \( -name .git -o -path ./.pr-skills \) -prune -o \
+            \( -iname '.gemini' -o -iname '.agents' -o -iname 'GEMINI.md' -o -iname 'AGENTS.md' -o -iname '.geminiignore' \) \
+            -prune -exec rm -rf {} +
           mkdir -p .gemini/skills
           cp -R .pr-skills/.gemini/skills/. .gemini/skills/
           rm -rf .pr-skills
