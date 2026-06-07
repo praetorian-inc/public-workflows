@@ -6,8 +6,14 @@ name: Graphify Graph (Callable)
 #
 # graphify has no server/daemon — the graph is a file (graphify-out/graph.json) that
 # `graphify query` reads. This workflow is the shared-distribution mechanism: build
-# once in CI, everyone pulls the same artifact. The build is code-only and keyless
-# (`--no-cluster` AST extraction respecting the repo's .graphifyignore, no LLM key).
+# once in CI, everyone pulls the same artifact.
+#
+# KEYLESS REQUIRES A code-only TREE. The build passes no LLM API key, so it must be
+# code-only: `--no-cluster` skips community clustering, but graphify still routes any
+# doc/paper/image files to *semantic* (LLM) extraction and aborts with "no LLM API key
+# found" if any reach it. Keep the graph keyless by ensuring the repo's .graphifyignore
+# excludes doc/paper/image files (and/or point extract-path at a code-only subtree).
+# Our caller repos ship exactly such a .graphifyignore.
 #
 # Access: invocable from any repo in the praetorian-inc org
 # (Settings -> Actions -> General -> Access -> Accessible from repositories in the
@@ -103,7 +109,7 @@ on:
         description: "Name of the uploaded graph artifact."
         value: ${{ jobs.build.outputs.artifact-name }}
       graph-nodes:
-        description: "Node count in the produced graph. '?' only if graph.json is present but its JSON is unparseable — a missing or empty graph fails the build step instead."
+        description: "Node count in the produced graph (always a non-negative integer). The build fails before this is set if graph.json is missing, empty, or unparseable."
         value: ${{ jobs.build.outputs.graph-nodes }}
 
 permissions:
@@ -162,7 +168,9 @@ jobs:
           # Pinned for supply-chain hygiene: never auto-pull an unreviewed release.
           pipx install "graphifyy==${VERSION}"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          graphify --version 2>&1 | head -1 || true
+          # $GITHUB_PATH only affects SUBSEQUENT steps, so call the binary by its
+          # absolute path here to log the installed version reliably in this step.
+          "$HOME/.local/bin/graphify" --version 2>&1 | head -1 || true
 
       - name: Build graph (code-only, keyless)
         id: build
@@ -202,7 +210,12 @@ jobs:
           # and the upload below would miss it.
           graphify extract "$EXTRACT_PATH" "${EXTRA_ARGS[@]}" --out . 2>&1 | tee /tmp/graphify-build.log
           test -s graphify-out/graph.json
-          NODES=$(python3 -c "import json,sys; sys.stdout.write(str(len(json.load(open('graphify-out/graph.json')).get('nodes',[]))))" 2>/dev/null || echo '?')
+          # Validate the graph is parseable JSON with a nodes list BEFORE the upload
+          # step. A present-but-corrupt graph.json must FAIL the build, not publish a
+          # broken artifact consumers cannot query. No '?' fallback — under
+          # `set -euo pipefail` a parse error aborts here. (encoding pinned for
+          # non-ASCII robustness across runner locales.)
+          NODES=$(python3 -c "import json; n=json.load(open('graphify-out/graph.json', encoding='utf-8')).get('nodes'); assert isinstance(n, list), 'graph.json missing nodes list'; print(len(n))")
           echo "nodes=$NODES" >> "$GITHUB_OUTPUT"
 
       - name: Summary
@@ -221,7 +234,9 @@ jobs:
             fi
             echo ""
             echo '```'
-            tail -8 /tmp/graphify-build.log 2>/dev/null || true
+            # Neutralize backticks so a stray ``` in the log can't break out of
+            # this fenced block and inject markdown into the step summary.
+            tail -8 /tmp/graphify-build.log 2>/dev/null | tr '`' "'" || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
