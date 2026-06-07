@@ -204,16 +204,20 @@ jobs:
           #  - it has NO '--' end-of-options separator (a stray '--' is silently
           #    ignored), so we cannot defend the path that way;
           #  - repeated --out is last-wins, so we append our forced --out last.
-          # Also enforce the documented contract that extract-path is RELATIVE to and
-          # CONTAINED WITHIN the checkout: graphify resolves the path with
-          # Path(...).resolve(), so an absolute path or '..' would otherwise let the
-          # build scan and publish a graph for files outside $GITHUB_WORKSPACE.
           case "$EXTRACT_PATH" in
             -*) echo "::error::extract-path must not begin with '-' (got '$EXTRACT_PATH')"; exit 1 ;;
-            /*) echo "::error::extract-path must be relative to the repo root, not absolute (got '$EXTRACT_PATH')"; exit 1 ;;
           esac
-          case "/$EXTRACT_PATH/" in
-            */../*) echo "::error::extract-path must not contain '..' path traversal (got '$EXTRACT_PATH')"; exit 1 ;;
+          # Enforce the documented contract that extract-path is CONTAINED WITHIN the
+          # checkout. graphify resolves the path with Path(...).resolve(), so a lexical
+          # check is insufficient — an absolute path, '..', OR a checked-in symlink
+          # could resolve outside $GITHUB_WORKSPACE and publish a graph for files
+          # outside the repo. Canonicalize (follows symlinks + '..') and require the
+          # result to stay under the workspace.
+          WS=$(realpath -m -- "${GITHUB_WORKSPACE:-$PWD}")
+          RESOLVED=$(realpath -m -- "$EXTRACT_PATH")
+          case "$RESOLVED" in
+            "$WS"|"$WS"/*) : ;;
+            *) echo "::error::extract-path resolves outside the checkout ('$EXTRACT_PATH' -> '$RESOLVED')"; exit 1 ;;
           esac
 
           # Parse extract-args as a newline-delimited list, ONE argv token per

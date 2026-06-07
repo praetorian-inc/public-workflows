@@ -55,3 +55,17 @@ jobs:
           [ "$NODES" -gt 0 ] || { echo "::error::graph-nodes is 0 — fixture produced an empty graph"; exit 1; }
           [ "$ARTIFACT" = "selftest-go-minimal-graph" ] || { echo "::error::artifact-name mismatch: '$ARTIFACT'"; exit 1; }
           echo "outputs OK"
+
+      # Verify the artifact was actually published (not just that outputs were set):
+      # a regression that drops/renames the upload step would otherwise pass.
+      - name: Download published artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: selftest-go-minimal-graph
+          path: downloaded
+      - name: Verify artifact contents
+        run: |
+          set -euo pipefail
+          test -s downloaded/graph.json
+          # Confirm the uploaded graph is the parseable graph.json with a nodes list.
+          python3 -I -c "import json; n=json.load(open('downloaded/graph.json', encoding='utf-8')).get('nodes'); assert isinstance(n, list) and len(n) > 0, 'uploaded graph.json has no nodes'; print('uploaded graph OK:', len(n), 'nodes')"
