@@ -183,7 +183,13 @@ jobs:
           set -euo pipefail
           # Codex auto-discovers agent config — .agents/skills (skills, implicit
           # invocation) and AGENTS.override.md / AGENTS.md (instructions; the override
-          # read in PREFERENCE to AGENTS.md). A same-repo PR could plant any of these to
+          # read in PREFERENCE to AGENTS.md). Also .codex/: a project-scoped
+          # .codex/config.toml can set project_doc_fallback_filenames, which would make
+          # Codex read an arbitrary attacker-named file as instructions, bypassing the
+          # AGENTS.md sweep. Project .codex/ layers load ONLY for trusted projects and a
+          # CI checkout is untrusted by default, so this is belt-and-suspenders — but it
+          # makes the on-disk neutralization guarantee hold regardless of exec trust posture.
+          # A same-repo PR could plant any of these to
           # steer the review, so purge them from the PR tree BEFORE the trusted
           # public-skills checkout — the curated set is then never in scope of this sweep,
           # and the only surviving agent config is public-skills + this workflow's prompt.
@@ -199,7 +205,7 @@ jobs:
           #   - -exec rm -rf {} + (not -delete) removes files, symlinks, AND directories
           #     uniformly, so a dir named AGENTS.md can't break the sweep.
           find . -name .git -prune -o \
-            \( -iname '.agents' -o -iname 'AGENTS.md' -o -iname 'AGENTS.override.md' \) \
+            \( -iname '.agents' -o -iname '.codex' -o -iname 'AGENTS.md' -o -iname 'AGENTS.override.md' \) \
             -prune -exec rm -rf {} +
 
       # Curated review skills, auto-discovered by the Codex CLI from `.agents/skills`
