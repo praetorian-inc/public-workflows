@@ -162,10 +162,18 @@ jobs:
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           # depth 2 brings the merge commit AND both its parents, so the review can
-          # diff against the IMMUTABLE base the PR was merged onto (HEAD^1) rather than
-          # a moving branch tip. HEAD^1 = base commit, HEAD^2 = PR head — both baked
-          # into the merge commit, so the diff can't drift if the base branch advances
-          # between event creation and job execution.
+          # diff against the base the PR was merged onto (HEAD^1) rather than a
+          # separately-fetched, moving branch tip. HEAD^1 = base commit, HEAD^2 = PR
+          # head — both are the parents of whichever merge commit is checked out, so
+          # `git diff HEAD^1 HEAD` is ALWAYS the PR's true delta against its own base
+          # and never absorbs unrelated base-branch commits.
+          # NOTE: this ref is symbolic and resolves at job-run time, so a queued run
+          # reviews the PR's CURRENT merge commit (which may be newer than the commit
+          # that fired this event if the PR advanced meanwhile). That is the intended
+          # behavior for a review-on-demand reviewer; the diff stays correct for
+          # whatever snapshot is reviewed. We deliberately do NOT pin to the event-time
+          # merge SHA: that commit may be unreachable after the merge ref is recomputed,
+          # which would hard-fail the checkout fetch instead of reviewing latest.
           fetch-depth: 2
           persist-credentials: false
 
