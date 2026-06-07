@@ -64,7 +64,7 @@ on:
         description: "Maximum number of Claude tool-call turns for the PR review. Bounds tool iterations only — the job's timeout-minutes remains the wall-clock safety ceiling against runaway/injection loops. Raise for large PRs where the reviewer needs more turns to read the diff and surrounding code before posting."
         required: false
         type: number
-        default: 25
+        default: 30
 
     secrets:
       ANTHROPIC_API_KEY:
@@ -132,7 +132,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     # Wall-clock ceiling on the Claude review job. `--max-turns` (the
-    # `max_turns` input, default 25) caps the number of tool-call turns, but
+    # `max_turns` input, default 30) caps the number of tool-call turns, but
     # NOT wall time (a long-running tool call or a slow Opus response can
     # still burn runner minutes). This timeout is the real safety boundary:
     # an injection-induced loop or a wedged network call would otherwise sit

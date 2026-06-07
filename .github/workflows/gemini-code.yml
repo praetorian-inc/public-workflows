@@ -136,7 +136,7 @@ jobs:
 
     runs-on: ubuntu-24.04
 
-    # Wall-clock ceiling on the agent. `model.maxSessionTurns: 25` caps tool-call
+    # Wall-clock ceiling on the agent. `model.maxSessionTurns: 30` caps tool-call
     # turns, but not wall time; 15 min makes a stuck/looping run fail noticeably
     # rather than hang. This is the hard backstop if the turn cap is ever miscounted.
     timeout-minutes: 15
@@ -280,7 +280,7 @@ jobs:
           # a future schema change where `core` becomes additive. No MCP servers.
           # maxSessionTurns: one turn = one model round-trip that batches all its tool
           # calls (gemini-cli nonInteractiveCli.ts), the same semantic as the Claude
-          # reviewer's --max-turns, so the two share one cap (25).
+          # reviewer's --max-turns, so the two share one cap (30).
           #
           # CRITICAL: the tool names in `core` (and in the prompt below) MUST match the
           # names the pinned gemini_cli_version actually registers. The grep tool was
@@ -293,13 +293,13 @@ jobs:
           # ("Tool not found"), burning the budget until FatalTurnLimitedError (exit 53,
           # "Reached max session turns"). That — not the turn cap — was the v2.7.0/v2.8.x
           # regression. Keep `core` + the prompt in lockstep with the pinned CLI version
-          # whenever you bump gemini_cli_version. 25 turns is headroom; timeout is the
+          # whenever you bump gemini_cli_version. 30 turns is headroom; timeout is the
           # backstop. (Under the action's non-interactive `--yolo`, gemini-cli also
           # advertises the excluded tools to the model — google-gemini/gemini-cli#5728,
           # #18807, #20469 — so the prompt explicitly tells it not to attempt them.)
           settings: |
             {
-              "model": { "maxSessionTurns": 25 },
+              "model": { "maxSessionTurns": 30 },
               "telemetry": { "enabled": false },
               "mcpServers": {},
               "security": { "folderTrust": { "enabled": false } },
