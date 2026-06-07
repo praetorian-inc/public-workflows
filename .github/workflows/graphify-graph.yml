@@ -158,8 +158,12 @@ jobs:
           EXTRACT_ARGS: ${{ inputs.extract-args }}
         run: |
           set -euo pipefail
+          # Force --out to the repo root so the graph always lands at ./graphify-out/
+          # regardless of extract-path. graphify's default --out is <path>, which for a
+          # sub-directory extract-path would write graphify-out/ INSIDE that subdir and
+          # the upload below would miss it.
           # shellcheck disable=SC2086
-          graphify extract "$EXTRACT_PATH" $EXTRACT_ARGS 2>&1 | tee /tmp/graphify-build.log
+          graphify extract "$EXTRACT_PATH" --out . $EXTRACT_ARGS 2>&1 | tee /tmp/graphify-build.log
           test -s graphify-out/graph.json
           NODES=$(python3 -c "import json,sys; sys.stdout.write(str(len(json.load(open('graphify-out/graph.json')).get('nodes',[]))))" 2>/dev/null || echo '?')
           echo "nodes=$NODES" >> "$GITHUB_OUTPUT"

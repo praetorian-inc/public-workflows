@@ -1,0 +1,32 @@
+name: Test graphify-graph.yml (self-test)
+# Self-test harness for the graphify-graph.yml reusable workflow.
+# On every PR that touches graphify-graph.yml or the fixture, this invokes the
+# reusable locally against _test-fixtures/go-minimal and confirms a non-empty
+# graph artifact is produced. Catches regressions before consumers pull a new SHA.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/graphify-graph.yml'
+      - '.github/workflows/test-graphify-graph.yml'
+      - '_test-fixtures/go-minimal/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  call-graphify-graph:
+    name: Call graphify-graph (go-minimal fixture)
+    # Local reference — uses the workflow from THIS commit (caller and callee in same repo).
+    uses: ./.github/workflows/graphify-graph.yml
+    permissions:
+      contents: read
+    with:
+      extract-path: _test-fixtures/go-minimal
+      artifact-name: selftest-go-minimal-graph
+      retention-days: 1
