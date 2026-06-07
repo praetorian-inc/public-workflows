@@ -198,15 +198,16 @@ jobs:
           #   - .gemini / .agents : skill + settings discovery dirs. `.agents/skills`
           #     takes PRECEDENCE over `.gemini/skills`, so a PR-authored skill would
           #     load as a "trusted" skill and drive the review via activate_skill.
-          #   - GEMINI.md (recursive): hierarchical agent instructions, loaded from
-          #     subdirectories too — root-only removal is insufficient.
-          #   - .geminiignore : would silently blind glob/list_directory (e.g. `*`).
+          #   - GEMINI.md / AGENTS.md (recursive): hierarchical agent instructions,
+          #     loaded from subdirectories too — root-only removal is insufficient,
+          #     and gemini-cli honors the AGENTS.md legacy name as well.
+          #   - .geminiignore (recursive): would silently blind glob/list_directory.
           #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this
           #     cwd; a PR-supplied registry override is a supply-chain vector.
           # The agent's settings + skills then come ONLY from the action input and the
           # SHA-pinned public-skills checkout.
-          rm -rf .gemini .agents .geminiignore .npmrc .yarnrc .yarnrc.yml
-          find . -type f -name 'GEMINI.md' -delete
+          rm -rf .gemini .agents .npmrc .yarnrc .yarnrc.yml
+          find . -type f \( -name 'GEMINI.md' -o -name 'AGENTS.md' -o -name '.geminiignore' \) -delete
           mkdir -p .gemini/skills
           cp -R .pr-skills/.gemini/skills/. .gemini/skills/
           rm -rf .pr-skills
@@ -222,9 +223,10 @@ jobs:
           # credentials, mirroring codex-code.yml's tokenless sandbox.
           mkdir -p .gemini-review
           # HEAD is the PR merge commit (parent1 = base, parent2 = PR head).
-          # Diffing parent1..HEAD yields exactly the PR's net change.
-          git diff --no-color HEAD^1 HEAD > .gemini-review/pr.full.diff
-          git diff --name-only HEAD^1 HEAD > .gemini-review/changed-files.txt
+          # Diffing parent1..HEAD yields exactly the PR's net change. quotePath=false
+          # keeps non-ASCII paths raw so the agent can open them by name.
+          git -c core.quotePath=false diff --no-color HEAD^1 HEAD > .gemini-review/pr.full.diff
+          git -c core.quotePath=false diff --name-only HEAD^1 HEAD > .gemini-review/changed-files.txt
 
           MAX=100000
           if [ "$(wc -c < .gemini-review/pr.full.diff)" -gt "$MAX" ]; then
@@ -297,8 +299,11 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
-          CLEAN="${RAW_REVIEW//${GEMINI_API_KEY}/[REDACTED]}"
-          DELIM="EOF_$(date +%s)_$$"
+          # Quote the key so it is matched as a LITERAL, not a bash glob pattern.
+          CLEAN="${RAW_REVIEW//"$GEMINI_API_KEY"/[REDACTED]}"
+          # Unguessable delimiter so untrusted model output can't break out of the
+          # heredoc to inject arbitrary step outputs (GitHub's recommended pattern).
+          DELIM="EOF_$(openssl rand -hex 16)"
           {
             echo "review<<${DELIM}"
             printf '%s\n' "$CLEAN"
