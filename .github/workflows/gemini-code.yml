@@ -280,12 +280,13 @@ jobs:
   #
   # Separated from gemini-review for defense-in-depth: the agent job has no PR write
   # access and no token. This job has `pull-requests: write` but runs no untrusted
-  # code — it only posts the captured `review_output` from the previous job. Uses
-  # pulls.createReview with hardcoded event='COMMENT' so the review appears in the
-  # PR Reviews tab. There is no path to APPROVE — the event is not configurable.
+  # code — it posts the captured `review_output` from the previous job (hardcoded
+  # event='COMMENT', no APPROVE path), or, if the agent job FAILED, a fixed failure
+  # notice so a broken review never disappears silently (parity with the previous
+  # single-shot reviewer). It does NOT run when gemini-review was skipped.
   post-feedback:
     needs: gemini-review
-    if: needs.gemini-review.outputs.review_output != ''
+    if: ${{ always() && (needs.gemini-review.result == 'success' || needs.gemini-review.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -301,6 +302,7 @@ jobs:
           disable-sudo-and-containers: true
 
       - name: Post review comment
+        if: ${{ needs.gemini-review.result == 'success' && needs.gemini-review.outputs.review_output != '' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           GEMINI_REVIEW: ${{ needs.gemini-review.outputs.review_output }}
@@ -325,4 +327,25 @@ jobs:
                 `*Reviewed by Gemini (${process.env.GEMINI_MODEL})*`,
               ].join('\n'),
               event: 'COMMENT',
+            });
+
+      # Failure parity: if the agent job failed (API timeout, model error, etc.), post
+      # a fixed notice instead of failing silently. Hardcoded body — no untrusted input.
+      - name: Post failure notice
+        if: ${{ needs.gemini-review.result == 'failure' }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '## Gemini Review',
+                '',
+                `⚠️ Gemini review did not complete — the review job failed. See the [run logs](${process.env.RUN_URL}).`,
+                'Push a new commit or comment `@gemini` on a review comment to re-trigger.',
+              ].join('\n'),
             });
