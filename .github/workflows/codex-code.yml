@@ -207,7 +207,10 @@ jobs:
           # Purge every PR-supplied agent-control file before staging the pinned set
           # so skills + instructions come ONLY from public-skills and this prompt.
           rm -rf .agents
-          find . -type f -name 'AGENTS.md' -delete
+          # No -type f: a PR could plant a *symlinked* AGENTS.md (which -type f skips)
+          # pointing at malicious content the agent would resolve. -iname also covers
+          # case variations. -delete on a symlink removes the link, not its target.
+          find . -iname 'AGENTS.md' -delete
           mkdir -p .agents/skills
           cp -R .pr-skills/.agents/skills/. .agents/skills/
           rm -rf .pr-skills
