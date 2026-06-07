@@ -119,12 +119,12 @@ jobs:
 
   # Gemini review: run the Gemini CLI as a read-only agent via run-gemini-cli.
   #
-  # The job has `contents: read` only — no PR write access — and the agent step
-  # carries NO GitHub token in its environment. The GITHUB_TOKEN is used only in
-  # the deterministic "Build review context" step (a one-shot in-memory git auth
-  # header that is never persisted and is gone before the agent runs). This means
-  # even if the agent is compromised by prompt injection it has no credential to
-  # exfiltrate and no path to write to the PR. The post-feedback job posts.
+  # The job has `contents: read` only — no PR write access — and NO step in it
+  # uses a GitHub token at all: the depth-2 merge-ref checkout brings the diff's
+  # parents locally, so "Build review context" computes the diff fully offline.
+  # This means even if the agent is compromised by prompt injection it has no
+  # credential to exfiltrate and no path to write to the PR. The post-feedback
+  # job posts.
   gemini-review:
     needs: preflight
     if: |
@@ -173,7 +173,12 @@ jobs:
         with:
           # Merge ref => the working tree reflects the post-merge state, so the
           # agent's read tools see the code as it will exist after the PR lands.
+          # fetch-depth: 2 brings the merge commit AND its parents, so `HEAD^1`
+          # (the base commit the PR was merged onto) resolves locally — depth 1
+          # fetches only the merge commit and `git diff HEAD^1 HEAD` then fails
+          # with "unknown revision". This also means we need no token here.
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 2
           persist-credentials: false
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
@@ -199,24 +204,15 @@ jobs:
           ls -1 .gemini/skills
 
       - name: Build review context (PR diff + changed files)
-        env:
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # One-shot in-memory auth (NOT persisted to .git/config) so the fetch works
-          # against private repos while persist-credentials:false holds. This token
-          # lives ONLY in this deterministic step; it is NOT present in the agent
-          # step's environment, mirroring codex-code.yml's tokenless sandbox.
-          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
-          git -c "http.https://github.com/.extraheader=$AUTH" \
-            fetch --no-tags origin "$PR_BASE_REF" "+refs/pull/$PR_NUMBER/head"
-
+          # No token and no network here: the depth-2 merge-ref checkout already
+          # has the merge commit and both parents locally. This step is fully
+          # deterministic and offline — the agent step that follows holds zero
+          # credentials, mirroring codex-code.yml's tokenless sandbox.
           mkdir -p .gemini-review
-          # HEAD is the PR merge commit (parent1 = base tip, parent2 = PR head).
-          # Diffing parent1..HEAD yields exactly the PR's net change and is robust
-          # on shallow clones (no merge-base computation needed).
+          # HEAD is the PR merge commit (parent1 = base, parent2 = PR head).
+          # Diffing parent1..HEAD yields exactly the PR's net change.
           git diff --no-color HEAD^1 HEAD > .gemini-review/pr.full.diff
           git diff --name-only HEAD^1 HEAD > .gemini-review/changed-files.txt
 

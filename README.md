@@ -209,7 +209,7 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 
 **Security posture** follows `codex-code.yml`'s two-job defense-in-depth split:
 
-- **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and the agent step carries **no GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The diff is materialized in a deterministic step via a one-shot in-memory git auth header that is never persisted and is gone before the agent runs.
+- **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and **no step in it uses a GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The PR diff is computed fully offline (the depth-2 merge-ref checkout brings the diff's parents locally), so the agent runs with zero credentials.
 - **Read-only tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `search_file_content`, `list_directory`) plus `activate_skill`; shell/write/edit/web tools are excluded.
 - **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
 - **Separate post-feedback job**: A minimal `pull-requests: write` job (runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` — no APPROVE path.
