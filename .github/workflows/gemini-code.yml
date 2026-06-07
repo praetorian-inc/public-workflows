@@ -197,6 +197,12 @@ jobs:
       - name: Stage skills for Gemini CLI discovery
         run: |
           set -euo pipefail
+          # Strip any Gemini config the PR's merged tree might carry BEFORE we stage
+          # ours. With workspace trust enabled (see GEMINI_CLI_TRUST_WORKSPACE below)
+          # gemini-cli would otherwise honor a PR-committed .gemini/settings.json or
+          # GEMINI.md — a path for untrusted PR content to re-enable excluded tools or
+          # inject instructions. The agent's settings come ONLY from the action input.
+          rm -rf .gemini GEMINI.md
           mkdir -p .gemini/skills
           cp -R .pr-skills/.gemini/skills/. .gemini/skills/
           rm -rf .pr-skills
@@ -232,6 +238,15 @@ jobs:
       - name: Run Gemini PR Review
         id: gemini
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489  # v0.1.22
+        env:
+          # gemini-cli 0.45.2 refuses to run tools in an "untrusted" folder in headless
+          # mode (downgrades --yolo to interactive-approval, which then errors in CI).
+          # This is the documented headless mechanism to mark the workspace trusted.
+          # Safe here because the only Gemini config in the tree is what we stage: the
+          # prior step removes any PR-supplied .gemini/ or GEMINI.md, and the action
+          # writes our read-only `settings` itself. The read-only tool allowlist — not
+          # the folder-trust prompt — remains the real control.
+          GEMINI_CLI_TRUST_WORKSPACE: "true"
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: ${{ inputs.model }}
@@ -240,8 +255,6 @@ jobs:
           # listed read-only built-ins are available; everything else (shell, write,
           # edit, web) is unavailable. `tools.exclude` is belt-and-suspenders against
           # a future schema change where `core` becomes additive. No MCP servers.
-          # folderTrust disabled so tools are enabled non-interactively in CI (the
-          # read-only allowlist — not the trust prompt — is the real control).
           settings: |
             {
               "model": { "maxSessionTurns": 15 },
