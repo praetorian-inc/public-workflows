@@ -136,11 +136,10 @@ jobs:
 
     runs-on: ubuntu-24.04
 
-    # Wall-clock ceiling on the agent. `model.maxSessionTurns: 50` caps tool-call
-    # turns, but not wall time; 20 min gives the higher turn budget room to complete
-    # a real read-only review while still making a stuck/looping run fail noticeably
+    # Wall-clock ceiling on the agent. `model.maxSessionTurns: 20` caps tool-call
+    # turns, but not wall time; 15 min makes a stuck/looping run fail noticeably
     # rather than hang. This is the hard backstop if the turn cap is ever miscounted.
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     # Deliberately `contents: read` only. No PR write access in this job; the
     # post-feedback job handles comment posting with minimal permissions.
@@ -266,18 +265,19 @@ jobs:
           # listed read-only built-ins are available; everything else (shell, write,
           # edit, web) is unavailable. `tools.exclude` is belt-and-suspenders against
           # a future schema change where `core` becomes additive. No MCP servers.
-          # maxSessionTurns: the agent navigates real PRs with read tools (diff -> defs
-          # -> callers -> siblings), which legitimately needs many turns. 15 was too low
-          # and tripped FatalTurnLimitedError (exit 53, "Reached max session turns")
-          # before a review was produced on non-trivial PRs — made worse because, under
-          # the action's non-interactive `--yolo`, gemini-cli still ADVERTISES the
-          # excluded tools to the model (google-gemini/gemini-cli#5728, #18807, #20469),
-          # so the model spends turns attempting run_shell_command/write_file and getting
-          # rejected. 50 gives real reviews headroom; the prompt below tells the model not
-          # to attempt the unavailable tools, and `timeout-minutes` is the hard backstop.
+          # maxSessionTurns: one turn = one model round-trip that batches all its tool
+          # calls (gemini-cli nonInteractiveCli.ts), the same semantic as the Claude
+          # reviewer's --max-turns, so the two share one cap (20). 15 was too low and
+          # tripped FatalTurnLimitedError (exit 53, "Reached max session turns") before
+          # a review was produced on non-trivial PRs — made worse because, under the
+          # action's non-interactive `--yolo`, gemini-cli still ADVERTISES the excluded
+          # tools to the model (google-gemini/gemini-cli#5728, #18807, #20469), so the
+          # model wastes turns attempting run_shell_command/write_file and getting
+          # rejected. The prompt below tells the model not to attempt the unavailable
+          # tools (the real loop fix); 20 turns is headroom and timeout is the backstop.
           settings: |
             {
-              "model": { "maxSessionTurns": 50 },
+              "model": { "maxSessionTurns": 20 },
               "telemetry": { "enabled": false },
               "mcpServers": {},
               "security": { "folderTrust": { "enabled": false } },
