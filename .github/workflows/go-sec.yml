@@ -22,12 +22,26 @@ name: Go Sec (Callable)
 #
 #   jobs:
 #     security:
-#       uses: praetorian-inc/public-workflows/.github/workflows/go-sec.yml@<SHA>  # v2.0.12
+#       uses: praetorian-inc/public-workflows/.github/workflows/go-sec.yml@<SHA>  # vX.Y.Z
 #       permissions:
 #         contents: read
-#         security-events: write  # required when upload-sarif: true (default)
-#         actions: read           # required by codeql-action/upload-sarif for run metadata
-#       secrets: inherit
+#         security-events: write  # gosec/govulncheck jobs statically declare it — grant even on private repos (else startup_failure)
+#         actions: read           # gosec/govulncheck jobs statically declare it — grant even on private repos (else startup_failure)
+#
+# Posture (safe by default — a caller of ANY visibility can copy the block above verbatim):
+#   - SARIF is uploaded to the Security tab ONLY on public repos (GitHub code scanning
+#     is free there). On private/internal repos the upload is auto-skipped — no GitHub
+#     Advanced Security required, and no false-red CI from a 403. The scan still runs;
+#     findings print to the job log.
+#   - A private/internal repo that HAS a GHAS license can opt back in with
+#     `with: { force-upload-private: true }`.
+#   - Scanning is observe-only by default (go-sec's historical posture). To make findings
+#     FAIL the build — recommended on private/no-GHAS repos where the Security tab is
+#     unavailable — pass `with: { fail-on-findings: true }`.
+#   - Grant security-events:write + actions:read regardless of visibility: the jobs
+#     statically declare them, so omitting them re-triggers a startup_failure even when
+#     the upload is skipped at runtime.
+#   - No `secrets: inherit` needed — this reusable only uses the auto-granted GITHUB_TOKEN.
 #
 # Design rationale: gosec+govulncheck live in their own reusable workflow
 # (separate from go-ci.yml) because
@@ -90,10 +104,22 @@ on:
         default: "./..."
 
       upload-sarif:
-        description: "Whether to upload SARIF findings to the GitHub Security tab. When true, the caller MUST grant both 'security-events: write' (to upload SARIF) AND 'actions: read' (for codeql-action/upload-sarif to fetch workflow run metadata). Missing 'actions: read' surfaces as 'Resource not accessible by integration' on the upload step even when the scan succeeds."
+        description: "Whether to upload SARIF findings to the GitHub Security tab. Auto-skipped on non-public repos unless force-upload-private is set (GitHub code scanning requires GHAS on private/internal repos and 403s without it). When uploaded, the caller MUST grant both 'security-events: write' (to upload SARIF) AND 'actions: read' (for codeql-action/upload-sarif to fetch workflow run metadata). Missing 'actions: read' surfaces as 'Resource not accessible by integration' on the upload step even when the scan succeeds."
         required: false
         type: boolean
         default: true
+
+      force-upload-private:
+        description: "Upload SARIF even on private/internal repos. Requires a GitHub Advanced Security license on the repo (the upload step 403s without it). Default false: SARIF upload is auto-skipped on non-public repos so the scan runs clean without GHAS — findings surface in the job log, and fail-on-findings can gate the build."
+        required: false
+        type: boolean
+        default: false
+
+      fail-on-findings:
+        description: "Fail the job on gosec findings or govulncheck vulnerabilities (exit-code gate). Default false (observe-only — go-sec's historical posture: findings surface via the Security tab on public repos and via the job log everywhere). Set true to enforce a red build on findings — recommended on private/internal repos without GHAS, where the Security tab is unavailable and the red build is the only finding surface."
+        required: false
+        type: boolean
+        default: false
 
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
@@ -125,8 +151,11 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       has_go: ${{ steps.check.outputs.has_go }}
+      has_go_sources: ${{ steps.gosrc.outputs.has_go_sources }}
+      visibility: ${{ steps.repo.outputs.visibility }}
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -135,6 +164,58 @@ jobs:
           egress-policy: ${{ inputs.harden-runner-policy }}
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
           disable-sudo-and-containers: true
+
+      # Resolve repo visibility via the API (reliable on push/PR/schedule/dispatch,
+      # unlike github.event.repository.visibility which is absent on some events).
+      # Drives whether SARIF upload is attempted — never gates the scan itself.
+      - name: Resolve repository visibility
+        id: repo
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          VIS=$(gh api "repos/$REPO" --jq '.visibility' 2>/dev/null || echo "")
+          [ -n "$VIS" ] || VIS="unknown"
+          echo "visibility=$VIS" >> "$GITHUB_OUTPUT"
+          echo "Repository visibility: $VIS"
+
+      # Detect whether the repository contains ANY Go sources (go.mod or *.go),
+      # anywhere in the tree — not just under working-directory. A repo with zero
+      # Go (e.g. a freshly-created capability skeleton like nero) has nothing to
+      # scan: gosec exits 1 with "No packages found" (which -no-fail does NOT
+      # suppress) and govulncheck errors "no go.mod file". We skip both jobs
+      # cleanly instead of red-failing. Whole-repo scope is deliberate: if Go
+      # exists somewhere but NOT under working-directory, that is a
+      # misconfiguration we must NOT mask — gosec is left to surface "No packages
+      # found" there. Fail-safe: on any API error or a truncated tree we assume
+      # Go is present and scan (never skip on uncertainty).
+      - name: Detect Go sources in repository
+        id: gosrc
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          RESP=$(gh api "repos/$REPO/git/trees/$SHA?recursive=1" 2>/dev/null || echo "")
+          if [ -z "$RESP" ]; then
+            echo "has_go_sources=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Could not enumerate the repository tree — assuming Go sources are present and scanning."
+            exit 0
+          fi
+          TRUNCATED=$(printf '%s' "$RESP" | jq -r '.truncated // false')
+          GO_COUNT=$(printf '%s' "$RESP" | jq '[.tree[]? | select(.type=="blob") | select(.path | test("(^|/)go\\.mod$|\\.go$"))] | length')
+          if [ "$TRUNCATED" = "true" ]; then
+            echo "has_go_sources=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Repository tree was truncated by the API — assuming Go sources are present and scanning."
+          elif [ "$GO_COUNT" -gt 0 ]; then
+            echo "has_go_sources=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Repository contains Go sources ($GO_COUNT go.mod/*.go entries) — security scan will run."
+          else
+            echo "has_go_sources=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No Go sources (go.mod or *.go) found anywhere in the repository — skipping gosec/govulncheck. The jobs pass; scanning resumes automatically once Go files are added."
+          fi
 
       - name: Check for Go changes
         id: check
@@ -173,7 +254,7 @@ jobs:
   gosec:
     name: Gosec
     needs: preflight
-    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-gosec
+    if: needs.preflight.outputs.has_go == 'true' && needs.preflight.outputs.has_go_sources == 'true' && inputs.enable-gosec
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -214,10 +295,54 @@ jobs:
 
       - name: Run gosec
         working-directory: ${{ inputs.working-directory }}
-        run: gosec ${{ inputs.gosec-args }}
+        shell: bash
+        env:
+          GOSEC_ARGS: ${{ inputs.gosec-args }}
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+        run: |
+          ARGS="$GOSEC_ARGS"
+          # When enforcing, strip -no-fail so gosec's non-zero exit on findings
+          # gates the build (the SARIF file is still written first, so the
+          # always() upload below still has a valid artifact on public repos).
+          # When NOT enforcing, ARGS is passed through verbatim — preserving the
+          # exit code a caller who removed -no-fail via gosec-args already relied on.
+          if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+            ARGS="${ARGS//-no-fail/}"
+          fi
+          set +e
+          # shellcheck disable=SC2086
+          gosec $ARGS
+          EXIT=$?
+          set -e
+          # Mirror findings from the SARIF file into the job log. gosec writes only
+          # SARIF (-fmt sarif -out ...), so on internal/private repos where the SARIF
+          # upload is skipped (no GHAS) the findings would otherwise be invisible —
+          # a red fail-on-findings build with zero detail. Printing them here keeps
+          # findings actionable everywhere (parallels govulncheck text-mode below),
+          # and surfaces them in observe-only mode too. Does not affect the exit code.
+          if [ -s gosec-results.sarif ]; then
+            COUNT=$(jq "[.runs[]?.results[]?] | length" gosec-results.sarif 2>/dev/null || echo 0)
+            if [ "$COUNT" -gt 0 ]; then
+              echo "::group::gosec findings ($COUNT)"
+              jq -r ".runs[]?.results[]? | \"\(.ruleId // \"?\") [\(.level // \"warning\")] \(.message.text // \"\") — \(.locations[0].physicalLocation.artifactLocation.uri // \"?\"):\(.locations[0].physicalLocation.region.startLine // 0)\"" gosec-results.sarif 2>/dev/null || true
+              echo "::endgroup::"
+            fi
+          fi
+          exit "$EXIT"
 
+      # Announce (don't silently swallow) when upload is skipped on a non-public repo.
+      - name: Note gosec SARIF upload skipped
+        if: ${{ always() && inputs.upload-sarif && needs.preflight.outputs.visibility != 'public' && !inputs.force-upload-private }}
+        env:
+          VIS: ${{ needs.preflight.outputs.visibility }}
+        run: |
+          echo "::notice::gosec SARIF upload skipped — repository visibility is '$VIS' (not public; GitHub code scanning needs GHAS on private/internal repos). The scan ran and findings are in the job log above. Set fail-on-findings:true to gate the build on findings, or enable GHAS and pass with:{ force-upload-private: true } to upload to the Security tab."
+
+      # Upload only when requested AND the repo can accept it: public repos (code
+      # scanning is free) or a private repo that opted in via force-upload-private.
+      # Prevents the GHAS 403 that turns a clean private-repo scan into a false-red.
       - name: Upload gosec SARIF
-        if: ${{ inputs.upload-sarif && always() }}
+        if: ${{ always() && inputs.upload-sarif && (needs.preflight.outputs.visibility == 'public' || inputs.force-upload-private) }}
         uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0  # v4.35.2
         with:
           sarif_file: ${{ inputs.working-directory }}/gosec-results.sarif
@@ -226,7 +351,7 @@ jobs:
   govulncheck:
     name: Govulncheck
     needs: preflight
-    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-govulncheck
+    if: needs.preflight.outputs.has_go == 'true' && needs.preflight.outputs.has_go_sources == 'true' && inputs.enable-govulncheck
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -258,10 +383,15 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@${{ inputs.govulncheck-version }}
 
+      # SARIF mode runs only when the result will actually be uploaded (public
+      # repo, or private repo that opted in via force-upload-private). Otherwise
+      # the text-mode step below runs instead — its findings surface in the log.
       - name: Run govulncheck (SARIF)
-        if: ${{ inputs.upload-sarif }}
+        if: ${{ inputs.upload-sarif && (needs.preflight.outputs.visibility == 'public' || inputs.force-upload-private) }}
         working-directory: ${{ inputs.working-directory }}
         shell: bash
+        env:
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         # govulncheck exits 0 on clean, 3 on vulns-found, other on error. Under
         # the default `bash -e` shell, exit 3 aborts the step mid-pipe and can
         # leave govulncheck-results.sarif empty or truncated; the subsequent
@@ -289,30 +419,55 @@ jobs:
           }
           SARIF_EOF
           fi
+          # Gate on vulnerabilities (exit 3) only when enforcing. The SARIF file
+          # is already written/validated above, so the always() upload below
+          # still has a valid artifact even when we fail the step here.
+          if [ "$FAIL_ON_FINDINGS" = "true" ] && [ "$EXIT" -eq 3 ]; then
+            echo "::error::govulncheck found vulnerabilities (exit=3) and fail-on-findings is enabled."
+            exit "$EXIT"
+          fi
           # Propagate genuine tool errors (exit 1,2) — but treat "vulns found"
           # (exit 3) as success for CI purposes; findings surface via SARIF
           # upload to the GitHub Security tab. Keeps security scanning
           # non-blocking on build pipelines, per design rationale at top of file.
-          if [ $EXIT -ne 0 ] && [ $EXIT -ne 3 ]; then
+          if [ "$EXIT" -ne 0 ] && [ "$EXIT" -ne 3 ]; then
             echo "::error::govulncheck tooling error (exit=$EXIT)"
-            exit $EXIT
+            exit "$EXIT"
           fi
 
+      # Text mode runs when SARIF won't be uploaded (private/internal repo without
+      # GHAS, or upload-sarif:false). Findings print to the job log — the finding
+      # surface when the Security tab is unavailable.
       - name: Run govulncheck (text)
-        if: ${{ !inputs.upload-sarif }}
+        if: ${{ !(inputs.upload-sarif && (needs.preflight.outputs.visibility == 'public' || inputs.force-upload-private)) }}
         working-directory: ${{ inputs.working-directory }}
-        # Same rationale as SARIF branch: exit 3 = vulns found; don't fail the step.
         shell: bash
+        env:
+          FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
         run: |
           set +e
           govulncheck ${{ inputs.govulncheck-package }}
           EXIT=$?
-          if [ $EXIT -ne 0 ] && [ $EXIT -ne 3 ]; then
-            exit $EXIT
+          echo "govulncheck exit code: $EXIT"
+          # exit 3 = vulns found. Gate the build only when enforcing.
+          if [ "$FAIL_ON_FINDINGS" = "true" ] && [ "$EXIT" -eq 3 ]; then
+            echo "::error::govulncheck found vulnerabilities (exit=3) and fail-on-findings is enabled."
+            exit "$EXIT"
+          fi
+          # Propagate genuine tool errors (not clean=0, not vulns=3).
+          if [ "$EXIT" -ne 0 ] && [ "$EXIT" -ne 3 ]; then
+            exit "$EXIT"
           fi
 
+      - name: Note govulncheck SARIF upload skipped
+        if: ${{ always() && inputs.upload-sarif && needs.preflight.outputs.visibility != 'public' && !inputs.force-upload-private }}
+        env:
+          VIS: ${{ needs.preflight.outputs.visibility }}
+        run: |
+          echo "::notice::govulncheck SARIF upload skipped — repository visibility is '$VIS' (not public; GitHub code scanning needs GHAS on private/internal repos). govulncheck ran in text mode; findings are in the job log above. Set fail-on-findings:true to gate the build, or enable GHAS and pass with:{ force-upload-private: true }."
+
       - name: Upload govulncheck SARIF
-        if: ${{ inputs.upload-sarif && always() }}
+        if: ${{ always() && inputs.upload-sarif && (needs.preflight.outputs.visibility == 'public' || inputs.force-upload-private) }}
         uses: github/codeql-action/upload-sarif@7fc6561ed893d15cec696e062df840b21db27eb0  # v4.35.2
         with:
           sarif_file: ${{ inputs.working-directory }}/govulncheck-results.sarif

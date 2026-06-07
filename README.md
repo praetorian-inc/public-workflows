@@ -136,17 +136,17 @@ Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusabl
 **Security posture** (as of v2.0.11):
 
 - **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
-- **Preflight job** skips Claude entirely on non-code PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / .github/** / .claude-plugin/** / LICENSE / .gitignore / CODEOWNERS / images`). Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
+- **Preflight job** skips Claude entirely on non-code PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / .claude-plugin/** / LICENSE / .gitignore / images`). `.github/` workflow changes are intentionally NOT skipped — CI config, job permissions, and secrets passthrough deserve AI review. Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
 - **Model hardcoded**: `--model claude-opus-4-7`. Claude runs once per PR (on `opened` or `ready_for_review`; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). `ready_for_review` covers PRs opened as drafts — without it, the `opened` event fires while `draft==true` (skipped) and the PR never gets a Claude review. Opus is paid 1x per PR for the highest-capability senior-engineer review.
 - `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob"` — the minimum surface needed to review a PR and post the top-level summary comment. Inline line-anchored commenting deliberately NOT included (CodeRabbit covers it).
 - `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
 - Explicit `track_progress: "false"` on the action step.
-- `--max-turns 15` caps runaway loops.
+- `--max-turns` caps tool-call turns (the `max_turns` input, default 30). The `timeout-minutes` wall-clock ceiling, not this, is the backstop against runaway/injection loops.
 - `--append-system-prompt` defensive preamble: Claude is instructed to treat all PR content (title, body, diffs, file contents, CLAUDE.md, comments) as untrusted data, never read secrets/env, and stop + report on injection attempts.
 - **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-security.yml`.
 - `actions/checkout` pinned by SHA, `persist-credentials: false`, `fetch-depth: 1`.
 - `anthropics/claude-code-action` pinned by SHA (`@38ec876...` = v1.0.101).
-- **Wall-clock ceiling**: `timeout-minutes: 5` on preflight, `15` on the claude-code-action job. `--max-turns 15` caps tool-call turns but not wall time; these ceilings bound a wedged network call, a stuck Opus response, or a prompt-injection-induced loop before it can sit on a runner for GitHub's 6-hour default.
+- **Wall-clock ceiling**: `timeout-minutes: 5` on preflight, `15` on the claude-code-action job. `--max-turns` (the `max_turns` input, default 30) caps tool-call turns but not wall time; these ceilings bound a wedged network call, a stuck Opus response, or a prompt-injection-induced loop before it can sit on a runner for GitHub's 6-hour default.
 - **CODEOWNERS** (`.github/CODEOWNERS`) enforces `@praetorian-inc/security-engineering` review on this file.
 
 > ⚠️ **Do NOT enable `ACTIONS_STEP_DEBUG=true` on repos that call this reusable.** The upstream `claude-code-action` auto-enables `show_full_output` under debug logging, which can expose PR content, tool outputs, and the contents of the internal `execution_file` into Actions logs. On public repos those logs are world-readable; on private repos they're readable by anyone with repo read access. If you need to debug a Claude run, do it locally against a test repo, not by flipping debug on a production caller.
@@ -205,16 +205,20 @@ Other event types and `synchronize` actions trigger the caller workflow but are 
 
 ### `gemini-code.yml` — Gemini PR Assistant (hardened)
 
-Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses an inline Python script (`google-genai` + `PyGithub`) for a single-shot review — no external action dependency.
+Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses [`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli) to run the Gemini CLI as an **agent** — like Claude and Codex, it reads past the diff to open the surrounding code (definitions, callers, sibling modules) for real context. It loads Praetorian's curated review skills natively from [`praetorian-inc/public-skills`](https://github.com/praetorian-inc/public-skills) (`.gemini/skills/`, pinned by SHA).
 
-**Security posture** matches `claude-code.yml`:
+**Security posture** follows `codex-code.yml`'s two-job defense-in-depth split:
 
+- **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and **no step in it uses a GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The PR diff is computed fully offline (the depth-2 merge-ref checkout brings the diff's parents locally), so the agent runs with zero credentials.
+- **Read-only tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `search_file_content`, `list_directory`) plus `activate_skill`; shell/write/edit/web tools are excluded.
+- **Untrusted-workspace purge**: because the agent runs against the PR's merged tree with workspace trust enabled, the staging step removes every agent-control file a PR could plant before staging the curated set — `.gemini`/`.agents` (skill + settings discovery; `.agents/skills` would otherwise take precedence), all `GEMINI.md` (recursive), `.geminiignore` (review-blinding), and `.npmrc`/`.yarnrc*` (CLI-install supply-chain). Skills + settings come only from the action input and the SHA-pinned `public-skills` checkout.
+- **Secret redaction**: the `GEMINI_API_KEY` (the only secret in the read-only job) is stripped from the captured review output before it leaves that job — so a prompt-injection that coerces the agent into reading its own environment can't surface the key in the posted comment.
+- **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
+- **Separate post-feedback job**: A minimal `pull-requests: write` job (runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` — no APPROVE path. If the agent job fails, it posts a fixed failure notice instead of failing silently (parity with the previous reviewer); it does not run when the review was skipped.
 - **Same-repo-only gate**: Fork PRs blocked outright (`head.repo.full_name == github.repository`)
 - **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter
-- **Anti-injection prompt**: Gemini instructed to treat all PR content as untrusted data
-- **No repository mutation**: Script reads diffs and posts a PR comment — no file edits, commits, or git operations
-- **StepSecurity Harden-Runner** on every job (audit mode by default)
-- **SHA-pinned actions**: `actions/checkout`, `actions/setup-python`, `step-security/harden-runner`
+- **Anti-injection prompt**: Gemini instructed to treat all PR content (including `GEMINI.md`) as untrusted data
+- **Pinned**: `run-gemini-cli` action SHA-pinned; the CLI version is hardcoded (`0.45.2`, **not** a caller input — it governs folder-trust/tool-policy semantics); `public-skills` checkout pinned by commit SHA
 - **Wall-clock ceiling**: `timeout-minutes: 10` on the review job
 - **CODEOWNERS**: `@praetorian-inc/security-engineering` review required on any change
 
@@ -247,11 +251,11 @@ jobs:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Custom review prompt (diff appended automatically) |
+| `prompt` | Built-in 3-section review template | Custom review prompt (the PR diff is materialized to `.gemini-review/pr.diff` for the agent to read) |
 | `model` | `gemini-3.1-pro-preview` | Gemini model ID |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
-| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, pypi.org:443, files.pythonhosted.org:443` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443` |
 
 **Secrets:**
 
@@ -292,9 +296,93 @@ jobs:
 
 **Security posture:** Workflow-level `permissions: contents: read` ceiling. GitHub App token passed via `env:` (not inline `${{ }}`). Harden-Runner enabled by default. Runner pinned to `ubuntu-24.04`.
 
-### `version-{bump,check,set}.yml` — Claude plugin version management
+### `markdown-quality.yml` — Markdown lint + format check
 
-Three workflows that manage `.claude-plugin/plugin.json` version lifecycle on PRs.
+Reusable workflow for markdown-heavy repositories (skills, docs, plugin libraries). Runs markdownlint (structural quality) + prettier (table/format alignment) in check mode. Designed for repos with no `package.json` — uses `npx` to download tools on demand.
+
+**Minimal caller** (drop this in `.github/workflows/markdown-quality.yml` of a consumer repo):
+
+```yaml
+name: Markdown Quality
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+permissions:
+  contents: read
+jobs:
+  quality:
+    uses: praetorian-inc/public-workflows/.github/workflows/markdown-quality.yml@<SHA>
+    permissions:
+      contents: read
+```
+
+**All inputs** (all optional with sensible defaults):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `working-directory` | `.` | Working dir for the markdown project |
+| `glob` | `**/*.md` | Glob pattern for markdown files |
+| `node-version` | `22` | Node.js version for npx |
+| `enable-markdownlint` | `true` | Run markdownlint-cli2 |
+| `markdownlint-version` | `0.22.1` | Pinned markdownlint-cli2 version |
+| `enable-prettier` | `true` | Run prettier table/format check |
+| `prettier-version` | `3.8.3` | Pinned prettier version |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+**Pre-commit hooks (local auto-fix):** See [`templates/markdown/`](templates/markdown/) for canonical `.pre-commit-config.yaml` and `.markdownlint-cli2.jsonc` that run the same checks with `--fix`/`--write` on commit. CI is the enforcement gate; pre-commit hooks are developer convenience.
+
+### `version-bump.yml` — Claude plugin version management
+
+Bumps `.claude-plugin/plugin.json` (and `package.json` if present) after every merge to main. Each merge gets a unique version — no collision between concurrent PRs.
+
+**Caller workflow** (drop this in `.github/workflows/version-bump.yml`):
+
+```yaml
+name: Version Bump
+on:
+  push:
+    branches: [main]
+jobs:
+  version-bump:
+    uses: praetorian-inc/public-workflows/.github/workflows/version-bump.yml@SHA  # v3.0.0
+    permissions:
+      contents: write
+    secrets:
+      VERSION_BUMPER_APP_ID: ${{ secrets.VERSION_BUMPER_APP_ID }}
+      VERSION_BUMPER_PRIVATE_KEY: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}
+```
+
+**Bump level** is determined from the merged PR's branch name: `release/*` → major, `feat/*` → minor, everything else → patch. Falls back to patch if the branch can't be resolved.
+
+**Prerequisites for each repo:**
+
+1. The `praetorian-ci-version-bumper` GitHub App must be installed on the repo (Org Settings → Installed GitHub Apps → Configure → add repo)
+2. If the repo has old-style branch protection on `main`, add the App to "Allow specified actors to bypass required pull requests"
+3. If the repo has repository rulesets with `pull_request` rules, add the App (Integration ID `3393916`) to the bypass actors list
+4. Remove `version-check.yml` from the repo — it's obsolete with post-merge bumping
+
+**Migration from PR-based bumping (v2.x):**
+
+The old model bumped versions when PRs opened (`pull_request: [opened, labeled]`). This caused version collision when concurrent PRs got the same version number. The new model bumps after merge, eliminating collisions.
+
+To migrate: change the trigger from `pull_request` to `push`, pin to the v3.0.0 SHA, remove `version-check.yml`, and configure the App bypass (steps above).
+
+**Rollout status** (18 plugin repos):
+
+| Status | Repos |
+|--------|-------|
+| ✅ Migrated | `praetorian-core` |
+| ⬜ Pending | `praetorian-engineering`, `praetorian-capabilities`, `praetorian-sales`, `praetorian-marketing`, `praetorian-finance`, `praetorian-it`, `praetorian-pmo`, `praetorian-pm`, `praetorian-threat-modeling`, `praetorian-redteam`, `praetorian-cloud`, `praetorian-iot`, `praetorian-security`, `praetorian-mobile`, `praetorian-msp`, `praetorian-reporting`, `praetorian-offsec` |
+
+### `version-check.yml` — (deprecated, remove from migrated repos)
+
+Validated PR version bumps in the old PR-based model. Obsolete with post-merge bumping — the bump workflow handles both files atomically. Remove from repos that have migrated to `version-bump.yml` v3.0.0+.
+
+### `version-set.yml` — Manual version override
+
+Sets the version to an explicit value. Used for major version resets or manual corrections. Not affected by the bump model change.
 
 ## Pinning requirements
 

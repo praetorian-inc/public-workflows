@@ -1,0 +1,140 @@
+name: Test go-release.yml (self-test)
+# Self-test harness for go-release.yml and go-auto-tag.yml.
+# Validates YAML syntax, SHA-pinning, version calculation logic, and
+# GoReleaser config. Runs on every PR that touches these workflows.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/go-release.yml'
+      - '.github/workflows/go-auto-tag.yml'
+      - '.github/workflows/test-go-release.yml'
+      - '_test-fixtures/go-release/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Job 1: Validate YAML syntax with yamllint
+  # ──────────────────────────────────────────────────────────────
+  yaml-lint:
+    name: YAML lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install yamllint
+        run: pip install --quiet yamllint
+
+      - name: Lint workflows
+        run: |
+          yamllint -d '{extends: default, rules: {line-length: disable, truthy: disable, comments-indentation: disable}}' \
+            .github/workflows/go-release.yml \
+            .github/workflows/go-auto-tag.yml
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: Verify all actions are SHA-pinned with version comments
+  # ──────────────────────────────────────────────────────────────
+  verify-sha-pins:
+    name: Verify SHA pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Check SHA pins
+        run: |
+          set -euo pipefail
+          FAIL=0
+          for file in .github/workflows/go-release.yml .github/workflows/go-auto-tag.yml; do
+            echo "Checking $file..."
+            while IFS= read -r line; do
+              trimmed=$(echo "$line" | sed 's/^[[:space:]]*//')
+              # Skip local references (./.github/workflows/...)
+              echo "$trimmed" | grep -q '\./' && continue
+              if ! echo "$trimmed" | grep -qE '@[a-f0-9]{40}\b'; then
+                echo "  FAIL: not SHA-pinned: $trimmed"
+                FAIL=1
+              fi
+              if ! echo "$trimmed" | grep -qE '#.*v[0-9]'; then
+                echo "  WARN: missing version comment: $trimmed"
+              fi
+            done < <(grep -E '^\s+uses:' "$file")
+          done
+          if [ "$FAIL" -eq 1 ]; then
+            echo "::error::Some actions are not SHA-pinned. Pin to full commit SHA."
+            exit 1
+          fi
+          echo "All actions properly SHA-pinned."
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: Unit-test the version calculation algorithm
+  # ──────────────────────────────────────────────────────────────
+  test-version-calc:
+    name: Test version calculation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Run version calculation tests
+        run: bash _test-fixtures/go-release/test-version-calc.sh
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 4: Validate GoReleaser config against test fixture
+  # ──────────────────────────────────────────────────────────────
+  test-goreleaser-check:
+    name: GoReleaser config check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: _test-fixtures/go-release/go.mod
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89  # v7.2.2
+        with:
+          install-only: true
+          version: v2.13.3
+
+      - name: Validate config
+        working-directory: _test-fixtures/go-release
+        run: goreleaser check

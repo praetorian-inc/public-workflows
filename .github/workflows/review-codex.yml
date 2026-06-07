@@ -1,0 +1,22 @@
+name: Codex PR Review
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: codex-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # stray review comments must not cancel an in-progress review
+
+jobs:
+  codex-review:
+    uses: ./.github/workflows/codex-code.yml
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      model: "gpt-5.4"
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

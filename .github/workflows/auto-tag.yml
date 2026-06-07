@@ -1,0 +1,23 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  auto-tag:
+    uses: ./.github/workflows/go-auto-tag.yml
+    permissions:
+      contents: write
+      pull-requests: read
+    with:
+      default-bump: patch
+    # Push the tag as the praetorian-ci-version-bumper App so it can bypass the
+    # "Protected Version Tags" ruleset (GITHUB_TOKEN is not a bypass actor).
+    secrets:
+      VERSION_BUMPER_APP_ID: ${{ secrets.VERSION_BUMPER_APP_ID }}
+      VERSION_BUMPER_PRIVATE_KEY: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}

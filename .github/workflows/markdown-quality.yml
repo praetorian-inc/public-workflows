@@ -1,0 +1,234 @@
+name: Markdown Quality (Callable)
+# Reusable workflow for markdown-heavy repositories in the praetorian-inc org.
+# Runs markdownlint (structural quality) + prettier (table/format alignment)
+# in check mode. No auto-fix — fails with instructions to run locally.
+#
+# Designed for repos with no package.json (pure markdown repos like guard-skills,
+# documentation, plugin skill libraries). Uses npx to download tools on demand.
+#
+# Caller example (drop this in .github/workflows/markdown-quality.yml):
+#
+#   name: Markdown Quality
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#   permissions:
+#     contents: read
+#   jobs:
+#     quality:
+#       uses: praetorian-inc/public-workflows/.github/workflows/markdown-quality.yml@<SHA>
+#       permissions:
+#         contents: read
+#         pull-requests: read   # preflight scopes checks to PRs that touch markdown
+#
+# For repos with a custom markdownlint config, place .markdownlint-cli2.jsonc
+# or .markdownlint.jsonc in the repo root. The workflow uses it automatically.
+# If no config exists, a sensible default is generated (see Generate step).
+#
+# For local auto-fix (pre-commit hooks), see templates/markdown/ in this repo.
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Working directory for the markdown project."
+        required: false
+        type: string
+        default: "."
+
+      glob:
+        description: "Glob pattern for markdown files to check."
+        required: false
+        type: string
+        default: "**/*.md"
+
+      node-version:
+        description: "Node.js version to use for npx."
+        required: false
+        type: string
+        default: "22"
+
+      enable-markdownlint:
+        description: "Run markdownlint-cli2 for structural markdown quality."
+        required: false
+        type: boolean
+        default: true
+
+      markdownlint-version:
+        description: "Pinned markdownlint-cli2 version. Never use 'latest'."
+        required: false
+        type: string
+        default: "0.22.1"
+
+      enable-prettier:
+        description: "Run prettier --check for table column alignment and formatting."
+        required: false
+        type: boolean
+        default: true
+
+      prettier-version:
+        description: "Pinned prettier version. Never use 'latest'."
+        required: false
+        type: string
+        default: "3.8.3"
+
+      enable-harden-runner:
+        description: "Enable StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # The "Check for markdown changes" step below calls
+      # `gh api repos/{repo}/pulls/{n}/files` to scope checks to PRs that touch
+      # markdown. On private/internal repos that endpoint requires pull-requests:read;
+      # without it gh returns HTTP 403 and the `set -eu` step fails the whole run.
+      # A reusable job's permissions block is the ceiling for its GITHUB_TOKEN, so
+      # this MUST be declared here — a caller grant alone cannot add the scope.
+      pull-requests: read
+    outputs:
+      has_md: ${{ steps.check.outputs.has_md }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Check for markdown changes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+
+          # Non-PR events (push to main, schedule, dispatch) always run.
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "has_md=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Non-PR event (${{ github.event_name }}) — markdown quality will run."
+            exit 0
+          fi
+
+          FILES=$(gh api \
+            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
+            --paginate --jq '.[].filename')
+
+          if echo "$FILES" | grep -qE '\.(md|markdown)$'; then
+            echo "has_md=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Markdown changes detected — quality checks will run."
+          else
+            echo "has_md=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ No markdown changes — quality checks will be skipped."
+          fi
+
+  quality:
+    name: Lint & format check
+    needs: preflight
+    if: needs.preflight.outputs.has_md == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Generate default markdownlint config
+        if: ${{ inputs.enable-markdownlint }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          # Use repo config if it exists; otherwise generate a sensible default.
+          # The default disables rules that conflict with common markdown patterns:
+          #   MD013: line length — tables, URLs, and code lines regularly exceed 80 chars
+          #   MD033: inline HTML — <details>, <summary>, HTML tables are used in skills/docs
+          #   MD041: first-line heading — YAML frontmatter (---) is the first line in skills
+          #   MD024: duplicate headings — allowed in sibling sections (e.g., "Step 1" under different parents)
+          for f in .markdownlint-cli2.jsonc .markdownlint-cli2.yaml .markdownlint.jsonc .markdownlint.json .markdownlint.yaml; do
+            if [ -f "$f" ]; then
+              echo "Using repo-provided markdownlint config: $f"
+              exit 0
+            fi
+          done
+
+          cat > .markdownlint-cli2.jsonc << 'MLCFG'
+          {
+            "config": {
+              "MD013": false,
+              "MD033": false,
+              "MD041": false,
+              "MD024": { "siblings_only": true }
+            }
+          }
+          MLCFG
+          echo "Generated default markdownlint config (no repo config found)"
+
+      - name: Markdownlint
+        if: ${{ inputs.enable-markdownlint }}
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          MDLINT_VERSION: ${{ inputs.markdownlint-version }}
+          MDLINT_GLOB: ${{ inputs.glob }}
+        run: |
+          echo "Running markdownlint-cli2@${MDLINT_VERSION}..."
+          npx "markdownlint-cli2@${MDLINT_VERSION}" "${MDLINT_GLOB}" || {
+            echo ""
+            echo "::error::Markdown lint errors found. Fix locally with:"
+            echo "  npx markdownlint-cli2 --fix \"${MDLINT_GLOB}\""
+            echo ""
+            echo "Or install pre-commit hooks (see public-workflows/templates/markdown/)."
+            exit 1
+          }
+
+      - name: Prettier format check
+        if: ${{ inputs.enable-prettier && (success() || failure()) }}
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PRETTIER_VERSION: ${{ inputs.prettier-version }}
+          PRETTIER_GLOB: ${{ inputs.glob }}
+        run: |
+          echo "Running prettier@${PRETTIER_VERSION} --check..."
+          npx "prettier@${PRETTIER_VERSION}" --check --parser markdown "${PRETTIER_GLOB}" || {
+            echo ""
+            echo "::error::Table/format issues found. Fix locally with:"
+            echo "  npx prettier --write --parser markdown \"${PRETTIER_GLOB}\""
+            echo ""
+            echo "Or install pre-commit hooks (see public-workflows/templates/markdown/)."
+            exit 1
+          }

@@ -123,9 +123,11 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          # SKIP_RE: docs, licenses, images, CI config, plugin metadata.
-          # If ALL changed files match, this is a non-code PR.
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^docs/|^\.github/|^\.claude-plugin/'
+          # SKIP_RE: docs, licenses, images, plugin metadata.
+          # If ALL changed files match, this is a non-code PR. NOTE: .github/ is
+          # intentionally NOT skipped — workflow/CI config, job permissions, and
+          # secrets passthrough are high-risk and deserve AI review.
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^docs/|^\.claude-plugin/'
 
           if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
@@ -135,5 +137,5 @@ jobs:
             echo "⊘ Docs/config-only PR — $REVIEWER_NAME review will be skipped."
             gh pr comment "$PR_NUMBER" \
               --repo "$REPO" \
-              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.github/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
+              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
           fi

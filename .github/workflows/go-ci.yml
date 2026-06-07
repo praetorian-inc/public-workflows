@@ -14,7 +14,7 @@ name: Go CI (Callable)
 #       permissions:
 #         contents: read
 #       with:
-#         golangci-lint-version: v2.11.4
+#         golangci-lint-version: v2.12.2
 #       secrets: inherit
 
 on:
@@ -42,7 +42,7 @@ on:
         description: "Pinned golangci-lint binary version. Use a specific version; never 'latest'."
         required: false
         type: string
-        default: "v2.11.4"
+        default: "v2.12.2"
 
       golangci-lint-timeout:
         description: "Timeout for golangci-lint run."
@@ -147,6 +147,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       has_go: ${{ steps.check.outputs.has_go }}
     steps:

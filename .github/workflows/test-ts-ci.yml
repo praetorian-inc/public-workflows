@@ -24,7 +24,6 @@ permissions:
 jobs:
   call-ts-ci-defaults:
     name: Call ts-ci (defaults)
-    timeout-minutes: 20
     uses: ./.github/workflows/ts-ci.yml
     permissions:
       contents: read
@@ -33,7 +32,6 @@ jobs:
 
   call-ts-ci-test-only:
     name: Call ts-ci (test only, no lint/typecheck)
-    timeout-minutes: 20
     uses: ./.github/workflows/ts-ci.yml
     permissions:
       contents: read
