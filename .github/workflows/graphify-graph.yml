@@ -71,7 +71,7 @@ on:
         default: "."
 
       extract-args:
-        description: "Extra args for `graphify extract`, ONE token per line (newline-delimited, NOT space-separated), so a token may contain spaces without quoting (e.g. line 1 '--exclude', line 2 'vendor/my dir/**'). Blank lines ignored. Default '--no-cluster' = keyless code-only extraction (no LLM API key, no clustering). The workflow always appends '--out .' itself."
+        description: "Extra args for `graphify extract`, ONE token per line (newline-delimited, NOT space-separated), so a token may contain spaces without quoting (e.g. line 1 '--exclude', line 2 'vendor/my dir/**'). Blank lines ignored. Default '--no-cluster' = keyless code-only extraction (no LLM API key, no clustering). The workflow always appends '--out .' itself. Tokens are passed through verbatim — graphify silently ignores unrecognized flags, so a typo'd flag is skipped rather than erroring; double-check flag spelling."
         required: false
         type: string
         default: "--no-cluster"
