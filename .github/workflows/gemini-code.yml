@@ -206,8 +206,12 @@ jobs:
           #     cwd; a PR-supplied registry override is a supply-chain vector.
           # The agent's settings + skills then come ONLY from the action input and the
           # SHA-pinned public-skills checkout.
+          # No -type f: a PR could plant a *symlinked* GEMINI.md/AGENTS.md (which
+          # -type f skips) pointing at content gemini-cli would resolve. -iname covers
+          # case variants. -exec rm -rf {} + (not -delete) so a PR can't crash the sweep
+          # under set -e by planting a non-empty directory named GEMINI.md/AGENTS.md.
           rm -rf .gemini .agents .npmrc .yarnrc .yarnrc.yml
-          find . -type f \( -name 'GEMINI.md' -o -name 'AGENTS.md' -o -name '.geminiignore' \) -delete
+          find . \( -iname 'GEMINI.md' -o -iname 'AGENTS.md' -o -iname '.geminiignore' \) -exec rm -rf {} +
           mkdir -p .gemini/skills
           cp -R .pr-skills/.gemini/skills/. .gemini/skills/
           rm -rf .pr-skills
