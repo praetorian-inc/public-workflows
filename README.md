@@ -52,7 +52,7 @@ jobs:
 | `working-directory` | `.` | Working dir for multi-module repos |
 | `go-version-file` | `go.mod` | Path to go.mod (relative to `working-directory`) |
 | `enable-lint` | `true` | Run golangci-lint |
-| `golangci-lint-version` | `v2.11.4` | Pinned golangci-lint binary version (never `latest`) |
+| `golangci-lint-version` | `v2.12.2` | Pinned golangci-lint binary version (never `latest`) |
 | `golangci-lint-timeout` | `5m` | Lint timeout |
 | `enable-test` | `true` | Run `go test` |
 | `test-flags` | `-race -coverprofile=coverage.out -covermode=atomic` | Flags for `go test` |
@@ -71,7 +71,7 @@ jobs:
 **Secrets:**
 - `CODECOV_TOKEN` — required only if `upload-coverage: true`
 
-### `go-security.yml` — Go security scanning (gosec + govulncheck)
+### `go-sec.yml` — Go security scanning (gosec + govulncheck)
 
 Reusable workflow for Go repositories that runs SAST (`gosec`) and Go vulnerability database scanning (`govulncheck`), optionally publishing SARIF findings to the GitHub Security tab. **Separate from `go-ci.yml`** so that:
 - callers only grant `security-events: write` when they want SARIF upload,
@@ -79,6 +79,8 @@ Reusable workflow for Go repositories that runs SAST (`gosec`) and Go vulnerabil
 - a broken security tool doesn't block builds (independent blast radius).
 
 This matches the pattern used by `ossf/scorecard`, `kubernetes/release`, `cli/cli`, and `prometheus/prometheus`.
+
+**Safe by default for any repo visibility:** SARIF is uploaded to the Security tab **only on public repos** (GitHub code scanning is free there). On private/internal repos the upload is auto-skipped — no GitHub Advanced Security license required, no false-red CI from a 403 — and the scan still runs with findings printed to the job log. A private/internal repo that *has* a GHAS license can opt back in with `force-upload-private: true`. Scanning is observe-only by default; set `fail-on-findings: true` to make findings fail the build (recommended on private/no-GHAS repos where the Security tab is unavailable). Grant `security-events: write` + `actions: read` regardless of visibility — the jobs statically declare them, so omitting them re-triggers a `startup_failure` even when the upload is skipped at runtime.
 
 **Minimal caller** (drop this in `.github/workflows/security.yml` of a consumer repo):
 
@@ -96,13 +98,14 @@ permissions:
 
 jobs:
   security:
-    uses: praetorian-inc/public-workflows/.github/workflows/go-security.yml@<SHA>  # v2.0.12
+    uses: praetorian-inc/public-workflows/.github/workflows/go-sec.yml@<SHA>  # vX.Y.Z
     permissions:
       contents: read
-      security-events: write  # required when upload-sarif: true (default)
+      security-events: write  # grant regardless of repo visibility — jobs statically declare it (else startup_failure)
       actions: read           # required by codeql-action/upload-sarif for run metadata
-    secrets: inherit
 ```
+
+No `secrets: inherit` needed — this reusable only uses the auto-granted `GITHUB_TOKEN`.
 
 **All inputs** (all optional with sensible defaults):
 
@@ -115,7 +118,9 @@ jobs:
 | `enable-govulncheck` | `true` | Run govulncheck against the module |
 | `govulncheck-version` | `v1.1.4` | Pinned govulncheck module version |
 | `govulncheck-package` | `./...` | Package selector for govulncheck |
-| `upload-sarif` | `true` | Upload SARIF findings to the GitHub Security tab. When `true`, **the caller MUST grant both `security-events: write` and `actions: read`**. Missing `actions: read` surfaces as "Resource not accessible by integration" on the upload step even though the scan itself succeeded — `codeql-action/upload-sarif` needs to fetch workflow run metadata. Set `false` to run as CI-only checks without publishing to the Security tab. |
+| `upload-sarif` | `true` | Upload SARIF findings to the GitHub Security tab. **Auto-skipped on non-public repos** (code scanning needs a GHAS license there and would 403) unless `force-upload-private: true`. When uploaded, **the caller MUST grant both `security-events: write` and `actions: read`** — missing `actions: read` surfaces as "Resource not accessible by integration" on the upload step even though the scan itself succeeded (`codeql-action/upload-sarif` fetches workflow run metadata). Set `false` to run as CI-only checks without publishing to the Security tab. |
+| `force-upload-private` | `false` | Upload SARIF even on private/internal repos. Requires a GitHub Advanced Security license on the repo (the upload step 403s without it). |
+| `fail-on-findings` | `false` | Fail the job on gosec findings or govulncheck vulnerabilities (exit-code gate). Default is observe-only; set `true` to enforce a red build — recommended on private/internal repos without GHAS, where the Security tab is unavailable and the red build is the only finding surface. |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as first step of every job |
 | `harden-runner-policy` | `audit` | `audit` (observe) or `block` (deny-by-default egress) |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated allowlist for block mode |
@@ -127,25 +132,163 @@ jobs:
 | `gosec` | v2.22.11 | Requires Go >= 1.24. Installed via `go install github.com/securego/gosec/v2/cmd/gosec@<version>` — the `securego/gosec` GitHub Action is not on the org allowlist, so we use a pinned `go install` instead. |
 | `govulncheck` | v1.1.4 | Requires Go >= 1.22. Installed via `go install golang.org/x/vuln/cmd/govulncheck@<version>`. |
 | `github/codeql-action/upload-sarif` | v4.35.2 | Used for SARIF upload to the Security tab (github-owned, always allowlisted). v4 runs on Node 24; v3 was on deprecated Node 20. |
-| `actions/setup-go` | v6.3.0 | Uses `go-version: stable` — the tool binaries analyze source; they don't need to match the consumer's go.mod Go version. |
+| `actions/setup-go` | v6.4.0 | Uses `go-version: stable` — the tool binaries analyze source; they don't need to match the consumer's go.mod Go version. |
+
+### `go-auto-tag.yml` — Go semver auto-tagging on merge
+
+Auto-tags Go module repos on merge to main: reads the latest semver tag, determines the bump level from the merged PR's branch name or commit-message convention, then creates and pushes the new tag. Single source of truth for version calculation (replaces ad-hoc Makefile logic previously copy-pasted into caligula/trajan). Tags created with `GITHUB_TOKEN` do **not** trigger other workflows by design — pass the optional GitHub App secrets to push the tag as the App so it *does* trigger tag-based release workflows (and can bypass a Protected-Version-Tags ruleset).
+
+**Minimal caller** (drop this in `.github/workflows/auto-tag.yml` of a consumer repo):
+
+```yaml
+name: Auto Tag
+on:
+  push: { branches: [main] }
+jobs:
+  auto-tag:
+    uses: praetorian-inc/public-workflows/.github/workflows/go-auto-tag.yml@<SHA>
+    permissions:
+      contents: write
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `default-bump` | `patch` | Bump level when no convention is detected (`patch`/`minor`/`major`) |
+| `major-pattern` | `[major-release]` | Commit-message/branch pattern that triggers a major bump |
+| `minor-pattern` | `[minor-release]` | Commit-message/branch pattern that triggers a minor bump |
+| `tag-prefix` | `v` | Prefix for version tags (alphanumeric + hyphens) |
+| `seed-version` | `0.1.0` | Initial version when no tags exist yet (without prefix) |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+**Outputs:** `version` (the new tag, e.g. `v1.2.3`), `previous-version` (prior tag, empty on first tag), `tag-created` (`true`/`false`).
+
+**Secrets** (both optional — needed only to push as a GitHub App):
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `VERSION_BUMPER_APP_ID` | no | GitHub App ID (e.g. `praetorian-ci-version-bumper`). When set, the tag is pushed as the App so it can bypass a Protected-Version-Tags ruleset and trigger tag-based release workflows. Falls back to `GITHUB_TOKEN` when unset. |
+| `VERSION_BUMPER_PRIVATE_KEY` | only when `VERSION_BUMPER_APP_ID` is set | Private key for the App above |
+
+### `go-release.yml` — Go binary release (GoReleaser + SBOM + signing + provenance)
+
+Reusable release workflow for Go binary repos with supply-chain hardening baked in: SHA-pinned GoReleaser, Syft SBOMs, keyless cosign signing (Sigstore OIDC), and build-provenance attestation. **Two modes:**
+
+- `tag-push` (default) — caller triggers on `push: tags: ['v*']`; the tag already exists.
+- `auto-tag-from-main` — caller triggers on `push: branches: [main]`; this workflow calculates the next semver, creates the tag, then releases (caligula/trajan pattern).
+
+**Minimal caller — `tag-push`** (drop this in `.github/workflows/release.yml`):
+
+```yaml
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    uses: praetorian-inc/public-workflows/.github/workflows/go-release.yml@<SHA>
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+```
+
+For `auto-tag-from-main`, trigger on `push: branches: [main]` and add `with: { release-mode: auto-tag-from-main }`.
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `release-mode` | `tag-push` | `tag-push` or `auto-tag-from-main` |
+| `default-bump` | `patch` | Bump level when no convention is detected (auto-tag mode) |
+| `major-pattern` | `[major-release]` | Commit-message substring for a major bump (auto-tag mode) |
+| `minor-pattern` | `[minor-release]` | Commit-message substring for a minor bump (auto-tag mode) |
+| `tag-prefix` | `v` | Version tag prefix |
+| `seed-version` | `0.1.0` | Initial version when no tags exist |
+| `goreleaser-version` | `v2.13.3` | Pinned GoReleaser version (never `latest`) |
+| `goreleaser-config-path` | `.goreleaser.yaml` | Path to the GoReleaser config |
+| `goreleaser-args` | `release --clean` | Extra args for `goreleaser release` |
+| `enable-sbom` | `true` | Generate Syft SBOMs per archive (needs `sboms:` in config) |
+| `enable-sign` | `true` | Sign checksums with cosign (keyless OIDC) |
+| `enable-provenance` | `true` | Build-provenance attestation via `actions/attest-build-provenance` |
+| `publish-container` | `false` | Build + push a container image to ghcr.io (needs `dockers:` in config) |
+| `runner` | `ubuntu-24.04` | Runner label (override for larger runners) |
+| `working-directory` | `.` | Working dir for multi-module repos |
+| `go-version-file` | `go.mod` | Path to go.mod (relative to working-directory) |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+**Outputs:** `version` (the released version), `tag-created` (`true` only in auto-tag mode).
+
+**Secrets** (both optional — only for `auto-tag-from-main` pushing as a GitHub App):
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `VERSION_BUMPER_APP_ID` | no | GitHub App ID to push the auto-tag as the App (bypass a Protected-Version-Tags ruleset). Falls back to `GITHUB_TOKEN`. |
+| `VERSION_BUMPER_PRIVATE_KEY` | only when `VERSION_BUMPER_APP_ID` is set | Private key for the App |
+
+### `titus-scan.yml` — Titus secrets scan (language-agnostic)
+
+Runs [Titus](https://github.com/praetorian-inc/titus) against the caller's repo to detect leaked secrets, credentials, and API keys. Language-agnostic — works on Go, TypeScript, Python, YAML, or any repo. Lives in its own reusable (separate from `go-sec.yml`) because secrets scanning applies to every repo and deserves independent blast radius. **Fail-closed by default** (`fail-on-findings: true`): a secret finding fails the build. Like `go-sec.yml`, SARIF is uploaded to the Security tab only on public repos (auto-skipped on private/internal unless `force-upload-private: true`); grant `security-events: write` + `actions: read` regardless of visibility — the job statically declares them (else `startup_failure`).
+
+**Minimal caller** (drop this in `.github/workflows/secrets-scan.yml`):
+
+```yaml
+name: Secrets Scan
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  schedule:
+    - cron: '0 7 * * 1'  # weekly baseline
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  scan:
+    uses: praetorian-inc/public-workflows/.github/workflows/titus-scan.yml@<SHA>
+    permissions:
+      contents: read
+      security-events: write  # grant regardless of visibility — the job declares it (else startup_failure)
+      actions: read
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `titus-version` | `v1.1.27` | Pinned Titus version (never `latest`) |
+| `scan-target` | `.` | Target to scan |
+| `scan-args` | `--format sarif --output :memory:` | Extra args for `titus scan` |
+| `scan-git-history` | `false` | Scan git history (`--git`) — slower, catches secrets in past commits |
+| `upload-sarif` | `true` | Upload SARIF to the Security tab. Auto-skipped on non-public repos unless `force-upload-private`. |
+| `force-upload-private` | `false` | Upload SARIF even on private/internal repos (requires a GHAS license) |
+| `fail-on-findings` | `true` | Fail the build on secret findings (fail-closed). Set `false` only for a deliberate observe-only rollout. |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+No secrets required — uses the auto-granted `GITHUB_TOKEN`.
 
 ### `claude-code.yml` — Claude PR Assistant (hardened)
 
 Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusable workflow.** Callers cannot widen the tool allowlist, relax the gates, change the model, or override the hardening — any such change requires a PR to this repo with `@praetorian-inc/security-engineering` review (see CODEOWNERS).
 
-**Security posture** (as of v2.0.11):
+**Security posture** (as of v2.9.3):
 
 - **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
 - **Preflight job** skips Claude entirely on non-code PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / .claude-plugin/** / LICENSE / .gitignore / images`). `.github/` workflow changes are intentionally NOT skipped — CI config, job permissions, and secrets passthrough deserve AI review. Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
-- **Model hardcoded**: `--model claude-opus-4-7`. Claude runs once per PR (on `opened` or `ready_for_review`; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). `ready_for_review` covers PRs opened as drafts — without it, the `opened` event fires while `draft==true` (skipped) and the PR never gets a Claude review. Opus is paid 1x per PR for the highest-capability senior-engineer review.
+- **Model hardcoded**: `--model claude-opus-4-8`. Claude runs once per PR (on `opened` or `ready_for_review`; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). `ready_for_review` covers PRs opened as drafts — without it, the `opened` event fires while `draft==true` (skipped) and the PR never gets a Claude review. Opus is paid 1x per PR for the highest-capability senior-engineer review.
 - `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob"` — the minimum surface needed to review a PR and post the top-level summary comment. Inline line-anchored commenting deliberately NOT included (CodeRabbit covers it).
 - `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
 - Explicit `track_progress: "false"` on the action step.
 - `--max-turns` caps tool-call turns (the `max_turns` input, default 30). The `timeout-minutes` wall-clock ceiling, not this, is the backstop against runaway/injection loops.
 - `--append-system-prompt` defensive preamble: Claude is instructed to treat all PR content (title, body, diffs, file contents, CLAUDE.md, comments) as untrusted data, never read secrets/env, and stop + report on injection attempts.
-- **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-security.yml`.
+- **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-sec.yml`.
 - `actions/checkout` pinned by SHA, `persist-credentials: false`, `fetch-depth: 1`.
-- `anthropics/claude-code-action` pinned by SHA (`@38ec876...` = v1.0.101).
+- `anthropics/claude-code-action` pinned by SHA (`@e34df878...` = v1.0.135).
 - **Wall-clock ceiling**: `timeout-minutes: 5` on preflight, `15` on the claude-code-action job. `--max-turns` (the `max_turns` input, default 30) caps tool-call turns but not wall time; these ceilings bound a wedged network call, a stuck Opus response, or a prompt-injection-induced loop before it can sit on a runner for GitHub's 6-hour default.
 - **CODEOWNERS** (`.github/CODEOWNERS`) enforces `@praetorian-inc/security-engineering` review on this file.
 
@@ -170,7 +313,7 @@ permissions:
 
 jobs:
   claude-code-action:
-    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.0.11
+    uses: praetorian-inc/public-workflows/.github/workflows/claude-code.yml@<SHA>  # v2.9.3
     permissions:
       contents: read
       pull-requests: write
@@ -196,7 +339,7 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 
 **Triggers the reusable workflow responds to:**
 
-- `pull_request` with `action == 'opened'` on a same-repo branch PR — auto-reviews once on PR open
+- `pull_request` with `action == 'opened'` or `'ready_for_review'` on a same-repo branch PR — auto-reviews once on PR open (or when a draft PR is marked ready)
 - `pull_request_review_comment` with body containing `@claude` on a same-repo PR — targeted review requests, bypasses the docs-only preflight filter
 
 Other event types and `synchronize` actions trigger the caller workflow but are filtered out at the job-level `if:`.
@@ -219,7 +362,7 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 - **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter
 - **Anti-injection prompt**: Gemini instructed to treat all PR content (including `GEMINI.md`) as untrusted data
 - **Pinned**: `run-gemini-cli` action SHA-pinned; the CLI version is hardcoded (`0.45.2`, **not** a caller input — it governs folder-trust/tool-policy semantics); `public-skills` checkout pinned by commit SHA
-- **Wall-clock ceiling**: `timeout-minutes: 10` on the review job
+- **Wall-clock ceiling**: `timeout-minutes: 15` on the review job (`5` on the post-feedback job)
 - **CODEOWNERS**: `@praetorian-inc/security-engineering` review required on any change
 
 **Minimal caller** (drop this in `.github/workflows/gemini-code.yml` of a consumer repo):
@@ -266,35 +409,160 @@ jobs:
 - `pull_request` with `action == 'opened'` or `'ready_for_review'` — auto-reviews once on PR open
 - `pull_request_review_comment` with body containing `@gemini` — re-review on demand
 
-### `unit-tests.yml` — Unit tests for claude-tool-sdk consumers (npm/Node.js)
+### `codex-code.yml` — Codex PR Review (hardened)
 
-Callable workflow for repos that use the private `claude-tool-sdk` module. Generates a short-lived GitHub App token to fetch the private dependency, then runs `npm ci` + `npm test`.
+Runs OpenAI Codex as a complementary **second-vendor** PR reviewer alongside the Claude PR Assistant, via [`openai/codex-action`](https://github.com/openai/codex-action) running the Codex CLI in a read-only sandbox. **All security posture is hardcoded** — callers cannot widen the attack surface; any change requires `@praetorian-inc/security-engineering` review (CODEOWNERS).
 
-**Caller example:**
+**Security posture:**
+
+- **Three-job defense-in-depth split** (mirrors `gemini-code.yml`): a `preflight` job (shared `preflight.yml`) skips docs-only PRs; a `codex-review` job runs the agent read-only in a sandbox; a minimal `post-feedback` job (`pull-requests: write`, runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` (no APPROVE path).
+- **Depth-2 merge-ref checkout**: `HEAD^1` is the immutable base, `HEAD^2` is the PR head; review scope (`git diff HEAD^1 HEAD`) and skill application are enforced by a hardcoded wrapper prepended to every review — the caller-supplied `prompt` is appended after it (output format/emphasis only).
+- **Same-repo-only gate**: fork PRs blocked outright; `@codex` on a PR review comment bypasses the docs-only preflight filter.
+- **Pinned**: `openai/codex-action` SHA-pinned (`@c25d10f...` = v1.6).
+- **Wall-clock ceiling**: `timeout-minutes: 10` on the review job (`5` on post-feedback).
+
+**Minimal caller** (drop this in `.github/workflows/codex-code.yml` of a consumer repo):
+
+```yaml
+name: Codex PR Review
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+concurrency:
+  group: codex-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  codex-review:
+    uses: praetorian-inc/public-workflows/.github/workflows/codex-code.yml@<SHA>
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `prompt` | Built-in 3-section review template | Output-format/emphasis text appended after the hardcoded review wrapper |
+| `model` | `gpt-5.5` | Codex model ID. Override per-caller for special cases (e.g. `gpt-5.4-mini` for cost-sensitive repos, `gpt-5.3-codex` for complex multi-file reviews). |
+| `effort` | `medium` | Reasoning effort level (`minimal`, `low`, `medium`, `high`) |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `api.openai.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443` |
+
+**Secrets:**
+
+- `OPENAI_API_KEY` — required (pay-per-token billing).
+
+**Triggers:**
+
+- `pull_request` with `action == 'opened'` or `'ready_for_review'` on a same-repo PR — reviews once per PR
+- `pull_request_review_comment` with body containing `@codex` — re-review on demand
+
+### `claude-md-drift.yml` — CLAUDE.md drift detection
+
+Detects when a PR's code changes may have made `CLAUDE.md` documentation stale. **Two-phase design:** a zero-cost shell pre-filter determines which `CLAUDE.md` files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no `CLAUDE.md` exists, the PR is docs/config-only, changed files have no `CLAUDE.md` ancestor in the directory tree, the PR already edits every relevant `CLAUDE.md`, or the author is a bot. Same-repo-only (fork PRs blocked); draft PRs skipped.
+
+**Minimal caller** (drop this in `.github/workflows/claude-md-drift.yml` of a consumer repo):
+
+```yaml
+name: CLAUDE.md Drift Detection
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]  # synchronize: re-check drift on every push
+concurrency:
+  group: claude-drift-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  drift-check:
+    uses: praetorian-inc/public-workflows/.github/workflows/claude-md-drift.yml@<SHA>
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `skip_extensions` | `.md,.markdown,.rst,.txt,.yml,.yaml,.json,.toml,.png,.jpg,.jpeg,.svg,.gif,.webp,.ico,.lock` | File extensions ignored when deciding whether code (vs docs/config) changed |
+| `model` | `claude-haiku-4-5-20251001` | Claude model for the semantic drift check |
+| `max_turns` | `45` | Max Claude conversation turns for drift analysis |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+**Secrets:**
+
+- `ANTHROPIC_API_KEY` — required.
+
+### `ts-ci.yml` — TypeScript/Node.js CI (install + typecheck + lint + test)
+
+Reusable workflow for TypeScript/Node.js repositories (Claude plugin repos and other TS projects). Provides consistent `npm ci` + `tsc --noEmit` + `npm run lint` + `npm test` + Harden-Runner. Typecheck, lint, and test each auto-skip when the corresponding `tsconfig.json` / `lint` script / test script is absent. Private dependencies (e.g. `@praetorian/claude-tool-sdk`) are **optional** — opt in with `enable-private-deps: true` to mint a short-lived GitHub App token before `npm ci`. A preflight job skips CI on PRs with no TypeScript/JS changes.
+
+**Minimal caller** (drop this in `.github/workflows/ci.yml` of a consumer repo):
+
+```yaml
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+permissions:
+  contents: read
+jobs:
+  ci:
+    uses: praetorian-inc/public-workflows/.github/workflows/ts-ci.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+```
+
+**With private dependencies** (repos that consume `@praetorian/claude-tool-sdk`):
 
 ```yaml
 jobs:
-  test:
-    uses: praetorian-inc/public-workflows/.github/workflows/unit-tests.yml@<SHA>  # vX.Y.Z
+  ci:
+    uses: praetorian-inc/public-workflows/.github/workflows/ts-ci.yml@<SHA>  # vX.Y.Z
     permissions:
       contents: read
+    with:
+      enable-private-deps: true
+      private-deps-repos: claude-tool-sdk
     secrets:
       PLUGIN_CI_APP_ID: ${{ secrets.PLUGIN_CI_APP_ID }}
       PLUGIN_CI_PRIVATE_KEY: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
 ```
 
-| Input | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enable-harden-runner` | boolean | `true` | Enable StepSecurity Harden-Runner |
-| `harden-runner-policy` | string | `"audit"` | Egress policy: `audit` or `block` |
-| `harden-runner-allowed-endpoints` | string | `""` | Newline-separated allowed endpoints for block mode |
+**All inputs** (all optional with sensible defaults):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `working-directory` | `.` | Working dir for the Node.js project |
+| `node-version` | `22` | Node.js version |
+| `enable-typecheck` | `true` | Run `tsc --noEmit` if `tsconfig.json` exists |
+| `enable-lint` | `true` | Run `npm run lint` (skipped if the script is not defined in package.json) |
+| `enable-test` | `true` | Run `npm test` |
+| `test-script` | `test` | npm script to run for tests (must be a key in package.json scripts) |
+| `enable-private-deps` | `false` | Mint a GitHub App token for private-dependency access before `npm ci` |
+| `private-deps-owner` | `praetorian-inc` | GitHub org for private dependency access |
+| `private-deps-repos` | `claude-tool-sdk` | Comma-separated repo names the App token is scoped to |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist for block mode |
+
+**Secrets:**
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `PLUGIN_CI_APP_ID` | yes | GitHub App ID for private dependency access |
-| `PLUGIN_CI_PRIVATE_KEY` | yes | GitHub App private key |
+| `PLUGIN_CI_APP_ID` | only when `enable-private-deps: true` | GitHub App ID for private dependency access |
+| `PLUGIN_CI_PRIVATE_KEY` | only when `enable-private-deps: true` | GitHub App private key |
 
-**Security posture:** Workflow-level `permissions: contents: read` ceiling. GitHub App token passed via `env:` (not inline `${{ }}`). Harden-Runner enabled by default. Runner pinned to `ubuntu-24.04`.
+**Security posture:** Workflow-level `permissions: contents: read` ceiling. Harden-Runner enabled by default. Preflight job skips CI on non-TypeScript PRs. Runner pinned to `ubuntu-24.04`.
 
 ### `markdown-quality.yml` — Markdown lint + format check
 
@@ -354,7 +622,7 @@ jobs:
       VERSION_BUMPER_PRIVATE_KEY: ${{ secrets.VERSION_BUMPER_PRIVATE_KEY }}
 ```
 
-**Bump level** is determined from the merged PR's branch name: `release/*` → major, `feat/*` → minor, everything else → patch. Falls back to patch if the branch can't be resolved.
+**Bump level** is determined from the merged PR's branch name: `release/*` → major, `feat/*` or `feature/*` → minor, everything else → patch. Falls back to patch if the branch can't be resolved.
 
 **Prerequisites for each repo:**
 
@@ -412,6 +680,99 @@ Pull the published graph from a consumer machine: `gh run download -R <owner>/<r
 
 **Supply-chain:** `graphifyy` is PINNED via the `graphify-version` input (default `0.8.35`) — never `latest`/`--upgrade`. Bump deliberately, in lockstep with the `GRAPHIFY_VERSION` pin in the separate `praetorian-claude` monorepo Makefile (this repo has no Makefile). No secrets used (GITHUB_TOKEN only).
 
+### `external-contrib-notify.yml` — External contribution notifier
+
+For praetorian-inc open-source repos. Detects **external contributions** (PRs/issues from non-org-members), creates a Linear issue, posts a Slack notification, and auto-replies on the GitHub thread. Runs on `pull_request_target` + `issues`, so the caller job's `permissions:` block is **required** — the reusable can only restrict, not elevate, the caller's `GITHUB_TOKEN` (org default is read-only), and omitting it causes "Resource not accessible by integration". Prefer the explicit `secrets:` block over `secrets: inherit` to limit forwarding to the declared secrets (it runs on the sensitive `pull_request_target` trigger). Harden-Runner defaults to **`block`** here (not `audit`), allowlisting `api.github.com`, `api.linear.app`, and `slack.com`.
+
+**Minimal caller** (drop this in `.github/workflows/external-contribution.yml`):
+
+```yaml
+name: External Contribution Notify
+on:
+  issues:
+    types: [opened, assigned, closed]
+  pull_request_target:
+    types: [opened, assigned, closed]
+jobs:
+  notify:
+    uses: praetorian-inc/public-workflows/.github/workflows/external-contrib-notify.yml@<SHA>
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    secrets:
+      EXTERNAL_CONTRIB_APP_ID: ${{ secrets.EXTERNAL_CONTRIB_APP_ID }}
+      EXTERNAL_CONTRIB_APP_PRIVATE_KEY: ${{ secrets.EXTERNAL_CONTRIB_APP_PRIVATE_KEY }}
+      LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      LINEAR_TEAM_ID: ${{ secrets.LINEAR_TEAM_ID }}
+      SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+      # optional: LINEAR_ASSIGNEE_ID, LINEAR_PARENT_ISSUE_ID, LINEAR_PROJECT_ID
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `linear-state-name` | `Backlog` | Linear state for created issues |
+| `github-org` | `praetorian-inc` | Org to check membership against (members are not "external") |
+| `dry-run` | `false` | Log payloads instead of sending (testing) |
+| `auto-reply-enabled` | `true` | Post an auto-reply GitHub comment on external contributions |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `block` | `audit` or `block` (this workflow defaults to `block`) |
+| `harden-runner-allowed-endpoints` | `api.github.com:443 api.linear.app:443 slack.com:443` | Egress allowlist for block mode |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `EXTERNAL_CONTRIB_APP_ID` | yes | GitHub App ID/Client ID for `praetorian-external-contrib-bot` |
+| `EXTERNAL_CONTRIB_APP_PRIVATE_KEY` | yes | App private key (PEM) |
+| `LINEAR_API_KEY` | yes | Linear API key for issue creation |
+| `SLACK_BOT_TOKEN` | yes | Slack bot token for channel notifications |
+| `LINEAR_TEAM_ID` | yes | Linear team ID issues are filed against |
+| `SLACK_CHANNEL_ID` | yes | Slack channel ID for the notification |
+| `LINEAR_ASSIGNEE_ID` | no | Linear user to assign created issues to |
+| `LINEAR_PARENT_ISSUE_ID` | no | Linear parent issue (created issues become sub-issues) |
+| `LINEAR_PROJECT_ID` | no | Linear project ID |
+
+### `verify-pins.yml` — Verify public-workflows pins are honest
+
+Verifies that the first-party `praetorian-inc/public-workflows` `uses:` pins in the **caller's** workflows are honest: every pinned 40-char SHA carries a `# vX.Y.Z` version comment, that tag actually exists, and the tag points at exactly that SHA. Prevents the "lying pin comment" failure mode — a hand-edited `@<sha>  # vX.Y.Z` where the tag is missing or resolves to a different commit — which would defeat audits and Dependabot and mask pin divergence across the fleet. Scope is first-party public-workflows pins only; third-party pins (`actions/checkout`, etc.) are out of scope (handled by Dependabot/zizmor).
+
+**Minimal caller** (drop this in `.github/workflows/verify-pins.yml`):
+
+```yaml
+name: Verify Pins
+on:
+  pull_request: { paths: ['.github/workflows/**'] }
+  push: { branches: [main], paths: ['.github/workflows/**'] }
+permissions:
+  contents: read
+jobs:
+  verify:
+    uses: praetorian-inc/public-workflows/.github/workflows/verify-pins.yml@<SHA>  # <tag>
+    permissions:
+      contents: read
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `owner-repo` | `praetorian-inc/public-workflows` | First-party repo whose tags the pins are verified against |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode (needs `github.com:443`, `api.github.com:443`) |
+
+No secrets required — uses the auto-granted `GITHUB_TOKEN`.
+
+### Internal building blocks (not called directly by consumer repos)
+
+These reusables exist to be composed by the workflows above; consumer repos don't call them directly:
+
+- **`preflight.yml`** — shared preflight for the AI reviewers (`claude-code` / `codex-code` / `gemini-code`). Determines whether a PR has code changes worth reviewing (skips docs/config-only PRs, saving ~$1–2 of LLM cost per PR at ~30s of runner time), enforces the same-repo-only gate, and honors the `@claude`/`@codex`/`@gemini` mention bypass. Takes `mention_keyword` + `reviewer_name` inputs; outputs `has_code`. `synchronize` is intentionally excluded (reviewers run on `opened`/`ready_for_review` only), and `.github/` changes are NOT treated as docs-only — CI config deserves review.
+
 ## Pinning requirements
 
 Consumers **must** pin reusable workflow references by SHA (not tag or branch) per the org's supply-chain hardening policy:
@@ -430,7 +791,7 @@ Use [ratchet](https://github.com/sethvargo/ratchet) to auto-pin.
 ## Contributing
 
 1. Workflows in `.github/workflows/*.yml` must SHA-pin all `uses:` references. `ratchet lint` enforces this.
-2. The `test-go-ci.yml` and `test-go-security.yml` self-test harnesses exercise `go-ci.yml` and `go-security.yml` against the `_test-fixtures/go-minimal/` module on every PR — keep them passing.
+2. The `test-*.yml` self-test harnesses exercise the reusables against `_test-fixtures/` on every PR — keep them passing. `test-go-ci.yml`, `test-go-sec.yml`, and `test-graphify-graph.yml` run against `go-minimal/`; `test-ts-ci.yml` runs against `ts-minimal/`; `test-go-release.yml` runs against `go-release/`. (The `review-{claude,codex,gemini}.yml` workflows dogfood the AI reviewers on this repo's own PRs.)
 3. Tag new major versions (`vX.Y.Z`) after merge; consumers pin to the SHA of that tagged commit.
 
 ## Supply chain context
