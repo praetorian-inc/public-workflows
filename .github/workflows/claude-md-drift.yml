@@ -120,7 +120,25 @@ jobs:
           # `pull-requests: read`, which a narrow-permission caller cannot grant
           # (logless startup_failure). Three-dot base...head matches pulls/files
           # semantics (changes relative to the merge base).
-          FILES=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
+          #
+          # Fail open — same posture as the compare-API preflights in the sibling
+          # reusables: if the diff can't be computed (a SHA or the merge base is
+          # somehow unavailable), drift-check every CLAUDE.md rather than letting
+          # `set -e` abort the run and silently skip drift detection.
+          if ! FILES=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" 2>/dev/null); then
+            all_mds=$(find . -name "CLAUDE.md" -type f | sed 's|^\./||' | sort | tr '\n' ',' | sed 's/,$//')
+            if [ -z "$all_mds" ]; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "⊘ Could not compute the diff and no CLAUDE.md files exist — skipping."
+              exit 0
+            fi
+            {
+              echo "should_run=true"
+              echo "relevant_mds=$all_mds"
+            } >> "$GITHUB_OUTPUT"
+            echo "⚠ Could not compute changed files (git diff error) — drift-checking all CLAUDE.md to be safe."
+            exit 0
+          fi
 
           echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
           echo "$FILES" | sed 's/^/  /'
