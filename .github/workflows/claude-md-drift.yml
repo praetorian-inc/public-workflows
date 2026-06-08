@@ -84,7 +84,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
       relevant_mds: ${{ steps.check.outputs.relevant_mds }}
@@ -109,14 +108,19 @@ jobs:
           SKIP_EXTENSIONS: ${{ inputs.skip_extensions }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
 
-          # ── Step 1: Get changed files via GitHub API (handles >100 files) ──
-          FILES=$(gh api \
-            "repos/$REPO/pulls/$PR_NUMBER/files" \
-            --paginate --jq '.[].filename')
+          # ── Step 1: Get changed files from the local checkout via git diff ──
+          # This job already checks out the full history (fetch-depth: 0), so we
+          # diff the merge base against the PR head locally — no API call. That
+          # needs only `contents: read`; the old pulls/{n}/files API required
+          # `pull-requests: read`, which a narrow-permission caller cannot grant
+          # (logless startup_failure). Three-dot base...head matches pulls/files
+          # semantics (changes relative to the merge base).
+          FILES=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
 
           echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
           echo "$FILES" | sed 's/^/  /'

@@ -140,26 +140,48 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
 
           # Non-PR events always run.
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "has_ts=true" >> "$GITHUB_OUTPUT"
-            echo "✓ Non-PR event (${{ github.event_name }}) — TS CI will run."
+            echo "✓ Non-PR event ($EVENT_NAME) — TS CI will run."
             exit 0
           fi
 
-          FILES=$(gh api \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --paginate --jq '.[].filename')
+          # Detect changed files via the commits compare API, which needs only
+          # `contents: read`. The pulls/{n}/files API would need `pull-requests:
+          # read` — and because a reusable workflow's job can never hold more
+          # permission than its caller grants, requiring it broke narrow callers
+          # (and this preflight already pinned contents:read, so pulls/files
+          # returned 403 at runtime). Three-dot base...head matches pulls/files
+          # semantics. Fail open (run CI) if the call fails for any reason.
+          if ! FILES=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[]?.filename' 2>/dev/null); then
+            echo "has_ts=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Could not list changed files (compare API error) — running TS CI to be safe."
+            exit 0
+          fi
+          COUNT=$(printf '%s\n' "$FILES" | grep -c . || true)
 
-          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
-          echo "$FILES" | sed 's/^/  /'
+          # The compare endpoint caps `.files` at 300. On a larger diff we cannot
+          # be sure no TS/JS files changed, so fail open and run CI.
+          if [ "$COUNT" -ge 300 ]; then
+            echo "has_ts=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Large diff (>=300 changed files) — running TS CI to be safe."
+            exit 0
+          fi
+
+          echo "Changed files in PR ($COUNT total):"
+          printf '%s\n' "$FILES" | sed 's/^/  /'
           echo
 
           TS_RE='\.(tsx|ts|jsx|js|mjs|cjs)$|^package\.json$|^package-lock\.json$|^tsconfig|^vitest\.config|^\.eslintrc|^eslint\.config'
-          if echo "$FILES" | grep -E "$TS_RE" | grep -q .; then
+          if printf '%s\n' "$FILES" | grep -E "$TS_RE" | grep -q .; then
             echo "has_ts=true" >> "$GITHUB_OUTPUT"
             echo "✓ TypeScript/JS changes detected — CI will run."
           else

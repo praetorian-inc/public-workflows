@@ -243,7 +243,17 @@ jobs:
           # compare keeps this preflight resolvable for all callers. Three-dot
           # base...head yields the PR's changes relative to the merge base,
           # matching pulls/files semantics.
-          FILES=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[]?.filename')
+          #
+          # Fail open (run the scan) if the compare call fails for ANY reason —
+          # a transient 5xx, a secondary rate limit, or a diff too large to
+          # generate. Wrapping the assignment in `if !` keeps `set -e` from
+          # aborting the step on that failure, so an API hiccup never silently
+          # skips the scan — it just runs it (same posture as the >=300 cap below).
+          if ! FILES=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[]?.filename' 2>/dev/null); then
+            echo "has_go=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Could not list changed files (compare API error) — running security scan to be safe."
+            exit 0
+          fi
           COUNT=$(printf '%s\n' "$FILES" | grep -c . || true)
 
           # The compare endpoint caps `.files` at 300. On a larger diff we cannot
