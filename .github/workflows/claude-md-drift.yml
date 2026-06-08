@@ -84,7 +84,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
       relevant_mds: ${{ steps.check.outputs.relevant_mds }}
@@ -109,14 +108,37 @@ jobs:
           SKIP_EXTENSIONS: ${{ inputs.skip_extensions }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
 
-          # ── Step 1: Get changed files via GitHub API (handles >100 files) ──
-          FILES=$(gh api \
-            "repos/$REPO/pulls/$PR_NUMBER/files" \
-            --paginate --jq '.[].filename')
+          # ── Step 1: Get changed files from the local checkout via git diff ──
+          # This job already checks out the full history (fetch-depth: 0), so we
+          # diff the merge base against the PR head locally — no API call. That
+          # needs only `contents: read`; the old pulls/{n}/files API required
+          # `pull-requests: read`, which a narrow-permission caller cannot grant
+          # (logless startup_failure). Three-dot base...head matches pulls/files
+          # semantics (changes relative to the merge base).
+          #
+          # Fail open — same posture as the compare-API preflights in the sibling
+          # reusables: if the diff can't be computed (a SHA or the merge base is
+          # somehow unavailable), drift-check every CLAUDE.md rather than letting
+          # `set -e` abort the run and silently skip drift detection.
+          if ! FILES=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" 2>/dev/null); then
+            all_mds=$(find . -name "CLAUDE.md" -type f | sed 's|^\./||' | sort | tr '\n' ',' | sed 's/,$//')
+            if [ -z "$all_mds" ]; then
+              echo "should_run=false" >> "$GITHUB_OUTPUT"
+              echo "⊘ Could not compute the diff and no CLAUDE.md files exist — skipping."
+              exit 0
+            fi
+            {
+              echo "should_run=true"
+              echo "relevant_mds=$all_mds"
+            } >> "$GITHUB_OUTPUT"
+            echo "⚠ Could not compute changed files (git diff error) — drift-checking all CLAUDE.md to be safe."
+            exit 0
+          fi
 
           echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
           echo "$FILES" | sed 's/^/  /'

@@ -19,7 +19,6 @@ name: Markdown Quality (Callable)
 #       uses: praetorian-inc/public-workflows/.github/workflows/markdown-quality.yml@<SHA>
 #       permissions:
 #         contents: read
-#         pull-requests: read   # preflight scopes checks to PRs that touch markdown
 #
 # For repos with a custom markdownlint config, place .markdownlint-cli2.jsonc
 # or .markdownlint.jsonc in the repo root. The workflow uses it automatically.
@@ -99,13 +98,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      # The "Check for markdown changes" step below calls
-      # `gh api repos/{repo}/pulls/{n}/files` to scope checks to PRs that touch
-      # markdown. On private/internal repos that endpoint requires pull-requests:read;
-      # without it gh returns HTTP 403 and the `set -eu` step fails the whole run.
-      # A reusable job's permissions block is the ceiling for its GITHUB_TOKEN, so
-      # this MUST be declared here — a caller grant alone cannot add the scope.
-      pull-requests: read
     outputs:
       has_md: ${{ steps.check.outputs.has_md }}
     steps:
@@ -121,21 +113,41 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
 
           # Non-PR events (push to main, schedule, dispatch) always run.
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ]; then
             echo "has_md=true" >> "$GITHUB_OUTPUT"
-            echo "✓ Non-PR event (${{ github.event_name }}) — markdown quality will run."
+            echo "✓ Non-PR event ($EVENT_NAME) — markdown quality will run."
             exit 0
           fi
 
-          FILES=$(gh api \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" \
-            --paginate --jq '.[].filename')
+          # Detect changed files via the commits compare API, which needs only
+          # `contents: read`. The pulls/{n}/files API would need `pull-requests:
+          # read` — which a narrow-permission caller cannot grant (the run dies
+          # at parse time with a logless startup_failure, and on private repos
+          # the call also 403s at runtime). Fail open (run) if the call fails.
+          if ! FILES=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[]?.filename' 2>/dev/null); then
+            echo "has_md=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Could not list changed files (compare API error) — running quality checks to be safe."
+            exit 0
+          fi
+          COUNT=$(printf '%s\n' "$FILES" | grep -c . || true)
 
-          if echo "$FILES" | grep -qE '\.(md|markdown)$'; then
+          # The compare endpoint caps `.files` at 300. On a larger diff we cannot
+          # be sure no markdown changed, so fail open and run the checks.
+          if [ "$COUNT" -ge 300 ]; then
+            echo "has_md=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Large diff (>=300 changed files) — running quality checks to be safe."
+            exit 0
+          fi
+
+          if printf '%s\n' "$FILES" | grep -qE '\.(md|markdown)$'; then
             echo "has_md=true" >> "$GITHUB_OUTPUT"
             echo "✓ Markdown changes detected — quality checks will run."
           else

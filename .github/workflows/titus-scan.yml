@@ -23,7 +23,6 @@ name: Titus Secrets Scan (Callable)
 #       uses: praetorian-inc/public-workflows/.github/workflows/titus-scan.yml@<SHA>
 #       permissions:
 #         contents: read
-#         pull-requests: read     # preflight reads changed files to skip docs-only PRs
 #         security-events: write  # titus job declares it — grant even on private repos (else startup_failure)
 #         actions: read           # titus job declares it — grant even on private repos (else startup_failure)
 #       secrets: inherit
@@ -118,7 +117,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: read
     outputs:
       should_scan: ${{ steps.check.outputs.should_scan }}
       visibility: ${{ steps.repo.outputs.visibility }}
@@ -152,7 +150,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -eu
 
@@ -163,17 +162,34 @@ jobs:
             exit 0
           fi
 
-          FILES=$(gh api \
-            "repos/$REPO/pulls/$PR_NUMBER/files" \
-            --paginate --jq '.[].filename')
+          # Detect changed files via the commits compare API, which needs only
+          # `contents: read`. The pulls/{n}/files API would need `pull-requests:
+          # read` — which a caller pinning a narrow permission set cannot grant,
+          # so the run dies at parse time with a logless startup_failure. Three-dot
+          # base...head matches pulls/files semantics. Fail open (scan) if the
+          # call fails for any reason — never silently skip a secrets scan.
+          if ! FILES=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[]?.filename' 2>/dev/null); then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Could not list changed files (compare API error) — scanning to be safe."
+            exit 0
+          fi
+          COUNT=$(printf '%s\n' "$FILES" | grep -c . || true)
 
-          echo "Changed files in PR ($(echo "$FILES" | wc -l | tr -d ' ') total):"
-          echo "$FILES" | sed 's/^/  /'
+          # The compare endpoint caps `.files` at 300. On a larger diff we cannot
+          # be sure no scannable files changed, so fail open and scan.
+          if [ "$COUNT" -ge 300 ]; then
+            echo "should_scan=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Large diff (>=300 changed files) — scanning to be safe."
+            exit 0
+          fi
+
+          echo "Changed files in PR ($COUNT total):"
+          printf '%s\n' "$FILES" | sed 's/^/  /'
           echo
 
           # Only skip on pure docs/images — secrets can hide in any code or config file.
           SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE$|^docs/'
-          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
+          if printf '%s\n' "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
             echo "should_scan=true" >> "$GITHUB_OUTPUT"
             echo "✓ Scannable changes detected — Titus will run."
           else
