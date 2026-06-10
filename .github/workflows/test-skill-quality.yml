@@ -1,0 +1,77 @@
+name: "Test: skill-quality.yml"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/skill-quality.yml"
+      - ".github/workflows/test-skill-quality.yml"
+      - "templates/skills/**"
+      - "_test-fixtures/skills-minimal/**"
+      - "_test-fixtures/skills-bad/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/skill-quality.yml"
+      - ".github/workflows/test-skill-quality.yml"
+      - "templates/skills/**"
+      - "_test-fixtures/skills-minimal/**"
+      - "_test-fixtures/skills-bad/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Positive path: a well-formed skill (plus a `_template` that must be skipped)
+  # must pass the reusable workflow.
+  call-skill-quality-valid:
+    name: Call skill-quality (valid fixtures)
+    uses: ./.github/workflows/skill-quality.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: _test-fixtures/skills-minimal
+
+  # Negative path: a deliberately-broken skill must make the validator exit 1.
+  # Run the canonical local script directly so we can assert the failure.
+  negative-test:
+    name: Validator rejects bad frontmatter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install validator dependencies
+        run: pip install "jsonschema==4.25.1" "PyYAML==6.0.2"
+
+      - name: Assert validator fails on bad fixture
+        run: |
+          set +e
+          python3 templates/skills/validate-skills.py --dir _test-fixtures/skills-bad
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::validator exited 0 on a known-bad fixture; it should have failed"
+            exit 1
+          fi
+          echo "✓ validator correctly rejected the bad fixture (exit $rc)"

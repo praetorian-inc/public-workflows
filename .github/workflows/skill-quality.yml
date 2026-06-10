@@ -1,0 +1,280 @@
+name: Skill Quality (Callable)
+# Reusable workflow that validates Agent Skill `SKILL.md` frontmatter against the
+# agentskills.io specification (https://agentskills.io/specification) plus the
+# Praetorian extensions (`tags`, `related`) that guard-core's skill loader reads.
+#
+# Why this exists: a malformed frontmatter block does NOT produce an error in
+# guard-core's loader — it is silently skipped (LoadSkillMetadata returns nil on
+# parse failure), so the skill simply disappears from the platform with no log.
+# Prettier-only markdown CI does not parse frontmatter (embeddedLanguageFormatting
+# is off), so this class of bug is otherwise uncaught until a human notices a
+# missing skill. This workflow makes invalid frontmatter a hard CI failure.
+#
+# Designed for skill repos with no package.json (e.g. guard-skills). Each
+# immediate subdirectory with a SKILL.md is one skill; dirs starting with `_` or
+# `.` (templates, dev-time `.local`/`.history`) are skipped.
+#
+# Caller example (drop in .github/workflows/skill-quality.yml):
+#
+#   name: Skill Quality
+#   on:
+#     push: { branches: [main] }
+#     pull_request: { branches: [main] }
+#   permissions:
+#     contents: read
+#   jobs:
+#     validate:
+#       uses: praetorian-inc/public-workflows/.github/workflows/skill-quality.yml@<SHA>  # <tag>
+#       permissions:
+#         contents: read
+#
+# Local pre-commit equivalent: templates/skills/validate-skills.py (kept in sync
+# with the inlined validator below).
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Directory containing the skill subdirectories."
+        required: false
+        type: string
+        default: "."
+
+      skills-glob:
+        description: "Glob (relative to working-directory) matching each skill's SKILL.md."
+        required: false
+        type: string
+        default: "*/SKILL.md"
+
+      python-version:
+        description: "Python version for the validator."
+        required: false
+        type: string
+        default: "3.12"
+
+      jsonschema-version:
+        description: "Pinned jsonschema version. Never use 'latest'."
+        required: false
+        type: string
+        default: "4.25.1"
+
+      pyyaml-version:
+        description: "Pinned PyYAML version. Never use 'latest'."
+        required: false
+        type: string
+        default: "6.0.2"
+
+      tag-vocabulary:
+        description: "Comma-separated controlled vocabulary for the `tags` extension."
+        required: false
+        type: string
+        default: "web,cloud,cicd,llm,cred"
+
+      enable-harden-runner:
+        description: "Enable StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode (e.g. pypi.org:443, files.pythonhosted.org:443)."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      has_skill: ${{ steps.check.outputs.has_skill }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Check for SKILL.md changes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+
+          # Non-PR events (push to main, schedule, dispatch) always run.
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "has_skill=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Non-PR event ($EVENT_NAME) — skill validation will run."
+            exit 0
+          fi
+
+          # Detect changed files via the commits compare API, which needs only
+          # `contents: read`. Fail open (run) if the call fails — same rationale
+          # as markdown-quality.yml.
+          if ! FILES=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.files[]?.filename' 2>/dev/null); then
+            echo "has_skill=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Could not list changed files (compare API error) — running validation to be safe."
+            exit 0
+          fi
+          COUNT=$(printf '%s\n' "$FILES" | grep -c . || true)
+
+          # The compare endpoint caps `.files` at 300; on a larger diff fail open.
+          if [ "$COUNT" -ge 300 ]; then
+            echo "has_skill=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Large diff (>=300 changed files) — running validation to be safe."
+            exit 0
+          fi
+
+          # Run when any SKILL.md changed, or when this workflow itself changed.
+          if printf '%s\n' "$FILES" | grep -qE '(^|/)SKILL\.md$|\.github/workflows/skill-quality\.yml$'; then
+            echo "has_skill=true" >> "$GITHUB_OUTPUT"
+            echo "✓ SKILL.md (or workflow) changes detected — validation will run."
+          else
+            echo "has_skill=false" >> "$GITHUB_OUTPUT"
+            echo "⊘ No SKILL.md changes — validation will be skipped."
+          fi
+
+  validate:
+    name: Validate skill frontmatter
+    needs: preflight
+    if: needs.preflight.outputs.has_skill == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install validator dependencies
+        env:
+          JSONSCHEMA_VERSION: ${{ inputs.jsonschema-version }}
+          PYYAML_VERSION: ${{ inputs.pyyaml-version }}
+        run: pip install "jsonschema==${JSONSCHEMA_VERSION}" "PyYAML==${PYYAML_VERSION}"
+
+      - name: Validate SKILL.md frontmatter
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          SKILLS_GLOB: ${{ inputs.skills-glob }}
+          TAG_VOCABULARY: ${{ inputs.tag-vocabulary }}
+        run: |
+          # Inlined validator — kept in sync with templates/skills/validate-skills.py.
+          # Single source for CI so the check is atomically versioned with this @SHA.
+          python3 - <<'PY'
+          import sys, os, glob
+          import yaml
+          from jsonschema import Draft202012Validator
+
+          skills_glob = os.environ.get("SKILLS_GLOB", "*/SKILL.md")
+          tag_vocab = [t.strip() for t in os.environ.get(
+              "TAG_VOCABULARY", "web,cloud,cicd,llm,cred").split(",") if t.strip()]
+
+          # agentskills.io core (https://agentskills.io/specification) + Praetorian
+          # extensions `tags` and `related`. additionalProperties:false catches
+          # frontmatter key typos (e.g. `descriptoin:`, `tag:`).
+          schema = {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "additionalProperties": False,
+              "required": ["name", "description"],
+              "properties": {
+                  "name": {"type": "string", "maxLength": 64,
+                           "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+                  "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+                  "license": {"type": "string"},
+                  "compatibility": {"type": "string", "maxLength": 500},
+                  "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
+                  "allowed-tools": {"type": "string"},
+                  "tags": {"type": "array", "minItems": 1, "items": {"enum": tag_vocab}},
+                  "related": {"type": "array", "items": {"type": "string"}},
+              },
+          }
+          validator = Draft202012Validator(schema)
+
+          def frontmatter(path):
+              txt = open(path, encoding="utf-8").read()
+              if not txt.startswith("---\n"):
+                  raise ValueError("missing leading '---' frontmatter")
+              parts = txt[4:].split("\n---\n", 1)
+              if len(parts) != 2:
+                  raise ValueError("unterminated frontmatter (no closing '---')")
+              return yaml.safe_load(parts[0])
+
+          files = sorted(
+              f for f in glob.glob(skills_glob)
+              if not os.path.basename(os.path.dirname(f)).startswith(("_", "."))
+          )
+          errors = []
+          for f in files:
+              d = os.path.basename(os.path.dirname(f))
+              try:
+                  fm = frontmatter(f)
+              except Exception as e:
+                  errors.append(f"{f}: invalid frontmatter — {e}")
+                  continue
+              if not isinstance(fm, dict):
+                  errors.append(f"{f}: frontmatter is not a mapping")
+                  continue
+              for err in sorted(validator.iter_errors(fm), key=lambda e: list(e.path)):
+                  loc = ".".join(map(str, err.path)) or "(root)"
+                  errors.append(f"{f}: [{loc}] {err.message}")
+              # Procedural checks the JSON Schema cannot express:
+              if isinstance(fm.get("name"), str) and fm["name"] != d:
+                  errors.append(f"{f}: name '{fm['name']}' must equal parent directory '{d}' (agentskills.io)")
+              at = fm.get("allowed-tools")
+              if isinstance(at, str) and "," in at:
+                  errors.append(f"{f}: allowed-tools must be space-separated, not comma — got '{at}'")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          lines = [f"## Skill Quality\n\nValidated **{len(files)}** skill(s) matching `{skills_glob}` "
+                   f"(excluding `_*` / `.*` dirs).\n"]
+          if errors:
+              lines.append(f"\n❌ **{len(errors)} problem(s):**\n")
+              lines += [f"- `{e}`" for e in errors]
+          else:
+              lines.append("\n✅ All skills conform to the agentskills.io core schema + Praetorian extensions.")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("\n".join(lines) + "\n")
+
+          if errors:
+              print(f"::error::{len(errors)} skill frontmatter problem(s) found")
+              for e in errors:
+                  print(f"  - {e}")
+              print("\nFix locally with: python3 <repo>/templates/skills/validate-skills.py")
+              sys.exit(1)
+          print(f"✓ {len(files)} skill(s) valid")
+          PY
