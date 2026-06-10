@@ -52,23 +52,38 @@ def build_validator(tag_vocab):
 
 
 def frontmatter(path):
-    txt = open(path, encoding="utf-8").read()
+    # utf-8-sig strips a leading BOM (some Windows editors prepend one); text
+    # mode already normalizes CRLF/CR via universal newlines.
+    with open(path, encoding="utf-8-sig") as fh:
+        txt = fh.read()
     if not txt.startswith("---\n"):
         raise ValueError("missing leading '---' frontmatter")
-    parts = txt[4:].split("\n---\n", 1)
-    if len(parts) != 2:
-        raise ValueError("unterminated frontmatter (no closing '---')")
-    return yaml.safe_load(parts[0])
+    body = txt[4:]
+    # Closing delimiter: a '---' line mid-file ('\n---\n') or at EOF with no
+    # trailing newline ('\n---').
+    end = body.find("\n---\n")
+    if end == -1:
+        if not body.endswith("\n---"):
+            raise ValueError("unterminated frontmatter (no closing '---')")
+        end = len(body) - 4
+    return yaml.safe_load(body[:end])
 
 
 def validate(directory, skills_glob, tag_vocab):
     validator = build_validator(tag_vocab)
     pattern = os.path.join(directory, skills_glob)
     files = sorted(
-        f for f in glob.glob(pattern)
+        f for f in glob.glob(pattern, recursive=True)
         if not os.path.basename(os.path.dirname(f)).startswith(("_", "."))
     )
     errors = []
+    if not files:
+        # A wrong --dir/--glob (or a repo whose layout drifted from the default)
+        # would otherwise report success vacuously and silently disable the gate.
+        errors.append(
+            f"no SKILL.md matched '{pattern}' (after excluding _*/.* dirs) — "
+            "check the working-directory / skills-glob")
+        return files, errors
     for f in files:
         d = os.path.basename(os.path.dirname(f))
         try:

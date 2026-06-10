@@ -225,19 +225,29 @@ jobs:
           validator = Draft202012Validator(schema)
 
           def frontmatter(path):
-              txt = open(path, encoding="utf-8").read()
+              # utf-8-sig strips a leading BOM; text mode normalizes CRLF/CR.
+              with open(path, encoding="utf-8-sig") as fh:
+                  txt = fh.read()
               if not txt.startswith("---\n"):
                   raise ValueError("missing leading '---' frontmatter")
-              parts = txt[4:].split("\n---\n", 1)
-              if len(parts) != 2:
-                  raise ValueError("unterminated frontmatter (no closing '---')")
-              return yaml.safe_load(parts[0])
+              body = txt[4:]
+              # Closing '---' mid-file ('\n---\n') or at EOF with no trailing newline.
+              end = body.find("\n---\n")
+              if end == -1:
+                  if not body.endswith("\n---"):
+                      raise ValueError("unterminated frontmatter (no closing '---')")
+                  end = len(body) - 4
+              return yaml.safe_load(body[:end])
 
           files = sorted(
-              f for f in glob.glob(skills_glob)
+              f for f in glob.glob(skills_glob, recursive=True)
               if not os.path.basename(os.path.dirname(f)).startswith(("_", "."))
           )
           errors = []
+          # Treat zero matches as a misconfiguration, not a vacuous pass — a wrong
+          # working-directory/skills-glob must fail loudly, not silently disable the gate.
+          if not files:
+              errors.append(f"no SKILL.md matched '{skills_glob}' (after excluding _*/.* dirs) — check working-directory / skills-glob")
           for f in files:
               d = os.path.basename(os.path.dirname(f))
               try:

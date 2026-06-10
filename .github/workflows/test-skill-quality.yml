@@ -64,14 +64,41 @@ jobs:
       - name: Install validator dependencies
         run: pip install "jsonschema==4.25.1" "PyYAML==6.0.2"
 
-      - name: Assert validator fails on bad fixture
+      - name: Assert canonical validator fails on bad fixture
         run: |
           set +e
           python3 templates/skills/validate-skills.py --dir _test-fixtures/skills-bad
           rc=$?
           set -e
           if [ "$rc" -eq 0 ]; then
-            echo "::error::validator exited 0 on a known-bad fixture; it should have failed"
+            echo "::error::canonical validator exited 0 on a known-bad fixture; it should have failed"
             exit 1
           fi
-          echo "✓ validator correctly rejected the bad fixture (exit $rc)"
+          echo "✓ canonical validator correctly rejected the bad fixture (exit $rc)"
+
+      # The reusable inlines its own copy of the validator (it runs in the caller's
+      # checkout and cannot read this repo's validate-skills.py). call-skill-quality-valid
+      # only exercises that inlined copy on VALID input, so its reject path could rot
+      # undetected. Extract it and assert it also rejects the bad fixture — this is what
+      # keeps the two hand-synced copies from drifting on the failure path.
+      - name: Assert inlined validator (from the reusable) fails on bad fixture
+        env:
+          SKILLS_GLOB: "_test-fixtures/skills-bad/*/SKILL.md"
+        run: |
+          awk "f && /^[[:space:]]*PY[[:space:]]*\$/ {exit} f {print} /<<'PY'/ {f=1}" \
+            .github/workflows/skill-quality.yml \
+            | python3 -c "import sys, textwrap; sys.stdout.write(textwrap.dedent(sys.stdin.read()))" \
+            > /tmp/inlined-validator.py
+          if [ ! -s /tmp/inlined-validator.py ]; then
+            echo "::error::failed to extract the inlined validator from skill-quality.yml"
+            exit 1
+          fi
+          set +e
+          python3 /tmp/inlined-validator.py
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::inlined validator exited 0 on a known-bad fixture; the two copies have drifted"
+            exit 1
+          fi
+          echo "✓ inlined validator correctly rejected the bad fixture (exit $rc)"

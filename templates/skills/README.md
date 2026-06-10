@@ -52,11 +52,15 @@ jobs:
 
 ## Local usage (pre-commit)
 
+Run from your skill repo root, pointing at the canonical script in a checkout
+of `public-workflows` (or copy it locally):
+
 ```bash
 pip install jsonschema PyYAML
-python3 validate-skills.py            # validate */SKILL.md in cwd
-python3 validate-skills.py --dir path/to/skills
-python3 validate-skills.py --tags web,cloud,cicd,llm,cred
+VALIDATOR=path/to/public-workflows/templates/skills/validate-skills.py
+python3 "$VALIDATOR"                       # validate */SKILL.md in cwd
+python3 "$VALIDATOR" --dir path/to/skills
+python3 "$VALIDATOR" --tags web,cloud,cicd,llm,cred
 ```
 
 `validate-skills.py` is the canonical implementation; the CI workflow inlines an
