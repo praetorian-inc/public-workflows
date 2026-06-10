@@ -4,6 +4,10 @@ _test-fixtures/**/*-*
 !_test-fixtures/ts-minimal/**
 !_test-fixtures/go-release/
 !_test-fixtures/go-release/**
+!_test-fixtures/skills-minimal/
+!_test-fixtures/skills-minimal/**
+!_test-fixtures/skills-bad/
+!_test-fixtures/skills-bad/**
 coverage.out
 
 # Node.js
