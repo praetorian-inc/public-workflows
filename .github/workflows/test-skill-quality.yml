@@ -1,0 +1,104 @@
+name: "Test: skill-quality.yml"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/skill-quality.yml"
+      - ".github/workflows/test-skill-quality.yml"
+      - "templates/skills/**"
+      - "_test-fixtures/skills-minimal/**"
+      - "_test-fixtures/skills-bad/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/skill-quality.yml"
+      - ".github/workflows/test-skill-quality.yml"
+      - "templates/skills/**"
+      - "_test-fixtures/skills-minimal/**"
+      - "_test-fixtures/skills-bad/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Positive path: a well-formed skill (plus a `_template` that must be skipped)
+  # must pass the reusable workflow.
+  call-skill-quality-valid:
+    name: Call skill-quality (valid fixtures)
+    uses: ./.github/workflows/skill-quality.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: _test-fixtures/skills-minimal
+
+  # Negative path: a deliberately-broken skill must make the validator exit 1.
+  # Run the canonical local script directly so we can assert the failure.
+  negative-test:
+    name: Validator rejects bad frontmatter
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install validator dependencies
+        run: pip install "jsonschema==4.25.1" "PyYAML==6.0.2"
+
+      - name: Assert canonical validator fails on bad fixture
+        run: |
+          set +e
+          python3 templates/skills/validate-skills.py --dir _test-fixtures/skills-bad
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::canonical validator exited 0 on a known-bad fixture; it should have failed"
+            exit 1
+          fi
+          echo "✓ canonical validator correctly rejected the bad fixture (exit $rc)"
+
+      # The reusable inlines its own copy of the validator (it runs in the caller's
+      # checkout and cannot read this repo's validate-skills.py). call-skill-quality-valid
+      # only exercises that inlined copy on VALID input, so its reject path could rot
+      # undetected. Extract it and assert it also rejects the bad fixture — this is what
+      # keeps the two hand-synced copies from drifting on the failure path.
+      - name: Assert inlined validator (from the reusable) fails on bad fixture
+        env:
+          SKILLS_GLOB: "_test-fixtures/skills-bad/*/SKILL.md"
+        run: |
+          awk "f && /^[[:space:]]*PY[[:space:]]*\$/ {exit} f {print} /<<'PY'/ {f=1}" \
+            .github/workflows/skill-quality.yml \
+            | python3 -c "import sys, textwrap; sys.stdout.write(textwrap.dedent(sys.stdin.read()))" \
+            > /tmp/inlined-validator.py
+          if [ ! -s /tmp/inlined-validator.py ]; then
+            echo "::error::failed to extract the inlined validator from skill-quality.yml"
+            exit 1
+          fi
+          set +e
+          python3 /tmp/inlined-validator.py
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::inlined validator exited 0 on a known-bad fixture; the two copies have drifted"
+            exit 1
+          fi
+          echo "✓ inlined validator correctly rejected the bad fixture (exit $rc)"
