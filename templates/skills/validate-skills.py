@@ -2,9 +2,10 @@
 """Validate Agent Skill `SKILL.md` frontmatter.
 
 Checks each skill's YAML frontmatter against the agentskills.io specification
-(https://agentskills.io/specification) plus the Praetorian extensions `tags`
-(controlled vocabulary) and `related` (skill links), both of which guard-core's
-skill loader reads.
+(https://agentskills.io/specification). Tags and related links live under the
+standard `metadata` block as comma-separated string values; `metadata.tags` is
+additionally checked against a controlled vocabulary. Top-level `tags`/`related`
+are rejected — guard-core's loader reads them from `metadata`.
 
 This is the canonical, locally-runnable copy of the validator that the
 `skill-quality.yml` reusable workflow inlines for CI. Keep the two in sync.
@@ -28,9 +29,11 @@ from jsonschema import Draft202012Validator
 DEFAULT_TAGS = ["web", "cloud", "cicd", "llm", "cred"]
 
 
-def build_validator(tag_vocab):
-    # agentskills.io core + Praetorian extensions. additionalProperties:false
-    # catches frontmatter key typos (e.g. `descriptoin:`, `tag:`).
+def build_validator():
+    # Strict agentskills.io core (https://agentskills.io/specification).
+    # additionalProperties:false catches frontmatter key typos (e.g.
+    # `descriptoin:`) AND now rejects the legacy top-level `tags`/`related`
+    # keys — those belong under `metadata` (validated procedurally below).
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -44,11 +47,20 @@ def build_validator(tag_vocab):
             "compatibility": {"type": "string", "maxLength": 500},
             "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
             "allowed-tools": {"type": "string"},
-            "tags": {"type": "array", "minItems": 1, "items": {"enum": tag_vocab}},
-            "related": {"type": "array", "items": {"type": "string"}},
         },
     }
     return Draft202012Validator(schema)
+
+
+def metadata_tags(fm):
+    """Parse metadata.tags (comma-separated string) into a list of tags."""
+    meta = fm.get("metadata")
+    if not isinstance(meta, dict):
+        return []
+    raw = meta.get("tags")
+    if not isinstance(raw, str):
+        return []
+    return [t.strip() for t in raw.split(",") if t.strip()]
 
 
 def frontmatter(path):
@@ -70,7 +82,7 @@ def frontmatter(path):
 
 
 def validate(directory, skills_glob, tag_vocab):
-    validator = build_validator(tag_vocab)
+    validator = build_validator()
     pattern = os.path.join(directory, skills_glob)
     files = sorted(
         f for f in glob.glob(pattern, recursive=True)
@@ -104,6 +116,10 @@ def validate(directory, skills_glob, tag_vocab):
         if isinstance(at, str) and "," in at:
             errors.append(
                 f"{f}: allowed-tools must be space-separated, not comma — got '{at}'")
+        for tag in metadata_tags(fm):
+            if tag not in tag_vocab:
+                errors.append(
+                    f"{f}: [metadata.tags] '{tag}' not in controlled vocabulary {tag_vocab}")
     return files, errors
 
 
@@ -125,7 +141,7 @@ def main():
         for e in errors:
             print(f"  - {e}")
         return 1
-    print("✓ all skills conform to agentskills.io core + Praetorian extensions")
+    print("✓ all skills conform to the agentskills.io specification")
     return 0
 
 

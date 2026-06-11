@@ -1,7 +1,9 @@
 name: Skill Quality (Callable)
 # Reusable workflow that validates Agent Skill `SKILL.md` frontmatter against the
-# agentskills.io specification (https://agentskills.io/specification) plus the
-# Praetorian extensions (`tags`, `related`) that guard-core's skill loader reads.
+# agentskills.io specification (https://agentskills.io/specification). Tags and
+# related links live under the standard `metadata` block (string values);
+# `metadata.tags` is checked against a controlled vocabulary. guard-core's loader
+# reads tags/related from `metadata`.
 #
 # Why this exists: a malformed frontmatter block does NOT produce an error in
 # guard-core's loader — it is silently skipped (LoadSkillMetadata returns nil on
@@ -65,7 +67,7 @@ on:
         default: "6.0.2"
 
       tag-vocabulary:
-        description: "Comma-separated controlled vocabulary for the `tags` extension."
+        description: "Comma-separated controlled vocabulary for `metadata.tags` values."
         required: false
         type: string
         default: "web,cloud,cicd,llm,cred"
@@ -202,9 +204,10 @@ jobs:
           tag_vocab = [t.strip() for t in os.environ.get(
               "TAG_VOCABULARY", "web,cloud,cicd,llm,cred").split(",") if t.strip()]
 
-          # agentskills.io core (https://agentskills.io/specification) + Praetorian
-          # extensions `tags` and `related`. additionalProperties:false catches
-          # frontmatter key typos (e.g. `descriptoin:`, `tag:`).
+          # Strict agentskills.io core (https://agentskills.io/specification).
+          # additionalProperties:false catches frontmatter key typos (e.g.
+          # `descriptoin:`) AND rejects the legacy top-level `tags`/`related`
+          # keys — those belong under `metadata` (validated procedurally below).
           schema = {
               "$schema": "https://json-schema.org/draft/2020-12/schema",
               "type": "object",
@@ -218,11 +221,20 @@ jobs:
                   "compatibility": {"type": "string", "maxLength": 500},
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
                   "allowed-tools": {"type": "string"},
-                  "tags": {"type": "array", "minItems": 1, "items": {"enum": tag_vocab}},
-                  "related": {"type": "array", "items": {"type": "string"}},
               },
           }
           validator = Draft202012Validator(schema)
+
+          def metadata_tags(fm):
+              # metadata.tags is a comma-separated string per the agentskills.io
+              # metadata convention (values must be strings).
+              meta = fm.get("metadata")
+              if not isinstance(meta, dict):
+                  return []
+              raw = meta.get("tags")
+              if not isinstance(raw, str):
+                  return []
+              return [t.strip() for t in raw.split(",") if t.strip()]
 
           def frontmatter(path):
               # utf-8-sig strips a leading BOM; text mode normalizes CRLF/CR.
@@ -267,6 +279,9 @@ jobs:
               at = fm.get("allowed-tools")
               if isinstance(at, str) and "," in at:
                   errors.append(f"{f}: allowed-tools must be space-separated, not comma — got '{at}'")
+              for tag in metadata_tags(fm):
+                  if tag not in tag_vocab:
+                      errors.append(f"{f}: [metadata.tags] '{tag}' not in controlled vocabulary {tag_vocab}")
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           lines = [f"## Skill Quality\n\nValidated **{len(files)}** skill(s) matching `{skills_glob}` "
@@ -275,7 +290,7 @@ jobs:
               lines.append(f"\n❌ **{len(errors)} problem(s):**\n")
               lines += [f"- `{e}`" for e in errors]
           else:
-              lines.append("\n✅ All skills conform to the agentskills.io core schema + Praetorian extensions.")
+              lines.append("\n✅ All skills conform to the agentskills.io specification.")
           if summary:
               with open(summary, "a", encoding="utf-8") as fh:
                   fh.write("\n".join(lines) + "\n")
