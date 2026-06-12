@@ -1,15 +1,14 @@
 ---
 name: example-cloud-skill
-description: Use when validating the skill-quality reusable workflow against a well-formed skill — exercises every supported frontmatter field (name matching the directory, a non-empty description under 1024 chars, license, compatibility, metadata with string values, space-separated allowed-tools, in-vocabulary tags, and related links).
+description: Use when validating the skill-quality reusable workflow against a well-formed skill — exercises every supported frontmatter field (name matching the directory, a non-empty description under 1024 chars, license, compatibility, metadata with string values including in-vocabulary metadata.tags and related links, and space-separated allowed-tools).
 license: Proprietary
 compatibility: Designed for Claude Code and guard-core
 metadata:
   author: praetorian
   version: "1.0"
+  tags: "cloud"
+  related: "example-web-skill"
 allowed-tools: Read Bash Grep Glob WebFetch
-tags: [cloud]
-related:
-  - example-web-skill
 ---
 
 # Example Cloud Skill
