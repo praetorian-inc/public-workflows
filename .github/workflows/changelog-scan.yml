@@ -10,8 +10,10 @@ name: Changelog Scan (Callable)
 # state/, and the state commit lands back in the caller. The detection logic + gate/draft
 # prompts therefore stay in the (private) caller repo; only this boilerplate is centralized.
 #
-# Caller contract: the caller repo MUST provide package.json (+ package-lock.json),
-# scripts/main.ts, and scripts/notify-slack.ts.
+# Caller contract: the caller repo MUST provide package.json (+ package-lock.json with
+# `tsx` pinned as a devDependency, so `npm ci` installs it deterministically), scripts/main.ts,
+# and scripts/notify-slack.ts. `state/`, `audit/`, and `docs-queue/` are created and committed
+# by this workflow when a run produces them — the caller need not pre-create those directories.
 #
 # Caller example (featurebase-changelog-bot/.github/workflows/changelog-scan.yml):
 #
@@ -29,7 +31,7 @@ name: Changelog Scan (Callable)
 #       uses: praetorian-inc/public-workflows/.github/workflows/changelog-scan.yml@<SHA>
 #       permissions: { contents: write }
 #       with:
-#         repos: guard,vespasian,hadrian,titus,aurelian,trajan,constantine,julius,augustus,pius,brutus,nerva,caligula
+#         repos: repo-a,repo-b,repo-c   # comma-separated org repo slugs the App token is scoped to
 #         slack_channel_id: ${{ vars.SLACK_CHANNEL_ID }}
 #         since: ${{ inputs.since }}
 #         dry_run: ${{ inputs.dry_run || false }}
@@ -134,16 +136,31 @@ jobs:
           LOOKBACK_SINCE: ${{ inputs.lookback_since }}
           DRY_RUN: ${{ inputs.dry_run }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: npx tsx scripts/main.ts
+        run: npx --yes tsx scripts/main.ts
 
-      - name: Commit state + audit log
+      - name: Commit state + audit log + docs-queue
         if: ${{ inputs.dry_run != true }}
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
         run: |
           git config user.name  "changelog-bot"
           git config user.email "changelog-bot@users.noreply.github.com"
-          git add state/ audit/
-          git diff --staged --quiet || git commit -m "chore: changelog scan state $(date -u +%FT%TZ)"
-          git push
+          # Each artifact dir (state/, audit/, docs-queue/) only exists once a run produces it,
+          # and the caller contract doesn't guarantee any of them — add each only if present so
+          # the step never dies on a missing pathspec (`git add <absent dir>` exits 128 under -e).
+          [ -d state ]      && git add state/      || true
+          [ -d audit ]      && git add audit/      || true
+          [ -d docs-queue ] && git add docs-queue/ || true
+          if git diff --staged --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: changelog scan state $(date -u +%FT%TZ)"
+          # The branch can advance while the scan runs (human commits, doc writeback). Rebase our
+          # state commit on top before pushing so a non-fast-forward rejection doesn't silently
+          # drop the watermark and cause the next run to re-detect/re-draft the same items.
+          git pull --rebase --autostash origin "$TARGET_BRANCH"
+          git push origin "HEAD:$TARGET_BRANCH"
 
       - name: Alert on failure
         if: failure()
@@ -151,4 +168,18 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
           SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-        run: npx tsx scripts/notify-slack.ts --failure "${{ github.run_id }}"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Prefer the caller's rich notifier, but it needs a successful checkout + npm ci. If the
+          # job failed earlier (harden-runner, token mint, install), those are absent — so fall back
+          # to a dependency-free curl to Slack so the failure alert still fires.
+          if [ -f scripts/notify-slack.ts ] && [ -d node_modules ]; then
+            npx --yes tsx scripts/notify-slack.ts --failure "${{ github.run_id }}" && exit 0
+            echo "Rich notifier failed; using curl fallback." >&2
+          fi
+          curl -fsS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H 'Content-type: application/json; charset=utf-8' \
+            --data "$(printf '{"channel":"%s","text":":rotating_light: changelog-scan failed in %s — %s"}' \
+              "$SLACK_CHANNEL_ID" "$GITHUB_REPOSITORY" "$RUN_URL")" \
+            || echo "Slack curl fallback also failed." >&2
