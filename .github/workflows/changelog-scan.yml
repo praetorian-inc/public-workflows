@@ -1,0 +1,318 @@
+name: Changelog Scan (Callable)
+# Reusable workflow that runs the featurebase-changelog-bot detection pipeline:
+# detect shipped customer-facing work (completed Linear issues + merged PRs across the
+# watch repos), gate it, draft it, and create DRAFT-state Featurebase changelog entries
+# for human approval. The bot NEVER publishes — it only writes draft state.
+#
+# This reusable owns the boilerplate (harden-runner, GitHub-App token mint, Node setup,
+# npm ci, running the pipeline, committing state, failure alert). It runs in the CALLER's
+# context, so `actions/checkout` (default) pulls the caller's scripts/, prompts/, and
+# state/, and the state commit lands back in the caller. The detection logic + gate/draft
+# prompts therefore stay in the (private) caller repo; only this boilerplate is centralized.
+#
+# Caller contract: the caller repo MUST provide package.json (+ package-lock.json with
+# `tsx` pinned as a devDependency, so `npm ci` installs it deterministically), scripts/main.ts,
+# and scripts/notify-slack.ts. `state/`, `audit/`, and `docs-queue/` are created and committed
+# by this workflow when a run produces them — the caller need not pre-create those directories.
+#
+# Caller example (featurebase-changelog-bot/.github/workflows/changelog-scan.yml):
+#
+#   name: changelog-scan
+#   on:
+#     schedule: [{ cron: '0 8 * * *' }]
+#     workflow_dispatch:
+#       inputs:
+#         since:   { description: 'Watermark override (ISO). Empty = committed watermark / 30d backfill.', required: false }
+#         dry_run: { description: 'Gate + draft text only; create/post/commit nothing', type: boolean, default: false }
+#   concurrency: { group: changelog-scan, cancel-in-progress: false }
+#   permissions: { contents: write }
+#   jobs:
+#     scan:
+#       uses: praetorian-inc/public-workflows/.github/workflows/changelog-scan.yml@<SHA>
+#       permissions: { contents: write }
+#       with:
+#         repos: repo-a,repo-b,repo-c   # comma-separated org repo slugs the App token is scoped to
+#         slack_channel_id: ${{ vars.SLACK_CHANNEL_ID }}
+#         since: ${{ inputs.since }}
+#         dry_run: ${{ inputs.dry_run || false }}
+#       secrets:
+#         app_id:              ${{ secrets.CHANGELOG_BOT_APP_ID }}
+#         app_private_key:     ${{ secrets.CHANGELOG_BOT_PRIVATE_KEY }}
+#         linear_api_key:      ${{ secrets.LINEAR_API_KEY }}
+#         anthropic_api_key:   ${{ secrets.ANTHROPIC_API_KEY }}
+#         featurebase_api_key: ${{ secrets.FEATUREBASE_API_KEY }}
+#         slack_bot_token:     ${{ secrets.SLACK_BOT_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      repos:
+        description: "Comma-separated repo slugs the App token is scoped to (the watch scope)."
+        required: true
+        type: string
+      owner:
+        description: "Org/owner the GitHub App is installed on (the App must exist there)."
+        required: false
+        type: string
+        default: "praetorian-inc"
+      slack_channel_id:
+        description: "Slack channel ID for the private approver notifications."
+        required: true
+        type: string
+      since:
+        description: "Watermark override (ISO 8601). Empty = committed watermark, or 30d backfill on first run."
+        required: false
+        type: string
+        default: ""
+      lookback_since:
+        description: "Lookback mode: ISO date to backfill from, synthesised in weekly buckets. Empty = active watermark scan."
+        required: false
+        type: string
+        default: ""
+      dry_run:
+        description: "Gate + draft text only — create nothing in Featurebase, post nothing, commit no state."
+        required: false
+        type: boolean
+        default: false
+      node_version:
+        description: "Node.js version."
+        required: false
+        type: string
+        default: "22"
+      additional_endpoints:
+        description: "Extra harden-runner allowed-endpoints (space-separated, e.g. 'host-a:443 host-b:443') the caller's scripts need beyond the conservative default."
+        required: false
+        type: string
+        default: ""
+    secrets:
+      app_id:
+        required: true
+      app_private_key:
+        required: true
+      linear_api_key:
+        required: true
+      anthropic_api_key:
+        required: true
+      featurebase_api_key:
+        required: true
+      slack_bot_token:
+        required: true
+
+permissions:
+  contents: read
+
+# Serialize runs per caller repo: overlapping runs could detect/draft/notify the same items before
+# either commits the watermark. Keyed by github.repository so different callers don't block each
+# other; cancel-in-progress: false so an in-flight state writeback is never killed mid-push.
+concurrency:
+  group: changelog-scan-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # commit state/ + audit/ back to the caller repo
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          # Disable sudo and container spawning: this job runs caller-controlled npm ci + scripts
+          # with five high-value secrets, so close off the privilege-escalation paths a compromised
+          # dependency could use to defeat the egress allowlist below.
+          disable-sudo-and-containers: true
+          # Block egress to everything except the hosts this job legitimately needs, so a
+          # compromised dependency (npm ci) or caller script cannot exfiltrate the five secrets to
+          # an arbitrary host. Grouped by purpose:
+          #   github.com, codeload.github.com, objects.githubusercontent.com,
+          #   release-assets.githubusercontent.com   (checkout, App-token mint, state push)
+          #   api.github.com                          (gh api / App token)
+          #   registry.npmjs.org, nodejs.org          (npm ci + setup-node version fallback)
+          #   api.linear.app, api.anthropic.com, do.featurebase.app, slack.com  (the pipeline APIs)
+          # If a future run fails on a blocked endpoint, the harden-runner step summary names the
+          # host — add it here rather than reverting to audit.
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            api.linear.app:443
+            api.anthropic.com:443
+            do.featurebase.app:443
+            slack.com:443
+            ${{ inputs.additional_endpoints }}
+
+      # This job runs caller-controlled code (npm ci + scripts/main.ts) with five high-value
+      # secrets and contents:write, and pushes state back to the triggering branch. It is built
+      # for schedule / workflow_dispatch ONLY. Enforce that with an allowlist rather than denying
+      # specific events: a denylist would still let push / issue_comment / repository_dispatch /
+      # merge_group run untrusted branch code with the secrets, and on pull_request github.ref_name
+      # is a non-branch merge ref (`<n>/merge`) the state push can't write to anyway.
+      - name: Guard against untrusted triggers
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          case "$EVENT_NAME" in
+            schedule|workflow_dispatch)
+              echo "Trigger '$EVENT_NAME' is allowed." ;;
+            *)
+              echo "::error::changelog-scan only supports 'schedule' or 'workflow_dispatch'; refusing event '$EVENT_NAME' — it would run caller code with privileged secrets." >&2
+              exit 1 ;;
+          esac
+
+      - name: Validate inputs
+        env:
+          SINCE: ${{ inputs.since }}
+          LOOKBACK_SINCE: ${{ inputs.lookback_since }}
+        run: |
+          # `since` (advance the watermark) and `lookback_since` (weekly-bucket backfill) are
+          # different scan modes; supplying both is ambiguous, so reject it rather than letting
+          # main.ts silently pick one.
+          if [ -n "$SINCE" ] && [ -n "$LOOKBACK_SINCE" ]; then
+            echo "::error::'since' and 'lookback_since' are mutually exclusive — set at most one." >&2
+            exit 1
+          fi
+          # Both are ISO 8601; a YYYY-MM-DD prefix check catches a fat-fingered value before it
+          # reaches the date math in main.ts. Permissive prefix so full timestamps still pass.
+          for v in "$SINCE" "$LOOKBACK_SINCE"; do
+            if [ -n "$v" ] && ! printf '%s' "$v" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+              echo "::error::Date inputs must start with an ISO 8601 date (YYYY-MM-DD); got '$v'." >&2
+              exit 1
+            fi
+          done
+
+      - name: Guard against non-branch refs
+        # workflow_dispatch can target a tag. This job drafts/notifies (scan step) and then writes
+        # state back to the ref; the writeback only makes sense on a branch. On a real (non-dry) run
+        # we must refuse BEFORE the scan step creates Featurebase drafts / Slack posts — failing late
+        # at push time would leave drafts with no committed watermark, so the next run re-drafts them.
+        # Skipped on dry runs, which create/post/commit nothing.
+        if: ${{ inputs.dry_run != true }}
+        env:
+          TARGET_REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error::Refusing to run: ref '$TARGET_REF' is a $REF_TYPE, not a branch — state writeback needs a branch." >&2
+            exit 1
+          fi
+
+      - name: Checkout caller repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history: the state writeback does `git pull --rebase` against the branch, and a
+          # shallow depth=1 clone makes non-fast-forward rebase recovery unreliable.
+          fetch-depth: 0
+
+      - name: Mint GitHub App token (read the watch repos)
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.app_id }}
+          private-key: ${{ secrets.app_private_key }}
+          owner: ${{ inputs.owner }}
+          repositories: ${{ inputs.repos }}
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Scan, gate, draft, notify
+        env:
+          GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          LINEAR_API_KEY: ${{ secrets.linear_api_key }}
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+          FEATUREBASE_API_KEY: ${{ secrets.featurebase_api_key }}
+          SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          SINCE_OVERRIDE: ${{ inputs.since }}
+          LOOKBACK_SINCE: ${{ inputs.lookback_since }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        # --no-install: use the tsx pinned in the caller's lockfile; fail loudly if it's missing
+        # rather than silently fetching latest from npm (enforces the deterministic caller contract).
+        run: npx --no-install tsx scripts/main.ts
+
+      - name: Commit state + audit log + docs-queue
+        if: ${{ inputs.dry_run != true }}
+        env:
+          TARGET_BRANCH: ${{ github.ref_name }}
+        run: |
+          # The "Guard against non-branch refs" step above already refused any non-branch ref before
+          # the scan ran, so TARGET_BRANCH is a real branch by the time we get here.
+          git config user.name  "changelog-bot"
+          git config user.email "changelog-bot@users.noreply.github.com"
+          # Each artifact dir (state/, audit/, docs-queue/) only exists once a run produces it, and
+          # the caller contract doesn't guarantee any of them. Stage a dir when it exists in the
+          # working tree OR still has tracked files — the latter captures DELETIONS (e.g. a drained
+          # docs-queue/ whose dir is gone), which a plain `[ -d ]` guard would silently skip,
+          # leaving stale committed state. Skip dirs that never existed so `git add` can't exit 128.
+          for d in state audit docs-queue; do
+            if [ -d "$d" ] || [ -n "$(git ls-files -- "$d")" ]; then
+              git add -A -- "$d"
+            fi
+          done
+          if git diff --staged --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+          git commit -m "chore: changelog scan state $(date -u +%FT%TZ)"
+          # The branch can advance while the scan runs (human commits, doc writeback), and again in
+          # the window between rebase and push. Rebase-then-push in a short retry loop so a
+          # non-fast-forward rejection doesn't silently drop the watermark and cause the next run to
+          # re-detect/re-draft the same items. A rebase *conflict* (vs a clean fast-forward) means
+          # the bot-owned state genuinely diverged — there's no safe auto-merge, so abort cleanly
+          # and fail loudly instead of looping on the same conflict. `if ! ...` keeps set -e from
+          # killing the step on the caught pull failure.
+          for attempt in 1 2 3; do
+            if ! git pull --rebase --autostash origin "$TARGET_BRANCH"; then
+              git rebase --abort 2>/dev/null || true
+              echo "::error::Rebase onto '$TARGET_BRANCH' hit a conflict in bot-owned state; manual resolution required." >&2
+              exit 1
+            fi
+            if git push origin "HEAD:refs/heads/$TARGET_BRANCH"; then
+              exit 0
+            fi
+            echo "Push attempt $attempt rejected (branch advanced); retrying after rebase." >&2
+          done
+          echo "::error::Failed to push changelog scan state after 3 attempts." >&2
+          exit 1
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Prefer the caller's rich notifier, but it needs a successful checkout + npm ci. If the
+          # job failed earlier (harden-runner, token mint, install), those are absent — so fall back
+          # to a dependency-free curl to Slack so the failure alert still fires.
+          if [ -f scripts/notify-slack.ts ] && [ -d node_modules ]; then
+            npx --no-install tsx scripts/notify-slack.ts --failure "$RUN_ID" && exit 0
+            echo "Rich notifier failed; using curl fallback." >&2
+          fi
+          # Build the JSON with jq (present on ubuntu-24.04) so a channel id / repo / URL that
+          # contains a quote or backslash can't malform the payload and silently drop the alert.
+          # Slack returns HTTP 200 with {"ok":false} on logical errors (bad channel, revoked token),
+          # so a plain `curl -f` would treat that as success — capture the body and assert .ok=true.
+          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+            -H 'Content-type: application/json; charset=utf-8' \
+            --data "$(jq -nc \
+              --arg ch  "$SLACK_CHANNEL_ID" \
+              --arg txt ":rotating_light: changelog-scan failed in ${GITHUB_REPOSITORY} — ${RUN_URL}" \
+              '{channel: $ch, text: $txt}')") || true
+          if ! printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "::warning::Slack curl fallback did not confirm delivery: ${resp:-<no response>}" >&2
+          fi
