@@ -96,6 +96,13 @@ on:
 permissions:
   contents: read
 
+# Serialize runs per caller repo: overlapping runs could detect/draft/notify the same items before
+# either commits the watermark. Keyed by github.repository so different callers don't block each
+# other; cancel-in-progress: false so an in-flight state writeback is never killed mid-push.
+concurrency:
+  group: changelog-scan-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   scan:
     runs-on: ubuntu-latest
@@ -105,26 +112,45 @@ jobs:
       - name: Harden runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
-          # Start in audit; flip to 'block' + the egress allowlist below once observed. The list
-          # must include the infra hosts (checkout/push, npm ci) as well as the API endpoints, or
-          # block mode breaks the workflow itself:
-          #   github.com, codeload.github.com, objects.githubusercontent.com  (checkout + push)
-          #   registry.npmjs.org                                              (npm ci)
-          #   api.github.com, api.linear.app, api.anthropic.com, do.featurebase.app, slack.com
-          egress-policy: audit
+          # Block egress to everything except the hosts this job legitimately needs, so a
+          # compromised dependency (npm ci) or caller script cannot exfiltrate the five secrets to
+          # an arbitrary host. Grouped by purpose:
+          #   github.com, codeload.github.com, objects.githubusercontent.com,
+          #   release-assets.githubusercontent.com   (checkout, App-token mint, state push)
+          #   api.github.com                          (gh api / App token)
+          #   registry.npmjs.org, nodejs.org          (npm ci + setup-node version fallback)
+          #   api.linear.app, api.anthropic.com, do.featurebase.app, slack.com  (the pipeline APIs)
+          # If a future run fails on a blocked endpoint, the harden-runner step summary names the
+          # host — add it here rather than reverting to audit.
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            registry.npmjs.org:443
+            nodejs.org:443
+            api.linear.app:443
+            api.anthropic.com:443
+            do.featurebase.app:443
+            slack.com:443
 
       # This job runs caller-controlled code (npm ci + scripts/main.ts) with five high-value
       # secrets and contents:write, and pushes state back to the triggering branch. It is built
-      # for schedule / workflow_dispatch only (see the caller example). Refuse PR events: a fork
-      # PR could exfiltrate the secrets via install scripts / main.ts, and github.ref_name would
-      # be a non-branch merge ref (`<n>/merge`) that the state push can't write to anyway.
-      - name: Guard against untrusted-PR triggers
+      # for schedule / workflow_dispatch ONLY. Enforce that with an allowlist rather than denying
+      # specific events: a denylist would still let push / issue_comment / repository_dispatch /
+      # merge_group run untrusted branch code with the secrets, and on pull_request github.ref_name
+      # is a non-branch merge ref (`<n>/merge`) the state push can't write to anyway.
+      - name: Guard against untrusted triggers
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           case "$EVENT_NAME" in
-            pull_request|pull_request_target)
-              echo "::error::changelog-scan must not be triggered by '$EVENT_NAME'; use schedule or workflow_dispatch." >&2
+            schedule|workflow_dispatch)
+              echo "Trigger '$EVENT_NAME' is allowed." ;;
+            *)
+              echo "::error::changelog-scan only supports 'schedule' or 'workflow_dispatch'; refusing event '$EVENT_NAME' — it would run caller code with privileged secrets." >&2
               exit 1 ;;
           esac
 
@@ -168,7 +194,14 @@ jobs:
         if: ${{ inputs.dry_run != true }}
         env:
           TARGET_BRANCH: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
+          # workflow_dispatch can run against a tag; the state writeback only makes sense on a
+          # branch. Refuse anything else up front rather than failing late at push time.
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error::Refusing to write state: ref '$TARGET_BRANCH' is a $REF_TYPE, not a branch." >&2
+            exit 1
+          fi
           git config user.name  "changelog-bot"
           git config user.email "changelog-bot@users.noreply.github.com"
           # Each artifact dir (state/, audit/, docs-queue/) only exists once a run produces it, and
@@ -189,10 +222,17 @@ jobs:
           # The branch can advance while the scan runs (human commits, doc writeback), and again in
           # the window between rebase and push. Rebase-then-push in a short retry loop so a
           # non-fast-forward rejection doesn't silently drop the watermark and cause the next run to
-          # re-detect/re-draft the same items.
+          # re-detect/re-draft the same items. A rebase *conflict* (vs a clean fast-forward) means
+          # the bot-owned state genuinely diverged — there's no safe auto-merge, so abort cleanly
+          # and fail loudly instead of looping on the same conflict. `if ! ...` keeps set -e from
+          # killing the step on the caught pull failure.
           for attempt in 1 2 3; do
-            git pull --rebase --autostash origin "$TARGET_BRANCH"
-            if git push origin "HEAD:$TARGET_BRANCH"; then
+            if ! git pull --rebase --autostash origin "$TARGET_BRANCH"; then
+              git rebase --abort 2>/dev/null || true
+              echo "::error::Rebase onto '$TARGET_BRANCH' hit a conflict in bot-owned state; manual resolution required." >&2
+              exit 1
+            fi
+            if git push origin "HEAD:refs/heads/$TARGET_BRANCH"; then
               exit 0
             fi
             echo "Push attempt $attempt rejected (branch advanced); retrying after rebase." >&2
@@ -216,9 +256,13 @@ jobs:
             npx --no-install tsx scripts/notify-slack.ts --failure "$RUN_ID" && exit 0
             echo "Rich notifier failed; using curl fallback." >&2
           fi
+          # Build the JSON with jq (present on ubuntu-latest) so a channel id / repo / URL that
+          # contains a quote or backslash can't malform the payload and silently drop the alert.
           curl -fsS -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
             -H 'Content-type: application/json; charset=utf-8' \
-            --data "$(printf '{"channel":"%s","text":":rotating_light: changelog-scan failed in %s — %s"}' \
-              "$SLACK_CHANNEL_ID" "$GITHUB_REPOSITORY" "$RUN_URL")" \
+            --data "$(jq -nc \
+              --arg ch  "$SLACK_CHANNEL_ID" \
+              --arg txt ":rotating_light: changelog-scan failed in ${GITHUB_REPOSITORY} — ${RUN_URL}" \
+              '{channel: $ch, text: $txt}')" \
             || echo "Slack curl fallback also failed." >&2
