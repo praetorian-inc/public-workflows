@@ -57,6 +57,11 @@ on:
         required: false
         type: string
         default: ""
+      lookback_since:
+        description: "Lookback mode: ISO date to backfill from, synthesised in weekly buckets. Empty = active watermark scan."
+        required: false
+        type: string
+        default: ""
       dry_run:
         description: "Gate + draft text only — create nothing in Featurebase, post nothing, commit no state."
         required: false
@@ -126,6 +131,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
           SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
           SINCE_OVERRIDE: ${{ inputs.since }}
+          LOOKBACK_SINCE: ${{ inputs.lookback_since }}
           DRY_RUN: ${{ inputs.dry_run }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: npx tsx scripts/main.ts
