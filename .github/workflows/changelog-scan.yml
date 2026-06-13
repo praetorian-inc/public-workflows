@@ -79,6 +79,11 @@ on:
         required: false
         type: string
         default: "22"
+      additional_endpoints:
+        description: "Extra harden-runner allowed-endpoints (space-separated, e.g. 'host-a:443 host-b:443') the caller's scripts need beyond the conservative default."
+        required: false
+        type: string
+        default: ""
     secrets:
       app_id:
         required: true
@@ -105,13 +110,17 @@ concurrency:
 
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write # commit state/ + audit/ back to the caller repo
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
+          # Disable sudo and container spawning: this job runs caller-controlled npm ci + scripts
+          # with five high-value secrets, so close off the privilege-escalation paths a compromised
+          # dependency could use to defeat the egress allowlist below.
+          disable-sudo-and-containers: true
           # Block egress to everything except the hosts this job legitimately needs, so a
           # compromised dependency (npm ci) or caller script cannot exfiltrate the five secrets to
           # an arbitrary host. Grouped by purpose:
@@ -135,6 +144,7 @@ jobs:
             api.anthropic.com:443
             do.featurebase.app:443
             slack.com:443
+            ${{ inputs.additional_endpoints }}
 
       # This job runs caller-controlled code (npm ci + scripts/main.ts) with five high-value
       # secrets and contents:write, and pushes state back to the triggering branch. It is built
@@ -154,8 +164,49 @@ jobs:
               exit 1 ;;
           esac
 
+      - name: Validate inputs
+        env:
+          SINCE: ${{ inputs.since }}
+          LOOKBACK_SINCE: ${{ inputs.lookback_since }}
+        run: |
+          # `since` (advance the watermark) and `lookback_since` (weekly-bucket backfill) are
+          # different scan modes; supplying both is ambiguous, so reject it rather than letting
+          # main.ts silently pick one.
+          if [ -n "$SINCE" ] && [ -n "$LOOKBACK_SINCE" ]; then
+            echo "::error::'since' and 'lookback_since' are mutually exclusive — set at most one." >&2
+            exit 1
+          fi
+          # Both are ISO 8601; a YYYY-MM-DD prefix check catches a fat-fingered value before it
+          # reaches the date math in main.ts. Permissive prefix so full timestamps still pass.
+          for v in "$SINCE" "$LOOKBACK_SINCE"; do
+            if [ -n "$v" ] && ! printf '%s' "$v" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}'; then
+              echo "::error::Date inputs must start with an ISO 8601 date (YYYY-MM-DD); got '$v'." >&2
+              exit 1
+            fi
+          done
+
+      - name: Guard against non-branch refs
+        # workflow_dispatch can target a tag. This job drafts/notifies (scan step) and then writes
+        # state back to the ref; the writeback only makes sense on a branch. On a real (non-dry) run
+        # we must refuse BEFORE the scan step creates Featurebase drafts / Slack posts — failing late
+        # at push time would leave drafts with no committed watermark, so the next run re-drafts them.
+        # Skipped on dry runs, which create/post/commit nothing.
+        if: ${{ inputs.dry_run != true }}
+        env:
+          TARGET_REF: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error::Refusing to run: ref '$TARGET_REF' is a $REF_TYPE, not a branch — state writeback needs a branch." >&2
+            exit 1
+          fi
+
       - name: Checkout caller repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history: the state writeback does `git pull --rebase` against the branch, and a
+          # shallow depth=1 clone makes non-fast-forward rebase recovery unreliable.
+          fetch-depth: 0
 
       - name: Mint GitHub App token (read the watch repos)
         id: app-token
@@ -194,14 +245,9 @@ jobs:
         if: ${{ inputs.dry_run != true }}
         env:
           TARGET_BRANCH: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
         run: |
-          # workflow_dispatch can run against a tag; the state writeback only makes sense on a
-          # branch. Refuse anything else up front rather than failing late at push time.
-          if [ "$REF_TYPE" != "branch" ]; then
-            echo "::error::Refusing to write state: ref '$TARGET_BRANCH' is a $REF_TYPE, not a branch." >&2
-            exit 1
-          fi
+          # The "Guard against non-branch refs" step above already refused any non-branch ref before
+          # the scan ran, so TARGET_BRANCH is a real branch by the time we get here.
           git config user.name  "changelog-bot"
           git config user.email "changelog-bot@users.noreply.github.com"
           # Each artifact dir (state/, audit/, docs-queue/) only exists once a run produces it, and
@@ -256,13 +302,17 @@ jobs:
             npx --no-install tsx scripts/notify-slack.ts --failure "$RUN_ID" && exit 0
             echo "Rich notifier failed; using curl fallback." >&2
           fi
-          # Build the JSON with jq (present on ubuntu-latest) so a channel id / repo / URL that
+          # Build the JSON with jq (present on ubuntu-24.04) so a channel id / repo / URL that
           # contains a quote or backslash can't malform the payload and silently drop the alert.
-          curl -fsS -X POST https://slack.com/api/chat.postMessage \
+          # Slack returns HTTP 200 with {"ok":false} on logical errors (bad channel, revoked token),
+          # so a plain `curl -f` would treat that as success — capture the body and assert .ok=true.
+          resp=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
             -H 'Content-type: application/json; charset=utf-8' \
             --data "$(jq -nc \
               --arg ch  "$SLACK_CHANNEL_ID" \
               --arg txt ":rotating_light: changelog-scan failed in ${GITHUB_REPOSITORY} — ${RUN_URL}" \
-              '{channel: $ch, text: $txt}')" \
-            || echo "Slack curl fallback also failed." >&2
+              '{channel: $ch, text: $txt}')") || true
+          if ! printf '%s' "$resp" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "::warning::Slack curl fallback did not confirm delivery: ${resp:-<no response>}" >&2
+          fi
