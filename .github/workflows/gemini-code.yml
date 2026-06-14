@@ -7,7 +7,7 @@ name: Gemini PR Assistant (Callable)
 # the previous single-shot google-genai API call. Like the Claude and Codex reviewers,
 # Gemini now runs a tool loop and can read past the diff — opening the surrounding code
 # (definitions, callers, sibling modules) for real context. It also loads Praetorian's
-# curated review skills natively from praetorian-inc/public-skills (`.gemini/skills/`).
+# curated review skills natively from praetorian-inc/palatine (`.gemini/skills/`).
 #
 # Security posture (hardcoded — callers cannot widen the attack surface):
 #   - Two-job split, mirroring codex-code.yml's defense-in-depth: the agent runs in a
@@ -176,14 +176,14 @@ jobs:
           persist-credentials: false
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
-      # praetorian-inc/public-skills is the canonical-source-of-truth repo (agentmesh
+      # praetorian-inc/palatine is the canonical-source-of-truth repo (agentmesh
       # materializes one canonical skill set into each runtime's native dir). Pinned to
       # a commit SHA — callers cannot point this elsewhere. Public repo => no token.
-      - name: Load curated review skills (public-skills)
+      - name: Load curated review skills (palatine)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          repository: praetorian-inc/public-skills
-          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # public-skills @ initial curated set
+          repository: praetorian-inc/palatine
+          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
           path: .pr-skills
           fetch-depth: 1
           persist-credentials: false
@@ -205,7 +205,7 @@ jobs:
           #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this
           #     cwd; a PR-supplied registry override is a supply-chain vector.
           # The agent's settings + skills then come ONLY from the action input and the
-          # SHA-pinned public-skills checkout.
+          # SHA-pinned palatine checkout.
           # One robust recursive sweep for the discovery dirs (.gemini/.agents) and the
           # instruction/ignore files (GEMINI.md/AGENTS.md/.geminiignore). find flags:
           #   - no -type f, so a *symlinked* GEMINI.md/AGENTS.md is removed (not skipped);
