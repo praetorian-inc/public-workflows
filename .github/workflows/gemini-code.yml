@@ -92,6 +92,12 @@ on:
       GEMINI_API_KEY:
         description: "Google AI Studio API key for Gemini"
         required: true
+      PALATINE_SKILLS_APP_ID:
+        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/palatine. OPTIONAL: when set (trusted internal callers), the curated review skills are loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
+        required: false
+      PALATINE_SKILLS_PRIVATE_KEY:
+        description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
+        required: false
 
 permissions:
   contents: read
@@ -149,6 +155,11 @@ jobs:
     outputs:
       review_output: ${{ steps.sanitize.outputs.review }}
 
+    # Mapped from the secret so the optional palatine-token step can be gated in `if:`
+    # (a step `if:` cannot read `secrets.*` directly).
+    env:
+      PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -177,18 +188,36 @@ jobs:
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
       # praetorian-inc/palatine is the canonical-source-of-truth repo (agentmesh
-      # materializes one canonical skill set into each runtime's native dir). Pinned to
-      # a commit SHA — callers cannot point this elsewhere. Public repo => no token.
+      # materializes one canonical skill set into each runtime's native dir) and is
+      # INTERNAL, so reading it requires a token. We mint a short-lived GitHub App token
+      # scoped to palatine ONLY when the caller supplies the App credentials — i.e. on
+      # trusted internal callers. On public repos / fork PRs no such secret is available,
+      # so the mint + checkout + stage are skipped and the review runs without curated
+      # skills (fail-closed: internal skills are never pulled into a public run's logs).
+      # The purge step below ALWAYS runs, so PR-supplied agent config is neutralized
+      # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
+      - name: Mint palatine read token
+        id: skills-token
+        if: ${{ env.PALATINE_APP_ID != '' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
+        with:
+          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
+          owner: praetorian-inc
+          repositories: palatine
+
       - name: Load curated review skills (palatine)
+        if: ${{ steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: praetorian-inc/palatine
           ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
           path: .pr-skills
           fetch-depth: 1
+          token: ${{ steps.skills-token.outputs.token }}
           persist-credentials: false
 
-      - name: Purge PR-supplied agent config, then stage curated skills
+      - name: Purge PR-supplied agent config
         run: |
           set -euo pipefail
           # The merged tree is untrusted PR content, and workspace trust is enabled
@@ -221,6 +250,14 @@ jobs:
           find . \( -name .git -o -path ./.pr-skills \) -prune -o \
             \( -iname '.gemini' -o -iname '.agents' -o -iname 'GEMINI.md' -o -iname 'AGENTS.md' -o -iname '.geminiignore' \) \
             -prune -exec rm -rf {} +
+
+      # Stage the trusted curated tree AFTER the purge (which prunes .pr-skills) so the
+      # sweep never touches it. Gated on the token: skipped when no curated skills were
+      # checked out (public repos / fork PRs) — Gemini then reviews with no skills dir.
+      - name: Stage curated skills
+        if: ${{ steps.skills-token.outputs.token != '' }}
+        run: |
+          set -euo pipefail
           mkdir -p .gemini/skills
           cp -R .pr-skills/.gemini/skills/. .gemini/skills/
           rm -rf .pr-skills
