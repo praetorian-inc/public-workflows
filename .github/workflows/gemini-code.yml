@@ -119,12 +119,15 @@ jobs:
 
   # Gemini review: run the Gemini CLI as a read-only agent via run-gemini-cli.
   #
-  # The job has `contents: read` only — no PR write access — and NO step in it
-  # uses a GitHub token at all: the depth-2 merge-ref checkout brings the diff's
-  # parents locally, so "Build review context" computes the diff fully offline.
-  # This means even if the agent is compromised by prompt injection it has no
-  # credential to exfiltrate and no path to write to the PR. The post-feedback
-  # job posts.
+  # The job has `contents: read` only — no PR write access. The only credential it
+  # can hold is a short-lived GitHub App token, minted ONLY when a trusted caller
+  # supplies the palatine App creds, scoped to palatine read, and consumed solely by
+  # the curated-skills checkout (persist-credentials: false, so it is never written to
+  # .git/config). The Gemini agent step runs later and is never handed that token, and
+  # the depth-2 merge-ref checkout brings the diff's parents locally so "Build review
+  # context" computes the diff fully offline. So even if the agent is compromised by
+  # prompt injection it has no credential to exfiltrate and no path to write to the PR.
+  # The post-feedback job posts.
   gemini-review:
     needs: preflight
     if: |
@@ -159,6 +162,10 @@ jobs:
     # (a step `if:` cannot read `secrets.*` directly).
     env:
       PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+      # Presence-only boolean (NOT the key itself) so the mint step can require BOTH
+      # creds in `if:` — a caller passing the App ID without the PEM then degrades to
+      # "run without curated skills" instead of hard-failing the job at token minting.
+      PALATINE_KEY_SET: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}
 
     steps:
       - name: Harden Runner
@@ -232,11 +239,11 @@ jobs:
       # trusted internal callers. On public repos / fork PRs no such secret is available,
       # so the mint + checkout + stage are skipped and the review runs without curated
       # skills (fail-closed: internal skills are never pulled into a public run's logs).
-      # The purge step below ALWAYS runs, so PR-supplied agent config is neutralized
+      # The purge step above ALWAYS runs, so PR-supplied agent config is neutralized
       # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
       - name: Mint palatine read token
         id: skills-token
-        if: ${{ env.PALATINE_APP_ID != '' }}
+        if: ${{ env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}

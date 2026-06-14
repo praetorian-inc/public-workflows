@@ -139,6 +139,10 @@ jobs:
     # (a step `if:` cannot read `secrets.*` directly).
     env:
       PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+      # Presence-only boolean (NOT the key itself) so the mint step can require BOTH
+      # creds in `if:` — a caller passing the App ID without the PEM then degrades to
+      # "run without curated skills" instead of hard-failing the job at token minting.
+      PALATINE_KEY_SET: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}
 
     steps:
       - name: Harden Runner
@@ -239,7 +243,7 @@ jobs:
       # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
       - name: Mint palatine read token
         id: skills-token
-        if: ${{ env.PALATINE_APP_ID != '' }}
+        if: ${{ env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
