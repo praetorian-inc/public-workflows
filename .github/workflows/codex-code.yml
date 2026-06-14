@@ -199,8 +199,8 @@ jobs:
           # makes the on-disk neutralization guarantee hold regardless of exec trust posture.
           # A same-repo PR could plant any of these to
           # steer the review, so purge them from the PR tree BEFORE the trusted
-          # public-skills checkout — the curated set is then never in scope of this sweep,
-          # and the only surviving agent config is public-skills + this workflow's prompt.
+          # palatine checkout — the curated set is then never in scope of this sweep,
+          # and the only surviving agent config is palatine + this workflow's prompt.
           # RECURSIVE, not root-only: Codex re-derives discovery context if its cwd moves
           # into a subdirectory mid-run, so a nested .agents could otherwise re-enter scope.
           # find flags:
@@ -218,14 +218,14 @@ jobs:
 
       # Curated review skills, auto-discovered by the Codex CLI from `.agents/skills`
       # in the CWD (implicit, task-matched invocation — developers.openai.com/codex/skills).
-      # praetorian-inc/public-skills is the canonical source-of-truth repo. Pinned to a
+      # praetorian-inc/palatine is the canonical source-of-truth repo. Pinned to a
       # commit SHA — callers cannot point this elsewhere. Public repo => no token.
       # Staged AFTER the purge so the sweep above never touches this trusted tree.
-      - name: Load curated review skills (public-skills)
+      - name: Load curated review skills (palatine)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          repository: praetorian-inc/public-skills
-          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # public-skills @ initial curated set
+          repository: praetorian-inc/palatine
+          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
           path: .pr-skills
           fetch-depth: 1
           persist-credentials: false
