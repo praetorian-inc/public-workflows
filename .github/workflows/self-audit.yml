@@ -48,7 +48,12 @@ jobs:
       - name: Install actionlint
         env:
           ACTIONLINT_VERSION: "v1.7.7"
-        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+        # `go install` drops the binary in $(go env GOPATH)/bin, which is NOT on the
+        # runner's PATH (no setup-go here) — so a later bare `actionlint` would exit 127
+        # "command not found". Append that bin dir to GITHUB_PATH so the gate step finds it.
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       # Full report for visibility (every severity) — does not fail the build.
       - name: zizmor report (informational)

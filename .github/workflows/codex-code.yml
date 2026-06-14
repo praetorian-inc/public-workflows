@@ -70,6 +70,12 @@ on:
       OPENAI_API_KEY:
         description: "OpenAI API key for Codex (pay-per-token billing)"
         required: true
+      PALATINE_SKILLS_APP_ID:
+        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/palatine. OPTIONAL: when set (trusted internal callers), the curated review skills are loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
+        required: false
+      PALATINE_SKILLS_PRIVATE_KEY:
+        description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
+        required: false
 
 permissions:
   contents: read
@@ -128,6 +134,15 @@ jobs:
 
     outputs:
       final_message: ${{ steps.run_codex.outputs.final-message }}
+
+    # Mapped from the secret so the optional palatine-token step can be gated in `if:`
+    # (a step `if:` cannot read `secrets.*` directly).
+    env:
+      PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+      # Presence-only boolean (NOT the key itself) so the mint step can require BOTH
+      # creds in `if:` — a caller passing the App ID without the PEM then degrades to
+      # "run without curated skills" instead of hard-failing the job at token minting.
+      PALATINE_KEY_SET: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}
 
     steps:
       - name: Harden Runner
@@ -218,19 +233,38 @@ jobs:
 
       # Curated review skills, auto-discovered by the Codex CLI from `.agents/skills`
       # in the CWD (implicit, task-matched invocation — developers.openai.com/codex/skills).
-      # praetorian-inc/palatine is the canonical source-of-truth repo. Pinned to a
-      # commit SHA — callers cannot point this elsewhere. Public repo => no token.
+      # praetorian-inc/palatine is the canonical source-of-truth repo and is INTERNAL,
+      # so reading it requires a token. We mint a short-lived GitHub App token scoped to
+      # palatine ONLY when the caller supplies the App credentials — i.e. on trusted
+      # internal callers. On public repos / fork PRs no such secret is available, so the
+      # mint + checkout + stage below are skipped and the review runs without curated
+      # skills (fail-closed: internal skills are never pulled into a public run's logs).
+      # The purge step above ALWAYS runs, so PR-supplied agent config is neutralized
+      # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
+      - name: Mint palatine read token
+        id: skills-token
+        if: ${{ env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
+        with:
+          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
+          owner: praetorian-inc
+          repositories: palatine
+
       # Staged AFTER the purge so the sweep above never touches this trusted tree.
       - name: Load curated review skills (palatine)
+        if: ${{ steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: praetorian-inc/palatine
           ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
           path: .pr-skills
           fetch-depth: 1
+          token: ${{ steps.skills-token.outputs.token }}
           persist-credentials: false
 
       - name: Stage curated skills
+        if: ${{ steps.skills-token.outputs.token != '' }}
         run: |
           set -euo pipefail
           mkdir -p .agents/skills
