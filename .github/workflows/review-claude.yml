@@ -10,11 +10,18 @@ concurrency:
   group: claude-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # stray review comments must not cancel an in-progress review
 
+# Least-privilege default; the job below scopes exactly what the reviewer needs.
+permissions:
+  contents: read
+
 jobs:
   claude-code-action:
     uses: ./.github/workflows/claude-code.yml
     permissions:
-      contents: write
+      # contents: read (not write) — the claude-code.yml reusable's jobs cap at
+      # contents: read; granting write here is excess the reviewer never uses, and
+      # it widens the blast radius of a prompt-injection on a same-repo PR.
+      contents: read
       pull-requests: write
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

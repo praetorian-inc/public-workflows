@@ -10,6 +10,10 @@ concurrency:
   group: codex-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}  # stray review comments must not cancel an in-progress review
 
+# Least-privilege default; the job below scopes exactly what the reviewer needs.
+permissions:
+  contents: read
+
 jobs:
   codex-review:
     uses: ./.github/workflows/codex-code.yml

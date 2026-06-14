@@ -327,7 +327,12 @@ jobs:
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}
-        run: go test ${{ inputs.test-flags }} ${{ inputs.test-packages }}
+        env:
+          TEST_FLAGS: ${{ inputs.test-flags }}
+          TEST_PACKAGES: ${{ inputs.test-packages }}
+        run: |
+          # shellcheck disable=SC2086  # intentional word-split: flags/packages are space-separated lists
+          go test $TEST_FLAGS $TEST_PACKAGES
 
       - name: Upload coverage
         if: ${{ inputs.upload-coverage && inputs.enable-test }}
@@ -371,11 +376,14 @@ jobs:
 
       - name: Determine binary name
         id: binary
+        env:
+          BUILD_BINARY_NAME: ${{ inputs.build-binary-name }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          if [ -n "${{ inputs.build-binary-name }}" ]; then
-            echo "name=${{ inputs.build-binary-name }}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BUILD_BINARY_NAME" ]; then
+            echo "name=$BUILD_BINARY_NAME" >> "$GITHUB_OUTPUT"
           else
-            echo "name=${{ github.event.repository.name }}" >> "$GITHUB_OUTPUT"
+            echo "name=$REPO_NAME" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build
@@ -384,7 +392,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: ${{ inputs.build-cgo-enabled }}
+          BINARY_NAME: ${{ steps.binary.outputs.name }}
+          BUILD_CMD_PATH: ${{ inputs.build-cmd-path }}
         run: |
           go build -trimpath -ldflags="-s -w" \
-            -o "${{ steps.binary.outputs.name }}-${{ matrix.goos }}-${{ matrix.goarch }}" \
-            ${{ inputs.build-cmd-path }}
+            -o "${BINARY_NAME}-${GOOS}-${GOARCH}" \
+            "$BUILD_CMD_PATH"
