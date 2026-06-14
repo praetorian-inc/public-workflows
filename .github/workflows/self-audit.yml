@@ -1,0 +1,65 @@
+name: Self-Audit
+
+# Dogfood: scan THIS repo's own reusable workflows on every PR. A new High-severity
+# zizmor finding (injection, pwn-request, over-permission, unpinned action, …) or an
+# actionlint error blocks the merge — so "public = safe" stays true over time rather
+# than being a one-time cleanup. See SECURITY.md for the threat model.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: zizmor + actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        env:
+          ZIZMOR_VERSION: "1.25.2"
+        run: pipx install "zizmor==${ZIZMOR_VERSION}"
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "v1.7.7"
+        run: go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+
+      # Full report for visibility (every severity) — does not fail the build.
+      - name: zizmor report (informational)
+        run: zizmor --persona=regular --format=plain .github/workflows/ || true
+
+      # Gate: any High-severity finding fails the merge. Accepted lower-severity
+      # findings and documented exceptions (# zizmor: ignore[...]) do not.
+      - name: zizmor gate (High blocks merge)
+        run: zizmor --persona=regular --min-severity=high --format=plain .github/workflows/
+
+      - name: actionlint
+        # shellcheck at warning+ severity: gate on real issues (injection, undefined
+        # vars, expression errors), not pre-existing style nits (SC2006 backticks, etc.).
+        run: actionlint -color -shellcheck="-S warning"

@@ -10,6 +10,12 @@
 # Default owner — repo maintainer
 *                                           @nsportsman
 
+# Every reusable workflow propagates to 40+ caller repos. Any change to ANY
+# workflow file — not just the AI reviewers below — requires Security Engineering
+# review so a hardening regression (injection, over-permission, unpinned action,
+# pwn-request) can't land unreviewed. Specific reviewers below add finer rationale.
+/.github/workflows/                         @praetorian-inc/security-engineering @nsportsman
+
 # Claude-code.yml reviews content from PRs (including CLAUDE.md, PR bodies, comments)
 # through Claude with a hardcoded, non-configurable tool allowlist. Any change to the
 # allowlist, trigger gates, or Claude invocation requires Security Engineering review

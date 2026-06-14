@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
 
+# Least-privilege default for the whole workflow; the single job below explicitly
+# elevates to contents: write only for itself (to push the tag).
 permissions:
-  contents: write
-  pull-requests: read
+  contents: read
 
 jobs:
   auto-tag:

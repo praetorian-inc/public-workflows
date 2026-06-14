@@ -317,7 +317,9 @@ jobs:
           cache: false
 
       - name: Install gosec
-        run: go install github.com/securego/gosec/v2/cmd/gosec@${{ inputs.gosec-version }}
+        env:
+          GOSEC_VERSION: ${{ inputs.gosec-version }}
+        run: go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
 
       - name: Run gosec
         working-directory: ${{ inputs.working-directory }}
@@ -407,7 +409,9 @@ jobs:
           cache: false
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@${{ inputs.govulncheck-version }}
+        env:
+          GOVULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
+        run: go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
 
       # SARIF mode runs only when the result will actually be uploaded (public
       # repo, or private repo that opted in via force-upload-private). Otherwise
@@ -418,6 +422,7 @@ jobs:
         shell: bash
         env:
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+          GOVULNCHECK_PACKAGE: ${{ inputs.govulncheck-package }}
         # govulncheck exits 0 on clean, 3 on vulns-found, other on error. Under
         # the default `bash -e` shell, exit 3 aborts the step mid-pipe and can
         # leave govulncheck-results.sarif empty or truncated; the subsequent
@@ -427,7 +432,8 @@ jobs:
         # minimal valid SARIF on malformed output so upload always succeeds.
         run: |
           set +e
-          govulncheck -format sarif ${{ inputs.govulncheck-package }} > govulncheck-results.sarif 2> govulncheck-stderr.log
+          # shellcheck disable=SC2086  # package spec may be a space-separated list (e.g. ./...)
+          govulncheck -format sarif $GOVULNCHECK_PACKAGE > govulncheck-results.sarif 2> govulncheck-stderr.log
           EXIT=$?
           echo "govulncheck exit code: $EXIT"
           if [ -s govulncheck-stderr.log ]; then
@@ -470,9 +476,11 @@ jobs:
         shell: bash
         env:
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
+          GOVULNCHECK_PACKAGE: ${{ inputs.govulncheck-package }}
         run: |
           set +e
-          govulncheck ${{ inputs.govulncheck-package }}
+          # shellcheck disable=SC2086  # package spec may be a space-separated list (e.g. ./...)
+          govulncheck $GOVULNCHECK_PACKAGE
           EXIT=$?
           echo "govulncheck exit code: $EXIT"
           # exit 3 = vulns found. Gate the build only when enforcing.
