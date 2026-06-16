@@ -6,14 +6,24 @@ name: Changelog Scan (Callable)
 #
 # This reusable owns the boilerplate (harden-runner, GitHub-App token mint, Node setup,
 # npm ci, running the pipeline, committing state, failure alert). It runs in the CALLER's
-# context, so `actions/checkout` (default) pulls the caller's scripts/, prompts/, and
-# state/, and the state commit lands back in the caller. The detection logic + gate/draft
-# prompts therefore stay in the (private) caller repo; only this boilerplate is centralized.
+# context, so `actions/checkout` (default) pulls the caller's scripts/, prompts/, and code.
+# The detection logic + gate/draft prompts therefore stay in the (private) caller repo; only
+# this boilerplate is centralized.
+#
+# State lives on a DEDICATED branch, not the checked-out code branch. The org's default-branch
+# rulesets (require-PR-review / conversation-resolution) gate only the default branch, so a bot
+# committing state there would need a ruleset bypass actor — an org-wide grant for a one-repo
+# need. Instead this workflow reads prior state from, and writes new state to, `inputs.state_branch`
+# (default `changelog-bot-state`): a non-default branch no ruleset gates, so the run's own
+# GITHUB_TOKEN (contents: write) can push it with no bypass. The branch holds ONLY the bot's data
+# dirs (state/, audit/, docs-queue/) and is created as an orphan on first run.
 #
 # Caller contract: the caller repo MUST provide package.json (+ package-lock.json with
 # `tsx` pinned as a devDependency, so `npm ci` installs it deterministically), scripts/main.ts,
-# and scripts/notify-slack.ts. `state/`, `audit/`, and `docs-queue/` are created and committed
-# by this workflow when a run produces them — the caller need not pre-create those directories.
+# and scripts/notify-slack.ts. `state/`, `audit/`, and `docs-queue/` are produced by a run and
+# committed to the state branch — the caller need not pre-create those directories or the branch.
+# Any cross-repo consumer of docs-queue must read it from the state branch (e.g. the GitHub
+# Contents API with `?ref=changelog-bot-state`), NOT the default branch.
 #
 # Caller example (featurebase-changelog-bot/.github/workflows/changelog-scan.yml):
 #
@@ -84,6 +94,11 @@ on:
         required: false
         type: string
         default: ""
+      state_branch:
+        description: "Dedicated non-default branch the bot's state/audit/docs-queue are read from and committed to (kept off the ruleset-gated default branch so no bypass actor is needed)."
+        required: false
+        type: string
+        default: "changelog-bot-state"
     secrets:
       app_id:
         required: true
@@ -112,7 +127,7 @@ jobs:
   scan:
     runs-on: ubuntu-24.04
     permissions:
-      contents: write # commit state/ + audit/ back to the caller repo
+      contents: write # commit state to the caller's dedicated state branch (not the default branch)
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
@@ -147,14 +162,15 @@ jobs:
             ${{ inputs.additional_endpoints }}
 
       # This job runs caller-controlled code (npm ci + scripts/main.ts) with five high-value
-      # secrets and contents:write, and pushes state back to the triggering branch. It is built
-      # for schedule / workflow_dispatch ONLY. Enforce that with an allowlist rather than denying
+      # secrets and contents:write, and pushes to the state branch. It is built for
+      # schedule / workflow_dispatch ONLY. Enforce that with an allowlist rather than denying
       # specific events: a denylist would still let push / issue_comment / repository_dispatch /
-      # merge_group run untrusted branch code with the secrets, and on pull_request github.ref_name
-      # is a non-branch merge ref (`<n>/merge`) the state push can't write to anyway.
+      # merge_group run untrusted branch code with the secrets.
       - name: Guard against untrusted triggers
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           case "$EVENT_NAME" in
             schedule|workflow_dispatch)
@@ -163,11 +179,24 @@ jobs:
               echo "::error::changelog-scan only supports 'schedule' or 'workflow_dispatch'; refusing event '$EVENT_NAME' — it would run caller code with privileged secrets." >&2
               exit 1 ;;
           esac
+          # Even on an allowed event, refuse a non-branch ref. workflow_dispatch can target a TAG, and
+          # the default checkout pulls the caller's dispatched ref — so a tag dispatch would run the
+          # caller's HISTORICAL scripts/main.ts (old schema/algorithm) with the privileged secrets and
+          # then mutate the SHARED, branch-independent state branch. The state writeback no longer needs
+          # a branch ref (it always targets state_branch), but that is exactly why the old branch-ref
+          # guard must be kept here: this bot only ever runs from a branch, so a tag dispatch is always
+          # a misuse, dry-run or not.
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error::Refusing ref '$REF_NAME' ($REF_TYPE): changelog-scan runs only from a branch — a tag dispatch would run historical caller code against the shared state branch." >&2
+            exit 1
+          fi
 
       - name: Validate inputs
         env:
           SINCE: ${{ inputs.since }}
           LOOKBACK_SINCE: ${{ inputs.lookback_since }}
+          STATE_BRANCH: ${{ inputs.state_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # `since` (advance the watermark) and `lookback_since` (weekly-bucket backfill) are
           # different scan modes; supplying both is ambiguous, so reject it rather than letting
@@ -184,30 +213,77 @@ jobs:
               exit 1
             fi
           done
-
-      - name: Guard against non-branch refs
-        # workflow_dispatch can target a tag. This job drafts/notifies (scan step) and then writes
-        # state back to the ref; the writeback only makes sense on a branch. On a real (non-dry) run
-        # we must refuse BEFORE the scan step creates Featurebase drafts / Slack posts — failing late
-        # at push time would leave drafts with no committed watermark, so the next run re-drafts them.
-        # Skipped on dry runs, which create/post/commit nothing.
-        if: ${{ inputs.dry_run != true }}
-        env:
-          TARGET_REF: ${{ github.ref_name }}
-          REF_TYPE: ${{ github.ref_type }}
-        run: |
-          if [ "$REF_TYPE" != "branch" ]; then
-            echo "::error::Refusing to run: ref '$TARGET_REF' is a $REF_TYPE, not a branch — state writeback needs a branch." >&2
+          # state_branch must be a valid branch name and MUST NOT be the ruleset-gated default branch —
+          # the whole point of the dedicated state branch is to keep state writeback off the default
+          # branch, so catch a misconfiguration here rather than deep into the run. check-ref-format
+          # needs no repo; the default-branch comparison is skipped only if the event omits it (e.g.
+          # some schedule payloads) — ref-format validation still applies.
+          if [ -z "$STATE_BRANCH" ]; then
+            echo "::error::state_branch must not be empty." >&2
+            exit 1
+          fi
+          if ! git check-ref-format "refs/heads/$STATE_BRANCH"; then
+            echo "::error::state_branch '$STATE_BRANCH' is not a valid git branch name." >&2
+            exit 1
+          fi
+          if [ -n "$DEFAULT_BRANCH" ] && [ "$STATE_BRANCH" = "$DEFAULT_BRANCH" ]; then
+            echo "::error::state_branch must not be the default branch ('$DEFAULT_BRANCH'); state writeback must stay off the ruleset-gated default branch." >&2
             exit 1
           fi
 
       - name: Checkout caller repo
-        # zizmor: ignore[artipacked]  # credential persistence required: the state writeback git-pushes to the branch
+        # zizmor: ignore[artipacked]  # credential persistence required: the state writeback git-pushes to the state branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Full history: the state writeback does `git pull --rebase` against the branch, and a
+          # Full history: the state writeback rebases its worktree onto the state branch, and a
           # shallow depth=1 clone makes non-fast-forward rebase recovery unreliable.
           fetch-depth: 0
+
+      - name: Restore prior state from the state branch
+        # State (watermark, dedup index, audit log, docs-queue) lives on the dedicated state branch,
+        # not the checked-out code branch — see the header. Overlay that branch's data dirs onto the
+        # working tree BEFORE the scan so main.ts reads the prior watermark/seen index. Wipe first so
+        # a stale copy on the code branch can't shadow the state branch (or resurrect drained files).
+        # Runs on dry runs too: it has no side effects (a local checkout, no push), and skipping it
+        # would make a dry run preview an empty-state 30-day backfill instead of the real next run.
+        env:
+          STATE_BRANCH: ${{ inputs.state_branch }}
+        run: |
+          set -euo pipefail
+          rm -rf state audit docs-queue
+          # Distinguish "branch absent" (ls-remote --exit-code returns 2 → genuine first run, empty
+          # state is correct) from a transient origin failure (any other non-zero). Starting empty on a
+          # mere network/auth blip would make main.ts re-detect and re-draft already-shipped items, so
+          # fail loudly in that case rather than silently discard the watermark/dedup index.
+          rc=0
+          # Fully-qualify as refs/heads/* everywhere: a bare name lets fetch/pull resolve a same-named
+          # tag ambiguously, and keeps ls-remote --heads matching to an exact ref rather than a pattern.
+          git ls-remote --exit-code --heads origin "refs/heads/$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            git fetch origin "refs/heads/$STATE_BRANCH"
+            # Record the exact tip we restored from. The commit step builds its writeback on THIS
+            # base (not a fresh fetch of the latest tip), so if the branch advances mid-run — an
+            # overlapping run or a manual edit — our push is a non-fast-forward and the rebase loop
+            # there replays our delta onto the new tip instead of silently reverting it.
+            git rev-parse FETCH_HEAD > "$RUNNER_TEMP/changelog_state_base"
+            # Restore each dir independently: `git checkout <ref> -- a b c` is atomic and aborts ALL
+            # if any pathspec is absent (e.g. docs-queue/ before the first one is produced), so a
+            # combined checkout would silently restore nothing. Gate each on whether the dir actually
+            # exists on the state branch (cat-file -e): if present, a checkout failure is GENUINE and
+            # must fail loudly (swallowing it would silently fall back to empty state and re-draft); if
+            # absent, skip it. Per-dir keeps a not-yet-produced docs-queue/ from blocking the rest.
+            for d in state audit docs-queue; do
+              if git cat-file -e "FETCH_HEAD:$d" 2>/dev/null; then
+                git checkout FETCH_HEAD -- "$d"
+              fi
+            done
+            git reset -q -- state audit docs-queue 2>/dev/null || true
+          elif [ "$rc" -eq 2 ]; then
+            echo "State branch '$STATE_BRANCH' not found (first run); starting from empty state."
+          else
+            echo "::error::Could not reach origin to check for state branch '$STATE_BRANCH' (ls-remote exit $rc); refusing to run from empty state, which would re-detect and re-draft already-shipped items." >&2
+            exit 1
+          fi
 
       - name: Mint GitHub App token (read the watch repos)
         id: app-token
@@ -242,50 +318,88 @@ jobs:
         # rather than silently fetching latest from npm (enforces the deterministic caller contract).
         run: npx --no-install tsx scripts/main.ts
 
-      - name: Commit state + audit log + docs-queue
+      - name: Commit state to the state branch
         if: ${{ inputs.dry_run != true }}
         env:
-          TARGET_BRANCH: ${{ github.ref_name }}
+          STATE_BRANCH: ${{ inputs.state_branch }}
         run: |
-          # The "Guard against non-branch refs" step above already refused any non-branch ref before
-          # the scan ran, so TARGET_BRANCH is a real branch by the time we get here.
+          set -euo pipefail
           git config user.name  "changelog-bot"
           git config user.email "changelog-bot@users.noreply.github.com"
-          # Each artifact dir (state/, audit/, docs-queue/) only exists once a run produces it, and
-          # the caller contract doesn't guarantee any of them. Stage a dir when it exists in the
-          # working tree OR still has tracked files — the latter captures DELETIONS (e.g. a drained
-          # docs-queue/ whose dir is gone), which a plain `[ -d ]` guard would silently skip,
-          # leaving stale committed state. Skip dirs that never existed so `git add` can't exit 128.
-          for d in state audit docs-queue; do
-            if [ -d "$d" ] || [ -n "$(git ls-files -- "$d")" ]; then
-              git add -A -- "$d"
+          # Commit to a SEPARATE worktree on the state branch, so the code checkout is untouched and we
+          # never write to the (ruleset-gated) default branch. The state branch is an ORPHAN holding
+          # ONLY the bot's data dirs. Distinguish "branch absent" (ls-remote exit 2 → genuine first run,
+          # create the orphan) from a transient origin failure (any other non-zero → fail loudly rather
+          # than fork a fresh, divergent history onto the shared branch).
+          wt="$(mktemp -d)/state-wt"
+          rc=0
+          git ls-remote --exit-code --heads origin "refs/heads/$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            # Build the writeback on the SAME base the run restored from (saved by the restore step),
+            # NOT the latest tip. Building on the latest tip would let a fast-forward push silently
+            # revert any commit the branch gained mid-run; basing on the restored tip instead makes
+            # such an advance a non-fast-forward, so the rebase loop below replays our delta onto it.
+            # No fetch needed here: that base commit is already local from the restore step, and the
+            # rebase loop's pull fetches the latest tip itself when a push is rejected.
+            if [ -s "$RUNNER_TEMP/changelog_state_base" ]; then
+              git worktree add -B "$STATE_BRANCH" "$wt" "$(cat "$RUNNER_TEMP/changelog_state_base")" >/dev/null
+            else
+              # Branch absent at restore but present now (a concurrent first run created it): we share
+              # no base with it. Build an orphan so the push is a guaranteed non-fast-forward and the
+              # rebase loop fails loudly on unrelated histories rather than clobbering that run's state.
+              git worktree add --orphan -b "$STATE_BRANCH" "$wt" >/dev/null
             fi
+          elif [ "$rc" -eq 2 ]; then
+            echo "State branch '$STATE_BRANCH' not found; creating it as an orphan on first push."
+            # `--orphan` is a flag; the branch name comes from `-b` (NOT a positional, which git would
+            # misread as a commit-ish). An orphan worktree starts empty, so no caller code is committed.
+            git worktree add --orphan -b "$STATE_BRANCH" "$wt" >/dev/null
+          else
+            echo "::error::Could not reach origin to check for state branch '$STATE_BRANCH' (ls-remote exit $rc); aborting rather than risk forking a divergent state history." >&2
+            exit 1
+          fi
+          # Mirror the produced data dirs into the worktree: drop each first so a drained docs-queue/
+          # (its files deleted this run) becomes a deletion, then copy the working-tree dir back when it
+          # exists. The orphan/state-branch worktree contains ONLY these data dirs, so a pathspec-free
+          # `git add -A` stages exactly their adds/modifications/deletions with no pathspec that could
+          # fail to match (`git add -A -- docs-queue` exits 128 on any run that never produced it).
+          for d in state audit docs-queue; do
+            rm -rf "${wt:?}/$d"
+            if [ -d "$d" ]; then cp -a "$d" "$wt/$d"; fi
           done
-          if git diff --staged --quiet; then
+          git -C "$wt" add -A
+          if git -C "$wt" diff --staged --quiet; then
             echo "No state changes to commit."
+            git worktree remove --force "$wt" 2>/dev/null || true
             exit 0
           fi
-          git commit -m "chore: changelog scan state $(date -u +%FT%TZ)"
-          # The branch can advance while the scan runs (human commits, doc writeback), and again in
-          # the window between rebase and push. Rebase-then-push in a short retry loop so a
-          # non-fast-forward rejection doesn't silently drop the watermark and cause the next run to
-          # re-detect/re-draft the same items. A rebase *conflict* (vs a clean fast-forward) means
-          # the bot-owned state genuinely diverged — there's no safe auto-merge, so abort cleanly
-          # and fail loudly instead of looping on the same conflict. `if ! ...` keeps set -e from
-          # killing the step on the caught pull failure.
+          git -C "$wt" commit -q -m "chore: changelog scan state $(date -u +%FT%TZ)"
+          # The state branch can advance between the restored base and this push (an overlapping run —
+          # though the concurrency group serializes those — or a manual edit). Rebase-then-push in a retry
+          # loop so a non-fast-forward rejection doesn't silently drop the watermark and cause the
+          # next run to re-detect/re-draft the same items. A rebase *conflict* (vs a clean
+          # fast-forward) means bot-owned state genuinely diverged — no safe auto-merge, so abort and
+          # fail loudly rather than loop. `if ! ...` keeps set -e from killing the step on the catch.
+          pushed=""
           for attempt in 1 2 3; do
-            if ! git pull --rebase --autostash origin "$TARGET_BRANCH"; then
-              git rebase --abort 2>/dev/null || true
-              echo "::error::Rebase onto '$TARGET_BRANCH' hit a conflict in bot-owned state; manual resolution required." >&2
-              exit 1
+            if [ "$attempt" -gt 1 ]; then
+              if ! git -C "$wt" pull --rebase --autostash origin "refs/heads/$STATE_BRANCH"; then
+                git -C "$wt" rebase --abort 2>/dev/null || true
+                echo "::error::Rebase onto '$STATE_BRANCH' hit a conflict in bot-owned state; manual resolution required." >&2
+                break
+              fi
             fi
-            if git push origin "HEAD:refs/heads/$TARGET_BRANCH"; then
-              exit 0
+            if git -C "$wt" push origin "HEAD:refs/heads/$STATE_BRANCH"; then
+              pushed=1
+              break
             fi
             echo "Push attempt $attempt rejected (branch advanced); retrying after rebase." >&2
           done
-          echo "::error::Failed to push changelog scan state after 3 attempts." >&2
-          exit 1
+          git worktree remove --force "$wt" 2>/dev/null || true
+          if [ -z "$pushed" ]; then
+            echo "::error::Failed to push changelog scan state to '$STATE_BRANCH' after 3 attempts." >&2
+            exit 1
+          fi
 
       - name: Alert on failure
         if: failure()
