@@ -246,6 +246,11 @@ jobs:
           git ls-remote --exit-code --heads origin "$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
           if [ "$rc" -eq 0 ]; then
             git fetch origin "$STATE_BRANCH"
+            # Record the exact tip we restored from. The commit step builds its writeback on THIS
+            # base (not a fresh fetch of the latest tip), so if the branch advances mid-run — an
+            # overlapping run or a manual edit — our push is a non-fast-forward and the rebase loop
+            # there replays our delta onto the new tip instead of silently reverting it.
+            git rev-parse FETCH_HEAD > "$RUNNER_TEMP/changelog_state_base"
             # Restore each dir independently: `git checkout <ref> -- a b c` is atomic and aborts ALL
             # if any pathspec is absent (e.g. docs-queue/ before the first one is produced), so a
             # combined checkout would silently restore nothing. Gate each on whether the dir actually
@@ -316,7 +321,18 @@ jobs:
           git ls-remote --exit-code --heads origin "$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
           if [ "$rc" -eq 0 ]; then
             git fetch origin "$STATE_BRANCH"
-            git worktree add -B "$STATE_BRANCH" "$wt" FETCH_HEAD >/dev/null
+            # Build the writeback on the SAME base the run restored from (saved by the restore step),
+            # NOT the latest tip. Building on the latest tip would let a fast-forward push silently
+            # revert any commit the branch gained mid-run; basing on the restored tip instead makes
+            # such an advance a non-fast-forward, so the rebase loop below replays our delta onto it.
+            if [ -s "$RUNNER_TEMP/changelog_state_base" ]; then
+              git worktree add -B "$STATE_BRANCH" "$wt" "$(cat "$RUNNER_TEMP/changelog_state_base")" >/dev/null
+            else
+              # Branch absent at restore but present now (a concurrent first run created it): we share
+              # no base with it. Build an orphan so the push is a guaranteed non-fast-forward and the
+              # rebase loop fails loudly on unrelated histories rather than clobbering that run's state.
+              git worktree add --orphan -b "$STATE_BRANCH" "$wt" >/dev/null
+            fi
           elif [ "$rc" -eq 2 ]; then
             echo "State branch '$STATE_BRANCH' not found; creating it as an orphan on first push."
             # `--orphan` is a flag; the branch name comes from `-b` (NOT a positional, which git would
@@ -342,8 +358,8 @@ jobs:
             exit 0
           fi
           git -C "$wt" commit -q -m "chore: changelog scan state $(date -u +%FT%TZ)"
-          # The state branch can advance between our fetch and push (an overlapping run — though the
-          # concurrency group serializes those — or a manual edit). Rebase-then-push in a short retry
+          # The state branch can advance between the restored base and this push (an overlapping run —
+          # though the concurrency group serializes those — or a manual edit). Rebase-then-push in a retry
           # loop so a non-fast-forward rejection doesn't silently drop the watermark and cause the
           # next run to re-detect/re-draft the same items. A rebase *conflict* (vs a clean
           # fast-forward) means bot-owned state genuinely diverged — no safe auto-merge, so abort and
