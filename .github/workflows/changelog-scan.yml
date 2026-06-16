@@ -212,14 +212,21 @@ jobs:
         # not the checked-out code branch — see the header. Overlay that branch's data dirs onto the
         # working tree BEFORE the scan so main.ts reads the prior watermark/seen index. Wipe first so
         # a stale copy on the code branch can't shadow the state branch (or resurrect drained files).
-        # First run (branch absent) → empty state, which main.ts treats as a fresh 30-day backfill.
-        # Skipped on dry runs (they read state but the scan step tolerates an empty tree fine).
-        if: ${{ inputs.dry_run != true }}
+        # Runs on dry runs too: it has no side effects (a local checkout, no push), and skipping it
+        # would make a dry run preview an empty-state 30-day backfill instead of the real next run.
         env:
           STATE_BRANCH: ${{ inputs.state_branch }}
         run: |
+          set -euo pipefail
           rm -rf state audit docs-queue
-          if git fetch origin "$STATE_BRANCH" 2>/dev/null; then
+          # Distinguish "branch absent" (ls-remote --exit-code returns 2 → genuine first run, empty
+          # state is correct) from a transient origin failure (any other non-zero). Starting empty on a
+          # mere network/auth blip would make main.ts re-detect and re-draft already-shipped items, so
+          # fail loudly in that case rather than silently discard the watermark/dedup index.
+          rc=0
+          git ls-remote --exit-code --heads origin "$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            git fetch origin "$STATE_BRANCH"
             # Restore each dir independently: `git checkout <ref> -- a b c` is atomic and aborts ALL
             # if any pathspec is absent (e.g. docs-queue/ before the first one is produced), so a
             # combined checkout would silently restore nothing. Per-dir tolerates missing dirs.
@@ -227,8 +234,11 @@ jobs:
               git checkout FETCH_HEAD -- "$d" 2>/dev/null || true
             done
             git reset -q -- state audit docs-queue 2>/dev/null || true
-          else
+          elif [ "$rc" -eq 2 ]; then
             echo "State branch '$STATE_BRANCH' not found (first run); starting from empty state."
+          else
+            echo "::error::Could not reach origin to check for state branch '$STATE_BRANCH' (ls-remote exit $rc); refusing to run from empty state, which would re-detect and re-draft already-shipped items." >&2
+            exit 1
           fi
 
       - name: Mint GitHub App token (read the watch repos)
@@ -272,25 +282,36 @@ jobs:
           set -euo pipefail
           git config user.name  "changelog-bot"
           git config user.email "changelog-bot@users.noreply.github.com"
-          # Commit to a SEPARATE worktree checked out on the state branch, so the code checkout is
-          # untouched and we never write to the (ruleset-gated) default branch. The state branch holds
-          # ONLY the bot's data dirs. If it already exists we build on it; on first run we create it
-          # off HEAD as a safety net (its code files are harmless — only data dirs are ever committed).
+          # Commit to a SEPARATE worktree on the state branch, so the code checkout is untouched and we
+          # never write to the (ruleset-gated) default branch. The state branch is an ORPHAN holding
+          # ONLY the bot's data dirs. Distinguish "branch absent" (ls-remote exit 2 → genuine first run,
+          # create the orphan) from a transient origin failure (any other non-zero → fail loudly rather
+          # than fork a fresh, divergent history onto the shared branch).
           wt="$(mktemp -d)/state-wt"
-          if git fetch origin "$STATE_BRANCH" 2>/dev/null; then
+          rc=0
+          git ls-remote --exit-code --heads origin "$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
+          if [ "$rc" -eq 0 ]; then
+            git fetch origin "$STATE_BRANCH"
             git worktree add -B "$STATE_BRANCH" "$wt" FETCH_HEAD >/dev/null
+          elif [ "$rc" -eq 2 ]; then
+            echo "State branch '$STATE_BRANCH' not found; creating it as an orphan on first push."
+            # `--orphan` is a flag; the branch name comes from `-b` (NOT a positional, which git would
+            # misread as a commit-ish). An orphan worktree starts empty, so no caller code is committed.
+            git worktree add --orphan -b "$STATE_BRANCH" "$wt" >/dev/null
           else
-            echo "State branch '$STATE_BRANCH' not found; creating it on first push."
-            git worktree add -b "$STATE_BRANCH" "$wt" >/dev/null
+            echo "::error::Could not reach origin to check for state branch '$STATE_BRANCH' (ls-remote exit $rc); aborting rather than risk forking a divergent state history." >&2
+            exit 1
           fi
           # Mirror the produced data dirs into the worktree: drop each first so a drained docs-queue/
-          # (its files deleted this run) is reflected as a deletion, then copy the working-tree dir
-          # back when it exists. `git add -A -- <dirs>` then stages adds, modifications, AND deletions.
+          # (its files deleted this run) becomes a deletion, then copy the working-tree dir back when it
+          # exists. The orphan/state-branch worktree contains ONLY these data dirs, so a pathspec-free
+          # `git add -A` stages exactly their adds/modifications/deletions with no pathspec that could
+          # fail to match (`git add -A -- docs-queue` exits 128 on any run that never produced it).
           for d in state audit docs-queue; do
             rm -rf "${wt:?}/$d"
             if [ -d "$d" ]; then cp -a "$d" "$wt/$d"; fi
           done
-          git -C "$wt" add -A -- state audit docs-queue
+          git -C "$wt" add -A
           if git -C "$wt" diff --staged --quiet; then
             echo "No state changes to commit."
             git worktree remove --force "$wt" 2>/dev/null || true
