@@ -169,6 +169,8 @@ jobs:
       - name: Guard against untrusted triggers
         env:
           EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           case "$EVENT_NAME" in
             schedule|workflow_dispatch)
@@ -177,6 +179,17 @@ jobs:
               echo "::error::changelog-scan only supports 'schedule' or 'workflow_dispatch'; refusing event '$EVENT_NAME' — it would run caller code with privileged secrets." >&2
               exit 1 ;;
           esac
+          # Even on an allowed event, refuse a non-branch ref. workflow_dispatch can target a TAG, and
+          # the default checkout pulls the caller's dispatched ref — so a tag dispatch would run the
+          # caller's HISTORICAL scripts/main.ts (old schema/algorithm) with the privileged secrets and
+          # then mutate the SHARED, branch-independent state branch. The state writeback no longer needs
+          # a branch ref (it always targets state_branch), but that is exactly why the old branch-ref
+          # guard must be kept here: this bot only ever runs from a branch, so a tag dispatch is always
+          # a misuse, dry-run or not.
+          if [ "$REF_TYPE" != "branch" ]; then
+            echo "::error::Refusing ref '$REF_NAME' ($REF_TYPE): changelog-scan runs only from a branch — a tag dispatch would run historical caller code against the shared state branch." >&2
+            exit 1
+          fi
 
       - name: Validate inputs
         env:
