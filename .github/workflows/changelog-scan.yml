@@ -182,6 +182,8 @@ jobs:
         env:
           SINCE: ${{ inputs.since }}
           LOOKBACK_SINCE: ${{ inputs.lookback_since }}
+          STATE_BRANCH: ${{ inputs.state_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           # `since` (advance the watermark) and `lookback_since` (weekly-bucket backfill) are
           # different scan modes; supplying both is ambiguous, so reject it rather than letting
@@ -198,6 +200,23 @@ jobs:
               exit 1
             fi
           done
+          # state_branch must be a valid branch name and MUST NOT be the ruleset-gated default branch —
+          # the whole point of the dedicated state branch is to keep state writeback off the default
+          # branch, so catch a misconfiguration here rather than deep into the run. check-ref-format
+          # needs no repo; the default-branch comparison is skipped only if the event omits it (e.g.
+          # some schedule payloads) — ref-format validation still applies.
+          if [ -z "$STATE_BRANCH" ]; then
+            echo "::error::state_branch must not be empty." >&2
+            exit 1
+          fi
+          if ! git check-ref-format "refs/heads/$STATE_BRANCH"; then
+            echo "::error::state_branch '$STATE_BRANCH' is not a valid git branch name." >&2
+            exit 1
+          fi
+          if [ -n "$DEFAULT_BRANCH" ] && [ "$STATE_BRANCH" = "$DEFAULT_BRANCH" ]; then
+            echo "::error::state_branch must not be the default branch ('$DEFAULT_BRANCH'); state writeback must stay off the ruleset-gated default branch." >&2
+            exit 1
+          fi
 
       - name: Checkout caller repo
         # zizmor: ignore[artipacked]  # credential persistence required: the state writeback git-pushes to the state branch
@@ -229,9 +248,14 @@ jobs:
             git fetch origin "$STATE_BRANCH"
             # Restore each dir independently: `git checkout <ref> -- a b c` is atomic and aborts ALL
             # if any pathspec is absent (e.g. docs-queue/ before the first one is produced), so a
-            # combined checkout would silently restore nothing. Per-dir tolerates missing dirs.
+            # combined checkout would silently restore nothing. Gate each on whether the dir actually
+            # exists on the state branch (cat-file -e): if present, a checkout failure is GENUINE and
+            # must fail loudly (swallowing it would silently fall back to empty state and re-draft); if
+            # absent, skip it. Per-dir keeps a not-yet-produced docs-queue/ from blocking the rest.
             for d in state audit docs-queue; do
-              git checkout FETCH_HEAD -- "$d" 2>/dev/null || true
+              if git cat-file -e "FETCH_HEAD:$d" 2>/dev/null; then
+                git checkout FETCH_HEAD -- "$d"
+              fi
             done
             git reset -q -- state audit docs-queue 2>/dev/null || true
           elif [ "$rc" -eq 2 ]; then
