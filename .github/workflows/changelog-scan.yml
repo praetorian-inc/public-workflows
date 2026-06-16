@@ -243,9 +243,11 @@ jobs:
           # mere network/auth blip would make main.ts re-detect and re-draft already-shipped items, so
           # fail loudly in that case rather than silently discard the watermark/dedup index.
           rc=0
-          git ls-remote --exit-code --heads origin "$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
+          # Fully-qualify as refs/heads/* everywhere: a bare name lets fetch/pull resolve a same-named
+          # tag ambiguously, and keeps ls-remote --heads matching to an exact ref rather than a pattern.
+          git ls-remote --exit-code --heads origin "refs/heads/$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
           if [ "$rc" -eq 0 ]; then
-            git fetch origin "$STATE_BRANCH"
+            git fetch origin "refs/heads/$STATE_BRANCH"
             # Record the exact tip we restored from. The commit step builds its writeback on THIS
             # base (not a fresh fetch of the latest tip), so if the branch advances mid-run — an
             # overlapping run or a manual edit — our push is a non-fast-forward and the rebase loop
@@ -318,13 +320,14 @@ jobs:
           # than fork a fresh, divergent history onto the shared branch).
           wt="$(mktemp -d)/state-wt"
           rc=0
-          git ls-remote --exit-code --heads origin "$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
+          git ls-remote --exit-code --heads origin "refs/heads/$STATE_BRANCH" >/dev/null 2>&1 || rc=$?
           if [ "$rc" -eq 0 ]; then
-            git fetch origin "$STATE_BRANCH"
             # Build the writeback on the SAME base the run restored from (saved by the restore step),
             # NOT the latest tip. Building on the latest tip would let a fast-forward push silently
             # revert any commit the branch gained mid-run; basing on the restored tip instead makes
             # such an advance a non-fast-forward, so the rebase loop below replays our delta onto it.
+            # No fetch needed here: that base commit is already local from the restore step, and the
+            # rebase loop's pull fetches the latest tip itself when a push is rejected.
             if [ -s "$RUNNER_TEMP/changelog_state_base" ]; then
               git worktree add -B "$STATE_BRANCH" "$wt" "$(cat "$RUNNER_TEMP/changelog_state_base")" >/dev/null
             else
@@ -367,7 +370,7 @@ jobs:
           pushed=""
           for attempt in 1 2 3; do
             if [ "$attempt" -gt 1 ]; then
-              if ! git -C "$wt" pull --rebase --autostash origin "$STATE_BRANCH"; then
+              if ! git -C "$wt" pull --rebase --autostash origin "refs/heads/$STATE_BRANCH"; then
                 git -C "$wt" rebase --abort 2>/dev/null || true
                 echo "::error::Rebase onto '$STATE_BRANCH' hit a conflict in bot-owned state; manual resolution required." >&2
                 break
