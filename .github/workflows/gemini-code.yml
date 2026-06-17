@@ -244,7 +244,7 @@ jobs:
       - name: Mint palatine read token
         id: skills-token
         if: ${{ env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
           private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
