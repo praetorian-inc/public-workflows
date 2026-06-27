@@ -405,8 +405,11 @@ jobs:
           # an explicit NPM_TOKEN rather than silently shipping a repo token off
           # to a third party. Dry runs contact no registry, so they are exempt.
           if [ "$DRY_RUN" != "true" ] && [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
+            # Anchor the host (not a substring match) so look-alikes such as
+            # https://npm.pkg.github.com.evil.com or ...@evil.com do NOT qualify
+            # for the GITHUB_TOKEN fallback.
             case "$REGISTRY_URL" in
-              *npm.pkg.github.com*) : ;;  # GitHub Packages: GITHUB_TOKEN is the correct credential
+              https://npm.pkg.github.com|https://npm.pkg.github.com/*) : ;;  # GitHub Packages: GITHUB_TOKEN is the correct credential
               *)
                 echo "::error::Publishing to '$REGISTRY_URL' requires the NPM_TOKEN secret; refusing to fall back to GITHUB_TOKEN (it only authenticates GitHub Packages)."
                 exit 1
