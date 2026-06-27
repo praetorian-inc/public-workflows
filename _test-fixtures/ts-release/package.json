@@ -1,0 +1,28 @@
+{
+  "name": "@praetorian-inc/ts-release-test-fixture",
+  "version": "0.0.1",
+  "description": "Dependency-free fixture exercised by test-ts-release.yml via a dry-run publish.",
+  "license": "UNLICENSED",
+  "private": false,
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "https://npm.pkg.github.com"
+  },
+  "type": "module",
+  "bin": {
+    "ts-release-test-fixture": "./dist/index.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "mkdir -p dist && cp src/index.js dist/index.js",
+    "test": "node --input-type=module -e \"import('./src/index.js').then(m => { if (m.hello() !== 'ok') process.exit(1) })\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

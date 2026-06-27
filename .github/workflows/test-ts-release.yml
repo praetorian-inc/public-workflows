@@ -1,0 +1,115 @@
+name: "Test: ts-release.yml"
+
+# Self-test harness for ts-release.yml. Validates YAML syntax and SHA-pinning
+# statically, then exercises the real reusable workflow end-to-end in dry-run
+# mode against the _test-fixtures/ts-release package (install -> build -> test ->
+# pack -> publish --dry-run). Dry-run uploads nothing and needs no registry auth.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ts-release.yml"
+      - ".github/workflows/test-ts-release.yml"
+      - "_test-fixtures/ts-release/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ts-release.yml"
+      - ".github/workflows/test-ts-release.yml"
+      - "_test-fixtures/ts-release/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Job 1: Validate YAML syntax with yamllint
+  # ──────────────────────────────────────────────────────────────
+  yaml-lint:
+    name: YAML lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install yamllint
+        run: pip install --quiet yamllint
+
+      - name: Lint workflow
+        run: |
+          yamllint -d '{extends: default, rules: {line-length: disable, truthy: disable, comments-indentation: disable}}' \
+            .github/workflows/ts-release.yml
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: Verify all actions are SHA-pinned with version comments
+  # ──────────────────────────────────────────────────────────────
+  verify-sha-pins:
+    name: Verify SHA pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check SHA pins
+        run: |
+          set -euo pipefail
+          FAIL=0
+          file=.github/workflows/ts-release.yml
+          echo "Checking $file..."
+          while IFS= read -r line; do
+            trimmed=$(echo "$line" | sed 's/^[[:space:]]*//')
+            # Skip local references (./.github/workflows/...)
+            echo "$trimmed" | grep -q '\./' && continue
+            if ! echo "$trimmed" | grep -qE '@[a-f0-9]{40}\b'; then
+              echo "  FAIL: not SHA-pinned: $trimmed"
+              FAIL=1
+            fi
+            if ! echo "$trimmed" | grep -qE '#.*v[0-9]'; then
+              echo "  WARN: missing version comment: $trimmed"
+            fi
+          done < <(grep -E '^\s+uses:' "$file")
+          if [ "$FAIL" -eq 1 ]; then
+            echo "::error::Some actions are not SHA-pinned. Pin to full commit SHA."
+            exit 1
+          fi
+          echo "All actions properly SHA-pinned."
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: End-to-end dry-run against the fixture package.
+  # Exercises install -> build -> test -> pack -> publish --dry-run
+  # through the real reusable workflow. No upload, no auth required.
+  # ──────────────────────────────────────────────────────────────
+  call-ts-release-dry-run:
+    name: Call ts-release (dry run)
+    uses: ./.github/workflows/ts-release.yml
+    permissions:
+      contents: read
+    with:
+      install-directory: _test-fixtures/ts-release
+      package-dir: _test-fixtures/ts-release
+      dry-run: true
+      enable-provenance: false
+      verify-version-matches-tag: false

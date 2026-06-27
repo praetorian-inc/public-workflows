@@ -8,6 +8,11 @@ _test-fixtures/**/*-*
 !_test-fixtures/skills-minimal/**
 !_test-fixtures/skills-bad/
 !_test-fixtures/skills-bad/**
+!_test-fixtures/ts-release/
+!_test-fixtures/ts-release/**
+# ...but still ignore ts-release build artifacts from local self-test runs.
+_test-fixtures/ts-release/dist/
+_test-fixtures/ts-release/*.tgz
 coverage.out
 
 # Node.js

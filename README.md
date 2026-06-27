@@ -564,6 +564,90 @@ jobs:
 
 **Security posture:** Workflow-level `permissions: contents: read` ceiling. Harden-Runner enabled by default. Preflight job skips CI on non-TypeScript PRs. Runner pinned to `ubuntu-24.04`.
 
+### `ts-release.yml` — npm package publish (GitHub Packages + provenance)
+
+Reusable workflow for publishing a TypeScript/Node.js package to an npm registry — **GitHub Packages (`npm.pkg.github.com`) by default**. The npm sibling of `go-release.yml`. It publishes the version in the package's `package.json` (npm always publishes that version; the triggering tag is only an optional consistency guard). Release gates run explicitly and visibly — `build` → `test` → optional `verify` → `pack` → `publish` — because publishing a pre-packed tarball does **not** re-run `prepublishOnly`/`prepare`, so the published bytes are exactly the ones that were tested and attested.
+
+**Provenance:** npm's built-in `--provenance` only works against `registry.npmjs.org`, **not** GitHub Packages, so build provenance is produced registry-agnostically via `actions/attest-build-provenance` over the packed tarball (`pack` → attest → `publish <tarball>`).
+
+**Minimal caller** — publish an npm-workspace member to GitHub Packages on tag push:
+
+```yaml
+name: Publish
+on:
+  push:
+    tags: ['gateway-v*']
+permissions:
+  contents: read
+jobs:
+  release:
+    uses: praetorian-inc/public-workflows/.github/workflows/ts-release.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+      packages: write       # publish to GitHub Packages via GITHUB_TOKEN
+      id-token: write        # provenance attestation
+      attestations: write    # provenance attestation
+    with:
+      install-directory: .          # npm ci at the workspace root
+      package-dir: gateway          # build/pack/publish this package
+      tag-prefix: gateway-v
+      verify-script: check-bundle-drift
+```
+
+**Publish to public npmjs.com instead:**
+
+```yaml
+jobs:
+  release:
+    uses: praetorian-inc/public-workflows/.github/workflows/ts-release.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    with:
+      registry-url: https://registry.npmjs.org
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+**All inputs** (all optional with sensible defaults):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `install-directory` | `.` | Directory where `npm ci` runs (repo root for workspaces) |
+| `package-dir` | `.` | Directory of the package to build, pack and publish |
+| `node-version` | `22` | Node.js version |
+| `registry-url` | `https://npm.pkg.github.com` | npm registry to publish to |
+| `scope` | `@praetorian-inc` | npm scope to configure auth for (must equal the org login for GitHub Packages) |
+| `tag-prefix` | `v` | Prefix stripped before comparing tag to `package.json` version |
+| `verify-version-matches-tag` | `true` | Assert tag (minus prefix) equals `package.json` version; auto-skipped on dry-run or non-tag refs |
+| `run-build` | `true` | Run the build script before packing |
+| `build-script` | `build` | npm script that produces the publishable output |
+| `run-test` | `true` | Run the test script before packing |
+| `test-script` | `test` | npm script to run for tests |
+| `verify-script` | `""` | Optional extra npm script after build+test (e.g. `check-bundle-drift`) |
+| `enable-provenance` | `true` | Attest build provenance over the packed tarball (skipped on dry-run) |
+| `dry-run` | `false` | `npm publish --dry-run` (no upload); skips tag check and provenance |
+| `enable-private-deps` | `false` | Mint a GitHub App token for private-dependency access before `npm ci` |
+| `private-deps-owner` | `praetorian-inc` | GitHub org for private dependency access |
+| `private-deps-repos` | `claude-tool-sdk` | Comma-separated repo names the App token is scoped to |
+| `runner` | `ubuntu-24.04` | Runner label |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist for block mode |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `NPM_TOKEN` | only for `registry.npmjs.org` | Registry auth token, used as `NODE_AUTH_TOKEN`. Unset → falls back to `GITHUB_TOKEN` (works for GitHub Packages with `packages: write`) |
+| `PLUGIN_CI_APP_ID` | only when `enable-private-deps: true` | GitHub App ID for private dependency access |
+| `PLUGIN_CI_PRIVATE_KEY` | only when `enable-private-deps: true` | GitHub App private key |
+
+**Outputs:** `version` — the `package.json` version that was published.
+
+**Security posture:** Workflow-level `permissions: contents: read` ceiling; the publish job adds `packages`/`id-token`/`attestations: write` (unused grants are never spent). Harden-Runner enabled by default. `persist-credentials: false` on checkout. Runner pinned to `ubuntu-24.04`.
+
 ### `markdown-quality.yml` — Markdown lint + format check
 
 Reusable workflow for markdown-heavy repositories (skills, docs, plugin libraries). Runs markdownlint (structural quality) + prettier (table/format alignment) in check mode. Designed for repos with no `package.json` — uses `npx` to download tools on demand.
@@ -791,7 +875,7 @@ Use [ratchet](https://github.com/sethvargo/ratchet) to auto-pin.
 ## Contributing
 
 1. Workflows in `.github/workflows/*.yml` must SHA-pin all `uses:` references. `ratchet lint` enforces this.
-2. The `test-*.yml` self-test harnesses exercise the reusables against `_test-fixtures/` on every PR — keep them passing. `test-go-ci.yml`, `test-go-sec.yml`, and `test-graphify-graph.yml` run against `go-minimal/`; `test-ts-ci.yml` runs against `ts-minimal/`; `test-go-release.yml` runs against `go-release/`. (The `review-{claude,codex,gemini}.yml` workflows dogfood the AI reviewers on this repo's own PRs.)
+2. The `test-*.yml` self-test harnesses exercise the reusables against `_test-fixtures/` on every PR — keep them passing. `test-go-ci.yml`, `test-go-sec.yml`, and `test-graphify-graph.yml` run against `go-minimal/`; `test-ts-ci.yml` runs against `ts-minimal/`; `test-go-release.yml` runs against `go-release/`; `test-ts-release.yml` runs a dry-run publish against `ts-release/`. (The `review-{claude,codex,gemini}.yml` workflows dogfood the AI reviewers on this repo's own PRs.)
 3. Tag new major versions (`vX.Y.Z`) after merge; consumers pin to the SHA of that tagged commit.
 
 ## Supply chain context
