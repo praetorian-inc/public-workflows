@@ -99,6 +99,20 @@ on:
         type: string
         default: "@praetorian-inc"
 
+      enable-install-auth:
+        description: >
+          Expose the registry token (NODE_AUTH_TOKEN) during `npm ci`/`npm
+          install` so @scope dependencies hosted on the authenticated registry
+          resolve at install time. Default false: most packages resolve every
+          dependency from public registry.npmjs.org and must NOT have a
+          publish-capable token in the install environment, where dependency
+          lifecycle scripts run by default. Enable only when a dependency is
+          hosted on the authenticated registry (e.g. an @praetorian-inc package
+          on GitHub Packages). Publish always gets its own token regardless.
+        required: false
+        type: boolean
+        default: false
+
       # ── Version / tag consistency ─────────────────────────────
       tag-prefix:
         description: "Tag prefix stripped before comparing the tag to package.json version (e.g. 'v' or 'gateway-v')."
@@ -336,11 +350,17 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ inputs.install-directory }}
         env:
-          # Install-time auth: setup-node wrote `//<registry>/:_authToken=
-          # ${NODE_AUTH_TOKEN}` into .npmrc, so any dependency resolved from the
-          # configured (authenticated) registry — e.g. an @scope package on
-          # GitHub Packages — needs the token at `npm ci`, not just at publish.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+          # Install-time auth — opt-in via enable-install-auth (default OFF).
+          # setup-node wrote `//<registry>/:_authToken=${NODE_AUTH_TOKEN}` into
+          # .npmrc, so a dependency resolved from the configured (authenticated)
+          # registry — e.g. an @scope package on GitHub Packages — needs the
+          # token at `npm ci`. But `npm ci`/`npm install` run dependency
+          # lifecycle scripts by default, so handing them a publish-capable token
+          # would let a compromised dependency read it before the tarball is even
+          # packed. Default false therefore exports an EMPTY token here; the
+          # publish step below gets its own token unconditionally. Enable only
+          # when a dep is genuinely hosted on the authenticated registry.
+          NODE_AUTH_TOKEN: ${{ inputs.enable-install-auth && (secrets.NPM_TOKEN || github.token) || '' }}
           NPM_TOKEN_PROVIDED: ${{ secrets.NPM_TOKEN != '' }}
           REGISTRY_URL: ${{ inputs.registry-url }}
           ALLOW_NO_LOCKFILE: ${{ inputs.allow-no-lockfile }}

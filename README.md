@@ -622,6 +622,7 @@ jobs:
 | `node-version` | `22` | Node.js version |
 | `registry-url` | `https://npm.pkg.github.com` | npm registry to publish to |
 | `scope` | `@praetorian-inc` | npm scope to configure auth for (must equal the org login for GitHub Packages) |
+| `enable-install-auth` | `false` | Expose `NODE_AUTH_TOKEN` during `npm ci` so deps on the authenticated registry resolve. Off by default so a publish-capable token never enters the install env (where dependency scripts run); enable only for registry-hosted private deps |
 | `tag-prefix` | `v` | Prefix stripped before comparing tag to `package.json` version |
 | `verify-version-matches-tag` | `true` | Assert tag (minus prefix) equals `package.json` version; auto-skipped on dry-run or non-tag refs |
 | `run-build` | `true` | Run the build script before packing |
@@ -643,11 +644,13 @@ jobs:
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `NPM_TOKEN` | any registry except GitHub Packages | Registry auth token, used as `NODE_AUTH_TOKEN`. Required for `registry.npmjs.org`, JFrog, GitLab, and any other non-GitHub-Packages registry. Unset → falls back to `GITHUB_TOKEN`, which authenticates GitHub Packages only (and needs `packages: write`) |
+| `NPM_TOKEN` | any registry except GitHub Packages | Registry auth token, used as `NODE_AUTH_TOKEN` at publish (and at install when `enable-install-auth: true`). Required for `registry.npmjs.org`, JFrog, GitLab, and any other non-GitHub-Packages registry. Unset → falls back to `GITHUB_TOKEN`, which authenticates GitHub Packages only (and needs `packages: write`) |
 | `PLUGIN_CI_APP_ID` | only when `enable-private-deps: true` | GitHub App ID for private dependency access |
 | `PLUGIN_CI_PRIVATE_KEY` | only when `enable-private-deps: true` | GitHub App private key |
 
-> **Install-time registry auth:** `NODE_AUTH_TOKEN` is exported only for the publish step, so `npm ci` runs unauthenticated. That is fine when the released package's dependencies all resolve from public registries. If the package *consumes* a dependency from an authenticated registry — e.g. an `@praetorian-inc`-scoped package hosted on GitHub Packages — `npm ci` will fail to fetch it. Git-hosted private deps are covered by `enable-private-deps`; registry-hosted private deps are not yet wired here.
+> **Install-time registry auth (`enable-install-auth`, default `false`):** by default `NODE_AUTH_TOKEN` is exported only for the publish step, so `npm ci` runs unauthenticated and the publish-capable token never enters the install environment — where dependency lifecycle scripts run by default and a compromised dependency could otherwise read it. That is the right default when the released package's dependencies all resolve from public registries. If the package *consumes* a dependency from an authenticated registry — e.g. an `@praetorian-inc`-scoped package hosted on GitHub Packages — set `enable-install-auth: true` to expose the token at `npm ci` too. The fallback `GITHUB_TOKEN` stays host-anchored to GitHub Packages; for any other registry without an `NPM_TOKEN` the token is dropped before install so the repo token is never sent to a third party. Git-hosted private deps are covered separately by `enable-private-deps`.
+>
+> **Remaining limitation:** install and publish share one registry configuration (`registry-url` + `scope`), so "install private GitHub Packages deps while publishing to `registry.npmjs.org`" is not supported in a single run; mirror or pre-install such deps instead.
 
 **Outputs:** `version` — the `package.json` version that was published.
 
