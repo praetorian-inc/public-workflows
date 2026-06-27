@@ -570,6 +570,8 @@ Reusable workflow for publishing a TypeScript/Node.js package to an npm registry
 
 **Provenance:** npm's built-in `--provenance` only works against `registry.npmjs.org`, **not** GitHub Packages, so build provenance is produced registry-agnostically via `actions/attest-build-provenance` over the packed tarball (`pack` → attest → `publish <tarball>`).
 
+**Packaging constraint:** `pack` runs `npm pack --ignore-scripts`, so the package's `prepack`/`prepare`/`postpack` lifecycle scripts do **not** run — this is what guarantees the attested/published tarball is byte-identical to what the `build`/`test`/`verify` gates produced. Your package must therefore generate all publishable output via `build-script` (default `build`), **not** via a `prepack`/`prepare` hook; a package that relies on those hooks to emit files would otherwise publish a stale or incomplete tarball.
+
 **Minimal caller** — publish an npm-workspace member to GitHub Packages on tag push:
 
 ```yaml

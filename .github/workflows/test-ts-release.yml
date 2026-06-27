@@ -52,8 +52,12 @@ jobs:
 
       - name: Lint workflow
         run: |
+          # Lint the reusable workflow AND this self-test itself, so a YAML
+          # syntax error in either file is caught (matches the both-files scope
+          # of the SHA-pin check below).
           yamllint -d '{extends: default, rules: {line-length: disable, truthy: disable, comments-indentation: disable}}' \
-            .github/workflows/ts-release.yml
+            .github/workflows/ts-release.yml \
+            .github/workflows/test-ts-release.yml
 
   # ──────────────────────────────────────────────────────────────
   # Job 2: Verify all actions are SHA-pinned with version comments
@@ -109,6 +113,14 @@ jobs:
   # ──────────────────────────────────────────────────────────────
   call-ts-release-dry-run:
     name: Call ts-release (dry run)
+    # Skip on pull requests from forks. This repo is public, so a fork PR gets a
+    # read-only GITHUB_TOKEN regardless of the permissions: block below; relying
+    # on the reusable workflow's write-permission grant on such a run is at best
+    # untested and at worst rejected. Internal branches (same repo) and pushes to
+    # main still exercise the full end-to-end dry run.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/ts-release.yml
     # The called workflow's publish job declares packages/id-token/attestations
     # write (a reusable workflow cannot conditionally gate permissions on inputs).
