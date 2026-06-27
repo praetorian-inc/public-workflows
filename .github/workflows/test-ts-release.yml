@@ -1,3 +1,4 @@
+---
 name: "Test: ts-release.yml"
 
 # Self-test harness for ts-release.yml. Validates YAML syntax and SHA-pinning
@@ -77,20 +78,24 @@ jobs:
         run: |
           set -euo pipefail
           FAIL=0
-          file=.github/workflows/ts-release.yml
-          echo "Checking $file..."
-          while IFS= read -r line; do
-            trimmed=$(echo "$line" | sed 's/^[[:space:]]*//')
-            # Skip local references (./.github/workflows/...)
-            echo "$trimmed" | grep -q '\./' && continue
-            if ! echo "$trimmed" | grep -qE '@[a-f0-9]{40}\b'; then
-              echo "  FAIL: not SHA-pinned: $trimmed"
-              FAIL=1
-            fi
-            if ! echo "$trimmed" | grep -qE '#.*v[0-9]'; then
-              echo "  WARN: missing version comment: $trimmed"
-            fi
-          done < <(grep -E '^\s+uses:' "$file")
+          # Scan the reusable workflow AND this self-test itself, so a non-pinned
+          # action added to either file is caught (the self-test could otherwise
+          # drift unguarded).
+          for file in .github/workflows/ts-release.yml .github/workflows/test-ts-release.yml; do
+            echo "Checking $file..."
+            while IFS= read -r line; do
+              trimmed="${line#"${line%%[![:space:]]*}"}"  # strip leading whitespace
+              # Skip local references (./.github/workflows/...)
+              echo "$trimmed" | grep -q '\./' && continue
+              if ! echo "$trimmed" | grep -qE '@[a-f0-9]{40}\b'; then
+                echo "  FAIL: not SHA-pinned: $trimmed"
+                FAIL=1
+              fi
+              if ! echo "$trimmed" | grep -qE '#.*v[0-9]'; then
+                echo "  WARN: missing version comment: $trimmed"
+              fi
+            done < <(grep -E '^\s+uses:' "$file")
+          done
           if [ "$FAIL" -eq 1 ]; then
             echo "::error::Some actions are not SHA-pinned. Pin to full commit SHA."
             exit 1

@@ -1,3 +1,4 @@
+---
 name: TypeScript Release (Callable)
 
 # Reusable workflow for publishing a TypeScript/Node.js package to an npm
@@ -69,6 +70,15 @@ on:
         required: false
         type: string
         default: "."
+
+      allow-no-lockfile:
+        description: >
+          Permit `npm install` when no package-lock.json is present. Default
+          false: a lockfile is required so the release is reproducible (npm ci).
+          Set true only for packages that intentionally ship without a lockfile.
+        required: false
+        type: boolean
+        default: false
 
       # ── Node / registry ───────────────────────────────────────
       node-version:
@@ -325,12 +335,40 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ inputs.install-directory }}
+        env:
+          # Install-time auth: setup-node wrote `//<registry>/:_authToken=
+          # ${NODE_AUTH_TOKEN}` into .npmrc, so any dependency resolved from the
+          # configured (authenticated) registry — e.g. an @scope package on
+          # GitHub Packages — needs the token at `npm ci`, not just at publish.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+          NPM_TOKEN_PROVIDED: ${{ secrets.NPM_TOKEN != '' }}
+          REGISTRY_URL: ${{ inputs.registry-url }}
+          ALLOW_NO_LOCKFILE: ${{ inputs.allow-no-lockfile }}
         shell: bash
         run: |
+          set -euo pipefail
+          # Same guard as Publish: never hand the fallback GITHUB_TOKEN to a
+          # non-GitHub-Packages registry. If no NPM_TOKEN was supplied and the
+          # registry isn't GitHub Packages, drop NODE_AUTH_TOKEN so npm fetches
+          # public deps anonymously instead of leaking the repo token to a third
+          # party. (Host-anchored so look-alikes like npm.pkg.github.com.evil.com
+          # don't qualify.) An unresolved authToken left in .npmrc is harmless on
+          # npm 11 — it is only sent on an authenticated fetch, which public deps
+          # don't trigger.
+          if [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
+            case "$REGISTRY_URL" in
+              https://npm.pkg.github.com|https://npm.pkg.github.com/*) : ;;
+              *) unset NODE_AUTH_TOKEN ;;
+            esac
+          fi
           if [ -f package-lock.json ]; then
             npm ci
-          else
+          elif [ "$ALLOW_NO_LOCKFILE" = "true" ]; then
+            echo "::warning::No package-lock.json in '${PWD}'; falling back to 'npm install' (allow-no-lockfile=true). This release is NOT reproducible."
             npm install --no-audit --no-fund
+          else
+            echo "::error::No package-lock.json in '${PWD}'. Commit a lockfile for reproducible releases, or set allow-no-lockfile: true to opt into 'npm install'."
+            exit 1
           fi
 
       - name: Build
@@ -366,13 +404,18 @@ jobs:
           # Derive the tarball name directly from package.json instead of parsing
           # npm's stdout. npm names the tarball "<name>-<version>.tgz" with the
           # leading '@' stripped and '/' replaced by '-'. Parsing npm output is
-          # fragile: lifecycle scripts (prepack/postpack) and banners write to
-          # stdout, which breaks both `npm pack --json` (JSON.parse fails) and
-          # `npm pack | tail -n1` (trailing postpack noise). node is always
-          # present after setup-node. The -f check fails loudly if npm's naming
-          # ever diverges from this reconstruction.
+          # fragile: banners write to stdout, which breaks both `npm pack --json`
+          # (JSON.parse fails) and `npm pack | tail -n1` (trailing noise). node is
+          # always present after setup-node. The -f check fails loudly if npm's
+          # naming ever diverges from this reconstruction.
           TARBALL=$(node -p "const p=require('./package.json'); p.name.replace(/^@/,'').replace(/\//g,'-') + '-' + p.version + '.tgz'")
-          npm pack
+          # --ignore-scripts: npm pack otherwise runs prepack/prepare/postpack,
+          # which could rewrite files after the visible build/test/verify gates,
+          # so the packed (and attested, and published) bytes would differ from
+          # what was tested. The build is produced explicitly by the run-build
+          # gate, so packing needs no lifecycle scripts; disabling them keeps the
+          # workflow's guarantee that attested bytes == tested bytes.
+          npm pack --ignore-scripts
           if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
             echo "::error::npm pack did not produce the expected tarball '$TARBALL'"
             exit 1
@@ -430,3 +473,16 @@ jobs:
           else
             npm publish "$TARBALL" --registry "$REGISTRY_URL"
           fi
+
+      - name: Revoke private dependency git config
+        # Runs regardless of earlier failure (always()) so the App token's git
+        # URL-rewrite rules never outlive the job. On GitHub-hosted runners the VM
+        # is ephemeral, but on self-hosted runners ~/.gitconfig persists and would
+        # otherwise leak the token + rewrites into later jobs.
+        if: ${{ always() && inputs.enable-private-deps }}
+        env:
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          git config --global --remove-section \
+            "url.https://x-access-token:${GIT_TOKEN}@github.com/" 2>/dev/null || true
