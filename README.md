@@ -602,6 +602,7 @@ jobs:
     uses: praetorian-inc/public-workflows/.github/workflows/ts-release.yml@<SHA>  # vX.Y.Z
     permissions:
       contents: read
+      packages: write        # required even for npmjs (see note below)
       id-token: write
       attestations: write
     with:
@@ -609,6 +610,8 @@ jobs:
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
+
+> **Why `packages: write` even when publishing to npmjs:** the reusable `publish` job unconditionally declares `packages`/`id-token`/`attestations: write`. A caller can only *downgrade* a reusable workflow's permissions, never elevate them — granting less than the called job declares makes GitHub reject the call at startup (`startup_failure`, which posts no check run and is easy to miss). Grant the full set; unused scopes are never spent.
 
 **All inputs** (all optional with sensible defaults):
 
@@ -640,9 +643,11 @@ jobs:
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `NPM_TOKEN` | only for `registry.npmjs.org` | Registry auth token, used as `NODE_AUTH_TOKEN`. Unset → falls back to `GITHUB_TOKEN` (works for GitHub Packages with `packages: write`) |
+| `NPM_TOKEN` | any registry except GitHub Packages | Registry auth token, used as `NODE_AUTH_TOKEN`. Required for `registry.npmjs.org`, JFrog, GitLab, and any other non-GitHub-Packages registry. Unset → falls back to `GITHUB_TOKEN`, which authenticates GitHub Packages only (and needs `packages: write`) |
 | `PLUGIN_CI_APP_ID` | only when `enable-private-deps: true` | GitHub App ID for private dependency access |
 | `PLUGIN_CI_PRIVATE_KEY` | only when `enable-private-deps: true` | GitHub App private key |
+
+> **Install-time registry auth:** `NODE_AUTH_TOKEN` is exported only for the publish step, so `npm ci` runs unauthenticated. That is fine when the released package's dependencies all resolve from public registries. If the package *consumes* a dependency from an authenticated registry — e.g. an `@praetorian-inc`-scoped package hosted on GitHub Packages — `npm ci` will fail to fetch it. Git-hosted private deps are covered by `enable-private-deps`; registry-hosted private deps are not yet wired here.
 
 **Outputs:** `version` — the `package.json` version that was published.
 
