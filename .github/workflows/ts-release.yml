@@ -363,14 +363,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Resolve the tarball name from npm's structured output rather than
-          # scraping stdout: `npm pack --json` emits a JSON array whose first
-          # element's `.filename` is the packed tarball. Parsed with node (always
-          # present after setup-node) to avoid a jq dependency, and immune to the
-          # banner/lifecycle-script noise that could break `tail -n1`.
-          TARBALL=$(npm pack --json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8'))[0].filename")
+          # Derive the tarball name directly from package.json instead of parsing
+          # npm's stdout. npm names the tarball "<name>-<version>.tgz" with the
+          # leading '@' stripped and '/' replaced by '-'. Parsing npm output is
+          # fragile: lifecycle scripts (prepack/postpack) and banners write to
+          # stdout, which breaks both `npm pack --json` (JSON.parse fails) and
+          # `npm pack | tail -n1` (trailing postpack noise). node is always
+          # present after setup-node. The -f check fails loudly if npm's naming
+          # ever diverges from this reconstruction.
+          TARBALL=$(node -p "const p=require('./package.json'); p.name.replace(/^@/,'').replace(/\//g,'-') + '-' + p.version + '.tgz'")
+          npm pack
           if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
-            echo "::error::npm pack did not produce a tarball (got '$TARBALL')"
+            echo "::error::npm pack did not produce the expected tarball '$TARBALL'"
             exit 1
           fi
           echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
@@ -396,14 +400,15 @@ jobs:
           DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
-          # Never disclose the fallback GITHUB_TOKEN to a third-party registry: it
-          # authenticates GitHub Packages, not registry.npmjs.org. Require an
-          # explicit NPM_TOKEN for non-GitHub registries instead of silently
-          # shipping a repo token off to npmjs. (Dry runs contact no registry.)
+          # The fallback GITHUB_TOKEN authenticates GitHub Packages and nothing
+          # else. For any other registry (npmjs.org, JFrog, GitLab, ...) require
+          # an explicit NPM_TOKEN rather than silently shipping a repo token off
+          # to a third party. Dry runs contact no registry, so they are exempt.
           if [ "$DRY_RUN" != "true" ] && [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
             case "$REGISTRY_URL" in
-              *registry.npmjs.org*)
-                echo "::error::Publishing to $REGISTRY_URL requires the NPM_TOKEN secret; refusing to fall back to GITHUB_TOKEN (it only authenticates GitHub Packages)."
+              *npm.pkg.github.com*) : ;;  # GitHub Packages: GITHUB_TOKEN is the correct credential
+              *)
+                echo "::error::Publishing to '$REGISTRY_URL' requires the NPM_TOKEN secret; refusing to fall back to GITHUB_TOKEN (it only authenticates GitHub Packages)."
                 exit 1
                 ;;
             esac
