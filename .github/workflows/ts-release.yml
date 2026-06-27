@@ -275,6 +275,7 @@ jobs:
         if: ${{ inputs.enable-private-deps }}
         env:
           GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
         run: |
           git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
           git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
@@ -295,6 +296,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry-run }}
           TAG_PREFIX: ${{ inputs.tag-prefix }}
           REF: ${{ github.ref }}
+        shell: bash
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./package.json').version")
@@ -310,8 +312,8 @@ jobs:
             exit 0
           fi
           if [[ "$REF" != refs/tags/* ]]; then
-            echo "::error::verify-version-matches-tag is true but this run was not triggered by a tag (ref=$REF). Trigger on push: tags, or set verify-version-matches-tag: false."
-            exit 1
+            echo "::notice::verify-version-matches-tag is true but this run was not triggered by a tag (ref=$REF); skipping the tag/version consistency check (matches the documented auto-skip on non-tag refs)."
+            exit 0
           fi
           TAG="${REF#refs/tags/}"
           TAG_VERSION="${TAG#"$TAG_PREFIX"}"
@@ -323,6 +325,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ inputs.install-directory }}
+        shell: bash
         run: |
           if [ -f package-lock.json ]; then
             npm ci
@@ -335,6 +338,7 @@ jobs:
         working-directory: ${{ inputs.package-dir }}
         env:
           BUILD_SCRIPT: ${{ inputs.build-script }}
+        shell: bash
         run: npm run "$BUILD_SCRIPT"
 
       - name: Test
@@ -342,6 +346,7 @@ jobs:
         working-directory: ${{ inputs.package-dir }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
+        shell: bash
         run: npm run "$TEST_SCRIPT"
 
       - name: Verify
@@ -349,17 +354,22 @@ jobs:
         working-directory: ${{ inputs.package-dir }}
         env:
           VERIFY_SCRIPT: ${{ inputs.verify-script }}
+        shell: bash
         run: npm run "$VERIFY_SCRIPT"
 
       - name: Pack
         id: pack
         working-directory: ${{ inputs.package-dir }}
+        shell: bash
         run: |
           set -euo pipefail
-          # `npm pack` prints progress to stderr and the tarball filename to
-          # stdout; take the last stdout line to be robust to any banner output.
-          TARBALL=$(npm pack | tail -n1)
-          if [ ! -f "$TARBALL" ]; then
+          # Resolve the tarball name from npm's structured output rather than
+          # scraping stdout: `npm pack --json` emits a JSON array whose first
+          # element's `.filename` is the packed tarball. Parsed with node (always
+          # present after setup-node) to avoid a jq dependency, and immune to the
+          # banner/lifecycle-script noise that could break `tail -n1`.
+          TARBALL=$(npm pack --json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8'))[0].filename")
+          if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
             echo "::error::npm pack did not produce a tarball (got '$TARBALL')"
             exit 1
           fi
@@ -374,15 +384,30 @@ jobs:
 
       - name: Publish
         working-directory: ${{ inputs.package-dir }}
+        shell: bash
         env:
           # Prefer an explicit registry token (e.g. for registry.npmjs.org);
           # otherwise fall back to GITHUB_TOKEN, which authenticates GitHub
           # Packages when the caller grants packages: write.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+          NPM_TOKEN_PROVIDED: ${{ secrets.NPM_TOKEN != '' }}
+          REGISTRY_URL: ${{ inputs.registry-url }}
           TARBALL: ${{ steps.pack.outputs.tarball }}
           DRY_RUN: ${{ inputs.dry-run }}
         run: |
           set -euo pipefail
+          # Never disclose the fallback GITHUB_TOKEN to a third-party registry: it
+          # authenticates GitHub Packages, not registry.npmjs.org. Require an
+          # explicit NPM_TOKEN for non-GitHub registries instead of silently
+          # shipping a repo token off to npmjs. (Dry runs contact no registry.)
+          if [ "$DRY_RUN" != "true" ] && [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
+            case "$REGISTRY_URL" in
+              *registry.npmjs.org*)
+                echo "::error::Publishing to $REGISTRY_URL requires the NPM_TOKEN secret; refusing to fall back to GITHUB_TOKEN (it only authenticates GitHub Packages)."
+                exit 1
+                ;;
+            esac
+          fi
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY RUN — packing and validating only, nothing is uploaded."
             npm publish "$TARBALL" --dry-run

@@ -105,8 +105,16 @@ jobs:
   call-ts-release-dry-run:
     name: Call ts-release (dry run)
     uses: ./.github/workflows/ts-release.yml
+    # The called workflow's publish job declares packages/id-token/attestations
+    # write (a reusable workflow cannot conditionally gate permissions on inputs).
+    # A caller can downgrade but not elevate a reusable workflow's permissions, so
+    # the caller must grant at least that superset or GitHub rejects the call at
+    # startup — even though this dry run exercises none of those scopes.
     permissions:
       contents: read
+      packages: write
+      id-token: write
+      attestations: write
     with:
       install-directory: _test-fixtures/ts-release
       package-dir: _test-fixtures/ts-release
