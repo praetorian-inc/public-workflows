@@ -478,8 +478,13 @@ jobs:
           # The fallback GITHUB_TOKEN authenticates GitHub Packages and nothing
           # else. For any other registry (npmjs.org, JFrog, GitLab, ...) require
           # an explicit NPM_TOKEN rather than silently shipping a repo token off
-          # to a third party. Dry runs contact no registry, so they are exempt.
-          if [ "$DRY_RUN" != "true" ] && [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
+          # to a third party. This applies to dry runs too: `npm publish --dry-run`
+          # is NOT offline — it makes an authenticated packument GET to the target
+          # registry (verified on npm 11.4.2), so without this guard a dry run to a
+          # non-GitHub registry-url would transmit the GITHUB_TOKEN fallback to that
+          # host. setup-node binds the token to the registry-url host, so the leak
+          # would reach whatever registry-url points at.
+          if [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
             # Anchor the host (not a substring match) so look-alikes such as
             # https://npm.pkg.github.com.evil.com or ...@evil.com do NOT qualify
             # for the GITHUB_TOKEN fallback.
