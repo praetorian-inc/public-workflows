@@ -550,7 +550,7 @@ jobs:
 | `test-script` | `test` | npm script to run for tests (must be a key in package.json scripts) |
 | `enable-private-deps` | `false` | Mint a GitHub App token for private-dependency access before `npm ci` |
 | `private-deps-owner` | `praetorian-inc` | GitHub org for private dependency access |
-| `private-deps-repos` | `claude-tool-sdk` | Comma-separated repo names the App token is scoped to |
+| `private-deps-repos` | `""` | Comma-separated repo names the App token is scoped to. **Required** when `enable-private-deps: true` — a blank value would scope the token to every repo the App can access in `private-deps-owner`'s installation |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist for block mode |
@@ -563,6 +563,103 @@ jobs:
 | `PLUGIN_CI_PRIVATE_KEY` | only when `enable-private-deps: true` | GitHub App private key |
 
 **Security posture:** Workflow-level `permissions: contents: read` ceiling. Harden-Runner enabled by default. Preflight job skips CI on non-TypeScript PRs. Runner pinned to `ubuntu-24.04`.
+
+### `ts-release.yml` — npm package publish (GitHub Packages + provenance)
+
+Reusable workflow for publishing a TypeScript/Node.js package to an npm registry — **GitHub Packages (`npm.pkg.github.com`) by default**. The npm sibling of `go-release.yml`. It publishes the version in the package's `package.json` (npm always publishes that version; the triggering tag is only an optional consistency guard). Release gates run explicitly and visibly — `build` → `test` → optional `verify` → `pack` → `publish` — because publishing a pre-packed tarball does **not** re-run `prepublishOnly`/`prepare`, so the published bytes are exactly the ones that were tested and attested.
+
+**Provenance:** npm's built-in `--provenance` only works against `registry.npmjs.org`, **not** GitHub Packages, so build provenance is produced registry-agnostically via `actions/attest-build-provenance` over the packed tarball (`pack` → attest → `publish <tarball>`).
+
+**Packaging constraint:** `pack` runs `npm pack --ignore-scripts`, so the package's `prepack`/`prepare`/`postpack` lifecycle scripts do **not** run — this is what guarantees the attested/published tarball is byte-identical to what the `build`/`test`/`verify` gates produced. Your package must therefore generate all publishable output via `build-script` (default `build`), **not** via a `prepack`/`prepare` hook; a package that relies on those hooks to emit files would otherwise publish a stale or incomplete tarball.
+
+**Minimal caller** — publish an npm-workspace member to GitHub Packages on tag push:
+
+```yaml
+name: Publish
+on:
+  push:
+    tags: ['gateway-v*']
+permissions:
+  contents: read
+jobs:
+  release:
+    uses: praetorian-inc/public-workflows/.github/workflows/ts-release.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+      packages: write       # publish to GitHub Packages via GITHUB_TOKEN
+      id-token: write        # provenance attestation
+      attestations: write    # provenance attestation
+    with:
+      install-directory: .          # npm ci at the workspace root
+      package-dir: gateway          # build/pack/publish this package
+      tag-prefix: gateway-v
+      verify-script: check-bundle-drift
+```
+
+**Publish to public npmjs.com instead:**
+
+```yaml
+jobs:
+  release:
+    uses: praetorian-inc/public-workflows/.github/workflows/ts-release.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+      packages: write        # required even for npmjs (see note below)
+      id-token: write
+      attestations: write
+    with:
+      registry-url: https://registry.npmjs.org
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+```
+
+> **Why `packages: write` even when publishing to npmjs:** the reusable `publish` job unconditionally declares `packages`/`id-token`/`attestations: write`. A caller can only *downgrade* a reusable workflow's permissions, never elevate them — granting less than the called job declares makes GitHub reject the call at startup (`startup_failure`, which posts no check run and is easy to miss). Grant the full set; unused scopes are never spent.
+
+**All inputs** (all optional with sensible defaults):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `install-directory` | `.` | Directory where `npm ci` runs (repo root for workspaces) |
+| `package-dir` | `.` | Directory of the package to build, pack and publish |
+| `allow-no-lockfile` | `false` | Permit `npm install` when no `package-lock.json`/`npm-shrinkwrap.json` is present. Default false: a lockfile is required so the release is reproducible (`npm ci`). A release via `npm install` is NOT reproducible |
+| `node-version` | `22` | Node.js version |
+| `registry-url` | `https://npm.pkg.github.com` | npm registry to publish to |
+| `scope` | `@praetorian-inc` | npm scope to configure auth for (must equal the org login for GitHub Packages) |
+| `enable-install-auth` | `false` | Expose `NODE_AUTH_TOKEN` during `npm ci` so deps on the authenticated registry resolve. Off by default so a publish-capable token never enters the install env (where dependency scripts run); enable only for registry-hosted private deps |
+| `tag-prefix` | `v` | Prefix stripped before comparing tag to `package.json` version |
+| `verify-version-matches-tag` | `true` | Assert tag (minus prefix) equals `package.json` version; auto-skipped on dry-run or non-tag refs |
+| `run-build` | `true` | Run the build script before packing |
+| `build-script` | `build` | npm script that produces the publishable output |
+| `run-test` | `true` | Run the test script before packing |
+| `test-script` | `test` | npm script to run for tests |
+| `verify-script` | `""` | Optional extra npm script after build+test (e.g. `check-bundle-drift`) |
+| `enable-provenance` | `true` | Attest build provenance over the packed tarball (skipped on dry-run) |
+| `dry-run` | `false` | `npm publish --dry-run` (no upload); skips tag check and provenance |
+| `enable-private-deps` | `false` | Mint a GitHub App token for private-dependency access before `npm ci` |
+| `private-deps-owner` | `praetorian-inc` | GitHub org for private dependency access |
+| `private-deps-repos` | `""` | Comma-separated repo names the App token is scoped to. **Required** when `enable-private-deps: true` — a blank value would scope the token to every repo the App can access in `private-deps-owner`'s installation |
+| `runner` | `ubuntu-24.04` | Runner label |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist for block mode |
+
+**Secrets:**
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `NPM_TOKEN` | any registry except GitHub Packages | Registry auth token, used as `NODE_AUTH_TOKEN` at publish (and at install when `enable-install-auth: true`). Required for `registry.npmjs.org`, JFrog, GitLab, and any other non-GitHub-Packages registry. Unset → falls back to `GITHUB_TOKEN`, which authenticates GitHub Packages only (and needs `packages: write`) |
+| `PLUGIN_CI_APP_ID` | only when `enable-private-deps: true` | GitHub App ID for private dependency access |
+| `PLUGIN_CI_PRIVATE_KEY` | only when `enable-private-deps: true` | GitHub App private key |
+
+> **Install-time registry auth (`enable-install-auth`, default `false`):** by default `NODE_AUTH_TOKEN` is exported only for the publish step, so `npm ci` runs unauthenticated and the publish-capable token never enters the install environment — where dependency lifecycle scripts run by default and a compromised dependency could otherwise read it. That is the right default when the released package's dependencies all resolve from public registries. If the package *consumes* a dependency from an authenticated registry — e.g. an `@praetorian-inc`-scoped package hosted on GitHub Packages — set `enable-install-auth: true` to expose the token at `npm ci` too. The fallback `GITHUB_TOKEN` stays host-anchored to GitHub Packages; for any other registry without an `NPM_TOKEN` the token is dropped before install so the repo token is never sent to a third party. Git-hosted private deps are covered separately by `enable-private-deps`.
+>
+> **Remaining limitation:** install and publish share one registry configuration (`registry-url` + `scope`), so "install private GitHub Packages deps while publishing to `registry.npmjs.org`" is not supported in a single run; mirror or pre-install such deps instead.
+>
+> **Private-dep token vs. install scripts (`enable-private-deps`):** minting the GitHub App token writes `https://x-access-token:<token>@github.com/` URL-rewrite rules into the **global git config before `npm ci`**, so the token is readable from `~/.gitconfig` by any dependency lifecycle script that `npm ci` runs — the same install-script exposure that `enable-install-auth` deliberately avoids for the registry token. The blast radius is bounded (`create-github-app-token` scopes the token to `private-deps-owner` + `private-deps-repos`, and an `always()` step revokes the git config so it can't outlive the job), but a compromised transitive dependency could still read it *during* install. Git-hosted private deps inherently need the credential in git config during resolution, and lifecycle scripts share that environment, so this can't be fully eliminated short of `--ignore-scripts` (which would break deps that need build scripts). Enable `enable-private-deps` only when you actually consume a git-hosted private dependency, and keep `private-deps-repos` as narrow as possible.
+
+**Outputs:** `version` — the `package.json` version that was published.
+
+**Security posture:** Workflow-level `permissions: contents: read` ceiling; the publish job adds `packages`/`id-token`/`attestations: write` (unused grants are never spent). Harden-Runner enabled by default. `persist-credentials: false` on checkout. Runner pinned to `ubuntu-24.04`.
 
 ### `markdown-quality.yml` — Markdown lint + format check
 
@@ -791,7 +888,7 @@ Use [ratchet](https://github.com/sethvargo/ratchet) to auto-pin.
 ## Contributing
 
 1. Workflows in `.github/workflows/*.yml` must SHA-pin all `uses:` references. `ratchet lint` enforces this.
-2. The `test-*.yml` self-test harnesses exercise the reusables against `_test-fixtures/` on every PR — keep them passing. `test-go-ci.yml`, `test-go-sec.yml`, and `test-graphify-graph.yml` run against `go-minimal/`; `test-ts-ci.yml` runs against `ts-minimal/`; `test-go-release.yml` runs against `go-release/`. (The `review-{claude,codex,gemini}.yml` workflows dogfood the AI reviewers on this repo's own PRs.)
+2. The `test-*.yml` self-test harnesses exercise the reusables against `_test-fixtures/` on every PR — keep them passing. `test-go-ci.yml`, `test-go-sec.yml`, and `test-graphify-graph.yml` run against `go-minimal/`; `test-ts-ci.yml` runs against `ts-minimal/`; `test-go-release.yml` runs against `go-release/`; `test-ts-release.yml` runs its static checks (yaml-lint, SHA-pin, registry-guard unit) on every PR but gates the **write-scoped** end-to-end dry-run publish against `ts-release/` to `push`/`workflow_dispatch` only — so unreviewed PR code never runs with `packages`/`id-token`/`attestations: write` (use `workflow_dispatch` to validate a branch end-to-end pre-merge). (The `review-{claude,codex,gemini}.yml` workflows dogfood the AI reviewers on this repo's own PRs.)
 3. Tag new major versions (`vX.Y.Z`) after merge; consumers pin to the SHA of that tagged commit.
 
 ## Supply chain context

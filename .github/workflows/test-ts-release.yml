@@ -1,0 +1,242 @@
+---
+name: "Test: ts-release.yml"
+
+# Self-test harness for ts-release.yml. Validates YAML syntax and SHA-pinning
+# statically, then exercises the real reusable workflow end-to-end in dry-run
+# mode against the _test-fixtures/ts-release package (install -> build -> test ->
+# pack -> publish --dry-run). Dry-run uploads nothing and needs no registry auth.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/ts-release.yml"
+      - ".github/workflows/test-ts-release.yml"
+      - "_test-fixtures/ts-release/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/ts-release.yml"
+      - ".github/workflows/test-ts-release.yml"
+      - "_test-fixtures/ts-release/**"
+  # Manual trigger for the write-scoped end-to-end dry-run job (see Job 4). It is
+  # deliberately NOT run on pull_request: a local `uses: ./...` resolves to the
+  # PR's own (unreviewed) copy of ts-release.yml, and a same-repo PR's
+  # GITHUB_TOKEN carries the declared write scopes — so auto-running it on PRs
+  # would execute unreviewed code with packages/id-token/attestations: write.
+  # workflow_dispatch requires repo write access to invoke and is never
+  # auto-triggered by opening a PR, so a maintainer can still validate a branch
+  # end-to-end before merge.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Job 1: Validate YAML syntax with yamllint
+  # ──────────────────────────────────────────────────────────────
+  yaml-lint:
+    name: YAML lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install yamllint
+        run: pip install --quiet yamllint
+
+      - name: Lint workflow
+        run: |
+          # Lint the reusable workflow AND this self-test itself, so a YAML
+          # syntax error in either file is caught (matches the both-files scope
+          # of the SHA-pin check below).
+          yamllint -d '{extends: default, rules: {line-length: disable, truthy: disable, comments-indentation: disable}}' \
+            .github/workflows/ts-release.yml \
+            .github/workflows/test-ts-release.yml
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 2: Verify all actions are SHA-pinned with version comments
+  # ──────────────────────────────────────────────────────────────
+  verify-sha-pins:
+    name: Verify SHA pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check SHA pins
+        run: |
+          set -euo pipefail
+          FAIL=0
+          # Scan the reusable workflow AND this self-test itself, so a non-pinned
+          # action added to either file is caught (the self-test could otherwise
+          # drift unguarded).
+          for file in .github/workflows/ts-release.yml .github/workflows/test-ts-release.yml; do
+            echo "Checking $file..."
+            while IFS= read -r line; do
+              trimmed="${line#"${line%%[![:space:]]*}"}"  # strip leading whitespace
+              # Skip local reusable-workflow references (uses: ./.github/...).
+              # Anchor to the start of the trimmed value so a third-party action
+              # that merely mentions './' in a trailing comment is still
+              # SHA-validated — a bare '\./' match would skip it and let an
+              # unpinned action slip through.
+              echo "$trimmed" | grep -qE '^uses:[[:space:]]+\./' && continue
+              if ! echo "$trimmed" | grep -qE '@[a-f0-9]{40}\b'; then
+                echo "  FAIL: not SHA-pinned: $trimmed"
+                FAIL=1
+              fi
+              if ! echo "$trimmed" | grep -qE '#.*v[0-9]'; then
+                echo "  WARN: missing version comment: $trimmed"
+              fi
+            done < <(grep -E '^\s+uses:' "$file")
+          done
+          if [ "$FAIL" -eq 1 ]; then
+            echo "::error::Some actions are not SHA-pinned. Pin to full commit SHA."
+            exit 1
+          fi
+          echo "All actions properly SHA-pinned."
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 3: Unit-test the "refuse GITHUB_TOKEN fallback for a non-GitHub-Packages
+  # registry" host-anchor guard. The end-to-end harness can't exercise this
+  # branch: asserting that a reusable-workflow *call* fails is not expressible
+  # (a `uses:` job cannot set continue-on-error, so its failure can't be caught
+  # by a downstream job). So we test the decision logic in isolation, with a
+  # grep that fails if the real guard pattern drifts out of sync. Runs on all
+  # PRs (fork and same-repo) with only the read-only token this job needs —
+  # unlike the dry-run job below, which never runs on a PR (push/dispatch only).
+  # ──────────────────────────────────────────────────────────────
+  registry-fallback-guard:
+    name: Registry fallback guard (unit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Unit-test the GITHUB_TOKEN host-anchor guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Anti-drift: the case mirror below MUST match the guard used in both
+          # the Install and Publish steps of ts-release.yml. Fail loudly if the
+          # real allow-list pattern changes so this test gets updated with it.
+          PATTERN='https://npm.pkg.github.com|https://npm.pkg.github.com/*'
+          # The pattern must appear in BOTH guards — the Install step and the
+          # Publish step. A bare `grep -q` (>=1 match) would still pass if one of
+          # the two guards were deleted, so assert at least two occurrences.
+          # `|| true` keeps `set -e` from aborting on grep's exit 1 when count=0.
+          guard_count=$(grep -cF -- "$PATTERN" .github/workflows/ts-release.yml || true)
+          if [ "$guard_count" -lt 2 ]; then
+            echo "::error::Expected the host-anchor allow-list pattern in BOTH the Install and Publish guards of ts-release.yml (found ${guard_count} occurrence(s)); a guard was removed or the pattern changed — fix ts-release.yml or update this unit test to match."
+            exit 1
+          fi
+
+          # Mirror of the guard: with no NPM_TOKEN, may we fall back to GITHUB_TOKEN?
+          allows_github_token() {
+            case "$1" in
+              https://npm.pkg.github.com|https://npm.pkg.github.com/*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          fail=0
+          assert() {  # assert <url> <allow|refuse>
+            local url="$1" expect="$2" got
+            if allows_github_token "$url"; then got=allow; else got=refuse; fi
+            if [ "$got" != "$expect" ]; then
+              echo "  FAIL: $url -> $got (expected $expect)"
+              fail=1
+            else
+              echo "  ok:   $url -> $got"
+            fi
+          }
+
+          # GitHub Packages (exact, trailing slash, sub-path): fallback allowed
+          assert "https://npm.pkg.github.com"            allow
+          assert "https://npm.pkg.github.com/"           allow
+          assert "https://npm.pkg.github.com/@scope/pkg" allow
+          # Third-party registries: fallback refused (require explicit NPM_TOKEN)
+          assert "https://registry.npmjs.org"            refuse
+          assert "https://registry.npmjs.org/"           refuse
+          # Look-alikes must NOT be treated as GitHub Packages (host anchored)
+          assert "https://npm.pkg.github.com.evil.com"   refuse
+          assert "https://npm.pkg.github.com.evil.com/"  refuse
+          assert "https://npm.pkg.github.com@evil.com"   refuse
+          # Plain-http downgrade is not GitHub Packages either
+          assert "http://npm.pkg.github.com"             refuse
+
+          if [ "$fail" -eq 1 ]; then
+            echo "::error::Host-anchor guard unit test failed."
+            exit 1
+          fi
+          echo "All host-anchor guard cases passed."
+
+  # ──────────────────────────────────────────────────────────────
+  # Job 4: End-to-end dry-run against the fixture package.
+  # Exercises install -> build -> test -> pack -> publish --dry-run
+  # through the real reusable workflow. No upload, no auth required.
+  # ──────────────────────────────────────────────────────────────
+  call-ts-release-dry-run:
+    name: Call ts-release (dry run)
+    # SECURITY: only on push (to main, i.e. post-review/merge) or a manual
+    # workflow_dispatch — never on pull_request. `uses: ./...` resolves to the
+    # triggering ref's copy of ts-release.yml, so on a pull_request this would
+    # run the PR's *unreviewed* reusable workflow, and a same-repo PR's
+    # GITHUB_TOKEN carries the packages/id-token/attestations write scopes
+    # granted below — auto-running it on PRs would execute unreviewed code with
+    # write-scoped credentials before review. The static jobs above (yaml-lint,
+    # SHA-pin check, registry-fallback-guard unit) give PR-time assurance with
+    # only contents: read; a maintainer can workflow_dispatch a branch to
+    # validate end-to-end before merge.
+    if: >-
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/ts-release.yml
+    # The called workflow's publish job declares packages/id-token/attestations
+    # write (a reusable workflow cannot conditionally gate permissions on inputs).
+    # A caller can downgrade but not elevate a reusable workflow's permissions, so
+    # the caller must grant at least that superset or GitHub rejects the call at
+    # startup — even though this dry run exercises none of those scopes.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      install-directory: _test-fixtures/ts-release
+      package-dir: _test-fixtures/ts-release
+      dry-run: true
+      enable-provenance: false
+      verify-version-matches-tag: false

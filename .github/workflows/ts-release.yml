@@ -1,0 +1,552 @@
+---
+name: TypeScript Release (Callable)
+
+# Reusable workflow for publishing a TypeScript/Node.js package to an npm
+# registry (GitHub Packages by default) in the praetorian-inc org. Sibling to
+# go-release.yml — the npm counterpart of the Go binary release pipeline.
+#
+# What it publishes: the version in the package's package.json. npm always
+# publishes that version; the triggering tag is used only as an optional
+# consistency guard (verify-version-matches-tag). This mirrors how npm actually
+# works — there is no "version from tag" the way GoReleaser derives one.
+#
+# Provenance note: npm's built-in `npm publish --provenance` only works against
+# the public npm registry (registry.npmjs.org) — it is NOT supported by GitHub
+# Packages (npm.pkg.github.com). So build provenance is produced
+# registry-agnostically via actions/attest-build-provenance over the packed
+# tarball, and that exact tarball is what gets published (pack -> attest ->
+# publish <tarball>), so the attested bytes equal the published bytes.
+#
+# Why publish a pre-packed tarball: `npm publish <tarball>` does NOT re-run the
+# package's prepare/prepublishOnly lifecycle scripts. This workflow therefore
+# runs the release gates explicitly and visibly (run-build / run-test /
+# verify-script) instead of relying on a hidden prepublishOnly chain — the gates
+# are auditable in the Actions log, and the published artifact is byte-identical
+# to the one that was tested and attested.
+#
+# Access: invocable from any repo in the praetorian-inc org.
+#
+# Caller example (tag-push, GitHub Packages, npm workspace member):
+#
+#   on:
+#     push:
+#       tags: ['gateway-v*']
+#   jobs:
+#     release:
+#       uses: praetorian-inc/public-workflows/.github/workflows/ts-release.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#         packages: write
+#         id-token: write
+#         attestations: write
+#       with:
+#         install-directory: .          # npm ci at the workspace root
+#         package-dir: gateway          # build/pack/publish this package
+#         tag-prefix: gateway-v
+#         verify-script: check-bundle-drift
+#
+# Caller example (publish to public npmjs.com instead of GitHub Packages):
+#
+#       with:
+#         registry-url: https://registry.npmjs.org
+#         scope: "@praetorian-inc"
+#       secrets:
+#         NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+#
+# Sibling: go-release.yml  |  CI sibling: ts-ci.yml
+
+on:
+  workflow_call:
+    inputs:
+      # ── Locations ─────────────────────────────────────────────
+      install-directory:
+        description: "Directory where `npm ci` runs. Use the repo root for npm workspaces."
+        required: false
+        type: string
+        default: "."
+
+      package-dir:
+        description: "Directory of the package to build, pack and publish (its package.json)."
+        required: false
+        type: string
+        default: "."
+
+      allow-no-lockfile:
+        description: >
+          Permit `npm install` when no package-lock.json is present. Default
+          false: a lockfile is required so the release is reproducible (npm ci).
+          Set true only for packages that intentionally ship without a lockfile.
+        required: false
+        type: boolean
+        default: false
+
+      # ── Node / registry ───────────────────────────────────────
+      node-version:
+        description: "Node.js version to use."
+        required: false
+        type: string
+        default: "22"
+
+      registry-url:
+        description: "npm registry to publish to. Defaults to GitHub Packages."
+        required: false
+        type: string
+        default: "https://npm.pkg.github.com"
+
+      scope:
+        description: "npm scope to configure auth for (must equal the GitHub org login for GitHub Packages)."
+        required: false
+        type: string
+        default: "@praetorian-inc"
+
+      enable-install-auth:
+        description: >
+          Expose the registry token (NODE_AUTH_TOKEN) during `npm ci`/`npm
+          install` so @scope dependencies hosted on the authenticated registry
+          resolve at install time. Default false: most packages resolve every
+          dependency from public registry.npmjs.org and must NOT have a
+          publish-capable token in the install environment, where dependency
+          lifecycle scripts run by default. Enable only when a dependency is
+          hosted on the authenticated registry (e.g. an @praetorian-inc package
+          on GitHub Packages). Publish always gets its own token regardless.
+        required: false
+        type: boolean
+        default: false
+
+      # ── Version / tag consistency ─────────────────────────────
+      tag-prefix:
+        description: "Tag prefix stripped before comparing the tag to package.json version (e.g. 'v' or 'gateway-v')."
+        required: false
+        type: string
+        default: "v"
+
+      verify-version-matches-tag:
+        description: >
+          Assert the triggering tag (minus tag-prefix) equals the package.json
+          version. Automatically skipped when dry-run is true or the run was not
+          triggered by a tag ref.
+        required: false
+        type: boolean
+        default: true
+
+      # ── Release gates (run before pack; see header for why) ───
+      run-build:
+        description: "Run the build script before packing."
+        required: false
+        type: boolean
+        default: true
+
+      build-script:
+        description: "npm script that produces the publishable output (e.g. dist/)."
+        required: false
+        type: string
+        default: "build"
+
+      run-test:
+        description: "Run the test script before packing."
+        required: false
+        type: boolean
+        default: true
+
+      test-script:
+        description: "npm script to run for tests."
+        required: false
+        type: string
+        default: "test"
+
+      verify-script:
+        description: "Optional extra npm script run after build+test (e.g. 'check-bundle-drift'). Skipped if empty."
+        required: false
+        type: string
+        default: ""
+
+      # ── Supply chain ──────────────────────────────────────────
+      enable-provenance:
+        description: "Attest build provenance over the packed tarball (actions/attest-build-provenance). Skipped on dry runs."
+        required: false
+        type: boolean
+        default: true
+
+      dry-run:
+        description: "Run `npm publish --dry-run` (no upload). Also skips the tag/version check and provenance."
+        required: false
+        type: boolean
+        default: false
+
+      # ── Private dependencies (mirrors ts-ci.yml) ──────────────
+      enable-private-deps:
+        description: "Generate a GitHub App token for private dependency access before npm ci."
+        required: false
+        type: boolean
+        default: false
+
+      private-deps-owner:
+        description: "GitHub org for private dependency access."
+        required: false
+        type: string
+        default: "praetorian-inc"
+
+      private-deps-repos:
+        description: >
+          Comma-separated repo names the App token is scoped to. No default:
+          required when enable-private-deps is true. A blank value is rejected
+          rather than passed through, because create-github-app-token treats an
+          empty repositories list (with owner set) as "all repositories in the
+          owner's installation" — far broader than intended.
+        required: false
+        type: string
+        default: ""
+
+      # ── Runner ────────────────────────────────────────────────
+      runner:
+        description: "Runner label."
+        required: false
+        type: string
+        default: "ubuntu-24.04"
+
+      # ── Harden-Runner ─────────────────────────────────────────
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: >
+          Newline-separated allowed egress endpoints when policy=block.
+          Recommended: github.com:443 api.github.com:443
+          objects.githubusercontent.com:443 registry.npmjs.org:443
+          npm.pkg.github.com:443 fulcio.sigstore.dev:443 rekor.sigstore.dev:443
+          tuf-repo-cdn.sigstore.dev:443
+        required: false
+        type: string
+        default: ""
+
+    outputs:
+      version:
+        description: "The package.json version that was published."
+        value: ${{ jobs.publish.outputs.version }}
+
+    secrets:
+      NPM_TOKEN:
+        description: >
+          Auth token for the target registry. When set it is used as
+          NODE_AUTH_TOKEN. When unset, the workflow falls back to GITHUB_TOKEN —
+          which works for GitHub Packages provided the caller grants
+          `packages: write`. Required when publishing to registry.npmjs.org.
+        required: false
+      PLUGIN_CI_APP_ID:
+        description: "GitHub App ID for private dependency access. Required when enable-private-deps is true."
+        required: false
+      PLUGIN_CI_PRIVATE_KEY:
+        description: "GitHub App private key. Required when enable-private-deps is true."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 20
+
+    # Reusable workflows cannot conditionally gate permissions on inputs.
+    # packages: write is only exercised when publishing to GitHub Packages with
+    # the fallback GITHUB_TOKEN. id-token + attestations: write are only
+    # exercised when enable-provenance=true. Callers inherit the full grant
+    # regardless of which features they enable; an unused grant is never spent.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    concurrency:
+      group: ts-release-${{ github.repository }}-${{ inputs.package-dir }}-${{ github.ref }}
+      cancel-in-progress: false
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Warn on block egress without allow-list
+        # policy=block with an empty allowed-endpoints list blocks ALL egress —
+        # npm install, the registry publish, and the sigstore attestation calls —
+        # so the run fails closed (no security hole) but with a confusing network
+        # error. Surface the cause early. Local command execution is unaffected by
+        # the egress block, so this warning still prints. Not fatal: a
+        # dependency-free dry run with no provenance legitimately needs no egress.
+        if: ${{ inputs.enable-harden-runner && inputs.harden-runner-policy == 'block' && inputs.harden-runner-allowed-endpoints == '' }}
+        shell: bash
+        run: |
+          echo "::warning title=Harden-Runner egress::harden-runner-policy is 'block' but harden-runner-allowed-endpoints is empty, so all outbound network calls (npm install, registry publish, sigstore attestation) are blocked and the run will likely fail. Pass an allow-list, e.g.: github.com:443 api.github.com:443 objects.githubusercontent.com:443 registry.npmjs.org:443 npm.pkg.github.com:443 fulcio.sigstore.dev:443 rekor.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          # npm publishes via NODE_AUTH_TOKEN (env), not the git-persisted
+          # credential, so don't leave a token in .git/config for later steps.
+          persist-credentials: false
+
+      - name: Validate private-dependency scope
+        # enable-private-deps mints a GitHub App token scoped to
+        # private-deps-repos. create-github-app-token treats an empty
+        # `repositories` (with `owner` set) as "all repositories in the owner's
+        # installation", so a blank private-deps-repos would silently mint a far
+        # broader token than intended. Fail closed instead of minting it.
+        if: ${{ inputs.enable-private-deps }}
+        env:
+          PRIVATE_DEPS_REPOS: ${{ inputs.private-deps-repos }}
+          PRIVATE_DEPS_OWNER: ${{ inputs.private-deps-owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PRIVATE_DEPS_REPOS//[[:space:]]/}" ]; then
+            echo "::error::enable-private-deps is true but private-deps-repos is empty. Set private-deps-repos to the comma-separated repo names the App token should be scoped to; leaving it empty would scope the token to every repository the App can access in the '${PRIVATE_DEPS_OWNER}' installation."
+            exit 1
+          fi
+
+      - name: Generate token for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1.12.0 # zizmor: ignore[github-app] token scope bounded by plugin-ci App install
+        with:
+          app-id: ${{ secrets.PLUGIN_CI_APP_ID }}
+          private-key: ${{ secrets.PLUGIN_CI_PRIVATE_KEY }}
+          owner: ${{ inputs.private-deps-owner }}
+          repositories: ${{ inputs.private-deps-repos }}
+
+      - name: Configure git for private dependencies
+        if: ${{ inputs.enable-private-deps }}
+        env:
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://x-access-token:${GIT_TOKEN}@github.com/".insteadOf "git@github.com:"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+          scope: ${{ inputs.scope }}
+
+      - name: Resolve version and verify tag
+        id: meta
+        working-directory: ${{ inputs.package-dir }}
+        env:
+          VERIFY: ${{ inputs.verify-version-matches-tag }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          TAG_PREFIX: ${{ inputs.tag-prefix }}
+          REF: ${{ github.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          if [ -z "$VERSION" ] || [ "$VERSION" = "undefined" ]; then
+            echo "::error::Could not read a version from ${PWD}/package.json"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Package version: $VERSION"
+
+          if [ "$VERIFY" != "true" ] || [ "$DRY_RUN" = "true" ]; then
+            echo "Tag/version consistency check skipped (verify=$VERIFY, dry-run=$DRY_RUN)."
+            exit 0
+          fi
+          if [[ "$REF" != refs/tags/* ]]; then
+            echo "::notice::verify-version-matches-tag is true but this run was not triggered by a tag (ref=$REF); skipping the tag/version consistency check (matches the documented auto-skip on non-tag refs)."
+            exit 0
+          fi
+          TAG="${REF#refs/tags/}"
+          TAG_VERSION="${TAG#"$TAG_PREFIX"}"
+          if [ "$TAG_VERSION" != "$VERSION" ]; then
+            echo "::error::Tag version '$TAG_VERSION' (from tag '$TAG', prefix '$TAG_PREFIX') does not match package.json version '$VERSION'. Bump package.json or fix the tag."
+            exit 1
+          fi
+          echo "✓ Tag '$TAG' matches package.json version '$VERSION'"
+
+      - name: Install dependencies
+        working-directory: ${{ inputs.install-directory }}
+        env:
+          # Install-time auth — opt-in via enable-install-auth (default OFF).
+          # setup-node wrote `//<registry>/:_authToken=${NODE_AUTH_TOKEN}` into
+          # .npmrc, so a dependency resolved from the configured (authenticated)
+          # registry — e.g. an @scope package on GitHub Packages — needs the
+          # token at `npm ci`. But `npm ci`/`npm install` run dependency
+          # lifecycle scripts by default, so handing them a publish-capable token
+          # would let a compromised dependency read it before the tarball is even
+          # packed. Default false therefore exports an EMPTY token here; the
+          # publish step below gets its own token unconditionally. Enable only
+          # when a dep is genuinely hosted on the authenticated registry.
+          NODE_AUTH_TOKEN: ${{ inputs.enable-install-auth && (secrets.NPM_TOKEN || github.token) || '' }}
+          NPM_TOKEN_PROVIDED: ${{ secrets.NPM_TOKEN != '' }}
+          REGISTRY_URL: ${{ inputs.registry-url }}
+          ALLOW_NO_LOCKFILE: ${{ inputs.allow-no-lockfile }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Same guard as Publish: never hand the fallback GITHUB_TOKEN to a
+          # non-GitHub-Packages registry. If no NPM_TOKEN was supplied and the
+          # registry isn't GitHub Packages, drop NODE_AUTH_TOKEN so npm fetches
+          # public deps anonymously instead of leaking the repo token to a third
+          # party. (Host-anchored so look-alikes like npm.pkg.github.com.evil.com
+          # don't qualify.) An unresolved authToken left in .npmrc is harmless on
+          # npm 10/11 (Node 22 ships npm 10.x) — it is only sent on an
+          # authenticated fetch, which public deps don't trigger.
+          if [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
+            case "$REGISTRY_URL" in
+              https://npm.pkg.github.com|https://npm.pkg.github.com/*) : ;;
+              *) unset NODE_AUTH_TOKEN ;;
+            esac
+          fi
+          # npm ci installs from either npm-shrinkwrap.json or package-lock.json
+          # (shrinkwrap, the publishable lockfile, takes precedence when both
+          # exist). Accept both so a shrinkwrap-only package isn't wrongly forced
+          # down the non-reproducible `npm install` path below.
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci
+          elif [ "$ALLOW_NO_LOCKFILE" = "true" ]; then
+            echo "::warning::No package-lock.json or npm-shrinkwrap.json in '${PWD}'; falling back to 'npm install' (allow-no-lockfile=true). This release is NOT reproducible."
+            npm install --no-audit --no-fund
+          else
+            echo "::error::No package-lock.json or npm-shrinkwrap.json in '${PWD}'. Commit a lockfile for reproducible releases, or set allow-no-lockfile: true to opt into 'npm install'."
+            exit 1
+          fi
+
+      - name: Build
+        if: ${{ inputs.run-build }}
+        working-directory: ${{ inputs.package-dir }}
+        env:
+          BUILD_SCRIPT: ${{ inputs.build-script }}
+        shell: bash
+        run: npm run "$BUILD_SCRIPT"
+
+      - name: Test
+        if: ${{ inputs.run-test }}
+        working-directory: ${{ inputs.package-dir }}
+        env:
+          TEST_SCRIPT: ${{ inputs.test-script }}
+        shell: bash
+        run: npm run "$TEST_SCRIPT"
+
+      - name: Verify
+        if: ${{ inputs.verify-script != '' }}
+        working-directory: ${{ inputs.package-dir }}
+        env:
+          VERIFY_SCRIPT: ${{ inputs.verify-script }}
+        shell: bash
+        run: npm run "$VERIFY_SCRIPT"
+
+      - name: Pack
+        id: pack
+        working-directory: ${{ inputs.package-dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Derive the tarball name directly from package.json instead of parsing
+          # npm's stdout. npm names the tarball "<name>-<version>.tgz" with the
+          # leading '@' stripped and '/' replaced by '-'. Parsing npm output is
+          # fragile: banners write to stdout, which breaks both `npm pack --json`
+          # (JSON.parse fails) and `npm pack | tail -n1` (trailing noise). node is
+          # always present after setup-node. The -f check fails loudly if npm's
+          # naming ever diverges from this reconstruction.
+          TARBALL=$(node -p "const p=require('./package.json'); p.name.replace(/^@/,'').replace(/\//g,'-') + '-' + p.version + '.tgz'")
+          # --ignore-scripts: npm pack otherwise runs prepack/prepare/postpack,
+          # which could rewrite files after the visible build/test/verify gates,
+          # so the packed (and attested, and published) bytes would differ from
+          # what was tested. The build is produced explicitly by the run-build
+          # gate, so packing needs no lifecycle scripts; disabling them keeps the
+          # workflow's guarantee that attested bytes == tested bytes.
+          npm pack --ignore-scripts
+          if [ -z "$TARBALL" ] || [ ! -f "$TARBALL" ]; then
+            echo "::error::npm pack did not produce the expected tarball '$TARBALL'"
+            exit 1
+          fi
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "Packed: $TARBALL"
+
+      - name: Attest build provenance
+        if: ${{ inputs.enable-provenance && !inputs.dry-run }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: ${{ inputs.package-dir }}/${{ steps.pack.outputs.tarball }}
+
+      - name: Publish
+        working-directory: ${{ inputs.package-dir }}
+        shell: bash
+        env:
+          # Prefer an explicit registry token (e.g. for registry.npmjs.org);
+          # otherwise fall back to GITHUB_TOKEN, which authenticates GitHub
+          # Packages when the caller grants packages: write.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN || github.token }}
+          NPM_TOKEN_PROVIDED: ${{ secrets.NPM_TOKEN != '' }}
+          REGISTRY_URL: ${{ inputs.registry-url }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          # The fallback GITHUB_TOKEN authenticates GitHub Packages and nothing
+          # else. For any other registry (npmjs.org, JFrog, GitLab, ...) require
+          # an explicit NPM_TOKEN rather than silently shipping a repo token off
+          # to a third party. This applies to dry runs too: `npm publish --dry-run`
+          # is NOT offline — it makes an authenticated packument GET to the target
+          # registry (verified on npm 11.4.2), so without this guard a dry run to a
+          # non-GitHub registry-url would transmit the GITHUB_TOKEN fallback to that
+          # host. setup-node binds the token to the registry-url host, so the leak
+          # would reach whatever registry-url points at.
+          if [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
+            # Anchor the host (not a substring match) so look-alikes such as
+            # https://npm.pkg.github.com.evil.com or ...@evil.com do NOT qualify
+            # for the GITHUB_TOKEN fallback.
+            case "$REGISTRY_URL" in
+              https://npm.pkg.github.com|https://npm.pkg.github.com/*) : ;;  # GitHub Packages: GITHUB_TOKEN is the correct credential
+              *)
+                echo "::error::Publishing to '$REGISTRY_URL' requires the NPM_TOKEN secret; refusing to fall back to GITHUB_TOKEN (it only authenticates GitHub Packages)."
+                exit 1
+                ;;
+            esac
+          fi
+          # Make registry-url authoritative for the upload target. When the
+          # package scope matches `scope`, setup-node's `@scope:registry` mapping
+          # already points at REGISTRY_URL, so --registry is a no-op (verified on
+          # npm 10/11: scope mapping > --registry > publishConfig.registry). But for an
+          # unscoped package — or one whose scope differs from `scope` — there is no
+          # such mapping and package.json publishConfig.registry would otherwise
+          # choose the target; --registry overrides that so the upload always honors
+          # registry-url rather than silently redirecting to publishConfig.
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "DRY RUN — packing and validating only, nothing is uploaded."
+            npm publish "$TARBALL" --registry "$REGISTRY_URL" --dry-run
+          else
+            npm publish "$TARBALL" --registry "$REGISTRY_URL"
+          fi
+
+      - name: Revoke private dependency git config
+        # Runs regardless of earlier failure (always()) so the App token's git
+        # URL-rewrite rules never outlive the job. On GitHub-hosted runners the VM
+        # is ephemeral, but on self-hosted runners ~/.gitconfig persists and would
+        # otherwise leak the token + rewrites into later jobs.
+        if: ${{ always() && inputs.enable-private-deps }}
+        env:
+          GIT_TOKEN: ${{ steps.app-token.outputs.token }}
+        shell: bash
+        run: |
+          git config --global --remove-section \
+            "url.https://x-access-token:${GIT_TOKEN}@github.com/" 2>/dev/null || true
