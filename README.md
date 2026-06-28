@@ -550,7 +550,7 @@ jobs:
 | `test-script` | `test` | npm script to run for tests (must be a key in package.json scripts) |
 | `enable-private-deps` | `false` | Mint a GitHub App token for private-dependency access before `npm ci` |
 | `private-deps-owner` | `praetorian-inc` | GitHub org for private dependency access |
-| `private-deps-repos` | `claude-tool-sdk` | Comma-separated repo names the App token is scoped to |
+| `private-deps-repos` | `""` | Comma-separated repo names the App token is scoped to. **Required** when `enable-private-deps: true` — a blank value would scope the token to every repo the App can access in `private-deps-owner`'s installation |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist for block mode |
@@ -621,6 +621,7 @@ jobs:
 |---|---|---|
 | `install-directory` | `.` | Directory where `npm ci` runs (repo root for workspaces) |
 | `package-dir` | `.` | Directory of the package to build, pack and publish |
+| `allow-no-lockfile` | `false` | Permit `npm install` when no `package-lock.json`/`npm-shrinkwrap.json` is present. Default false: a lockfile is required so the release is reproducible (`npm ci`). A release via `npm install` is NOT reproducible |
 | `node-version` | `22` | Node.js version |
 | `registry-url` | `https://npm.pkg.github.com` | npm registry to publish to |
 | `scope` | `@praetorian-inc` | npm scope to configure auth for (must equal the org login for GitHub Packages) |
@@ -636,7 +637,7 @@ jobs:
 | `dry-run` | `false` | `npm publish --dry-run` (no upload); skips tag check and provenance |
 | `enable-private-deps` | `false` | Mint a GitHub App token for private-dependency access before `npm ci` |
 | `private-deps-owner` | `praetorian-inc` | GitHub org for private dependency access |
-| `private-deps-repos` | `claude-tool-sdk` | Comma-separated repo names the App token is scoped to |
+| `private-deps-repos` | `""` | Comma-separated repo names the App token is scoped to. **Required** when `enable-private-deps: true` — a blank value would scope the token to every repo the App can access in `private-deps-owner`'s installation |
 | `runner` | `ubuntu-24.04` | Runner label |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |

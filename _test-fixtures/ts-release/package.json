@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "build": "mkdir -p dist && cp src/index.js dist/index.js",
-    "test": "node --input-type=module -e \"import('./src/index.js').then(m => { if (m.hello() !== 'ok') process.exit(1) })\""
+    "test": "node --input-type=module -e \"import('./dist/index.js').then(m => { if (m.hello() !== 'ok') process.exit(1) })\""
   },
   "engines": {
     "node": ">=20"

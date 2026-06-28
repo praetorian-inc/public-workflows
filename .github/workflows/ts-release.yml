@@ -187,10 +187,15 @@ on:
         default: "praetorian-inc"
 
       private-deps-repos:
-        description: "Comma-separated repo names the App token is scoped to."
+        description: >
+          Comma-separated repo names the App token is scoped to. No default:
+          required when enable-private-deps is true. A blank value is rejected
+          rather than passed through, because create-github-app-token treats an
+          empty repositories list (with owner set) as "all repositories in the
+          owner's installation" — far broader than intended.
         required: false
         type: string
-        default: "claude-tool-sdk"
+        default: ""
 
       # ── Runner ────────────────────────────────────────────────
       runner:
@@ -296,6 +301,24 @@ jobs:
           # npm publishes via NODE_AUTH_TOKEN (env), not the git-persisted
           # credential, so don't leave a token in .git/config for later steps.
           persist-credentials: false
+
+      - name: Validate private-dependency scope
+        # enable-private-deps mints a GitHub App token scoped to
+        # private-deps-repos. create-github-app-token treats an empty
+        # `repositories` (with `owner` set) as "all repositories in the owner's
+        # installation", so a blank private-deps-repos would silently mint a far
+        # broader token than intended. Fail closed instead of minting it.
+        if: ${{ inputs.enable-private-deps }}
+        env:
+          PRIVATE_DEPS_REPOS: ${{ inputs.private-deps-repos }}
+          PRIVATE_DEPS_OWNER: ${{ inputs.private-deps-owner }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${PRIVATE_DEPS_REPOS//[[:space:]]/}" ]; then
+            echo "::error::enable-private-deps is true but private-deps-repos is empty. Set private-deps-repos to the comma-separated repo names the App token should be scoped to; leaving it empty would scope the token to every repository the App can access in the '${PRIVATE_DEPS_OWNER}' installation."
+            exit 1
+          fi
 
       - name: Generate token for private dependencies
         if: ${{ inputs.enable-private-deps }}
