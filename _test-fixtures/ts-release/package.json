@@ -1,7 +1,7 @@
 {
   "name": "@praetorian-inc/ts-release-test-fixture",
   "version": "0.0.1",
-  "description": "Dependency-free fixture exercised by test-ts-release.yml via a dry-run publish.",
+  "description": "Fixture exercised by test-ts-release.yml via a dry-run publish. Declares one tiny public dependency (ms) so the self-test proves `npm ci` resolves a real public dep through setup-node's default registry config.",
   "license": "UNLICENSED",
   "private": false,
   "publishConfig": {
@@ -9,6 +9,9 @@
     "registry": "https://npm.pkg.github.com"
   },
   "type": "module",
+  "dependencies": {
+    "ms": "2.1.3"
+  },
   "bin": {
     "ts-release-test-fixture": "./dist/index.js"
   },

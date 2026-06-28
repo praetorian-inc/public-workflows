@@ -278,6 +278,18 @@ jobs:
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
           disable-sudo-and-containers: true
 
+      - name: Warn on block egress without allow-list
+        # policy=block with an empty allowed-endpoints list blocks ALL egress —
+        # npm install, the registry publish, and the sigstore attestation calls —
+        # so the run fails closed (no security hole) but with a confusing network
+        # error. Surface the cause early. Local command execution is unaffected by
+        # the egress block, so this warning still prints. Not fatal: a
+        # dependency-free dry run with no provenance legitimately needs no egress.
+        if: ${{ inputs.enable-harden-runner && inputs.harden-runner-policy == 'block' && inputs.harden-runner-allowed-endpoints == '' }}
+        shell: bash
+        run: |
+          echo "::warning title=Harden-Runner egress::harden-runner-policy is 'block' but harden-runner-allowed-endpoints is empty, so all outbound network calls (npm install, registry publish, sigstore attestation) are blocked and the run will likely fail. Pass an allow-list, e.g.: github.com:443 api.github.com:443 objects.githubusercontent.com:443 registry.npmjs.org:443 npm.pkg.github.com:443 fulcio.sigstore.dev:443 rekor.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443"
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -373,8 +385,8 @@ jobs:
           # public deps anonymously instead of leaking the repo token to a third
           # party. (Host-anchored so look-alikes like npm.pkg.github.com.evil.com
           # don't qualify.) An unresolved authToken left in .npmrc is harmless on
-          # npm 11 — it is only sent on an authenticated fetch, which public deps
-          # don't trigger.
+          # npm 10/11 (Node 22 ships npm 10.x) — it is only sent on an
+          # authenticated fetch, which public deps don't trigger.
           if [ "$NPM_TOKEN_PROVIDED" != "true" ]; then
             case "$REGISTRY_URL" in
               https://npm.pkg.github.com|https://npm.pkg.github.com/*) : ;;
@@ -482,7 +494,7 @@ jobs:
           # Make registry-url authoritative for the upload target. When the
           # package scope matches `scope`, setup-node's `@scope:registry` mapping
           # already points at REGISTRY_URL, so --registry is a no-op (verified on
-          # npm 11: scope mapping > --registry > publishConfig.registry). But for an
+          # npm 10/11: scope mapping > --registry > publishConfig.registry). But for an
           # unscoped package — or one whose scope differs from `scope` — there is no
           # such mapping and package.json publishConfig.registry would otherwise
           # choose the target; --registry overrides that so the upload always honors
