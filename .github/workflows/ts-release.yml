@@ -393,13 +393,17 @@ jobs:
               *) unset NODE_AUTH_TOKEN ;;
             esac
           fi
-          if [ -f package-lock.json ]; then
+          # npm ci installs from either npm-shrinkwrap.json or package-lock.json
+          # (shrinkwrap, the publishable lockfile, takes precedence when both
+          # exist). Accept both so a shrinkwrap-only package isn't wrongly forced
+          # down the non-reproducible `npm install` path below.
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
             npm ci
           elif [ "$ALLOW_NO_LOCKFILE" = "true" ]; then
-            echo "::warning::No package-lock.json in '${PWD}'; falling back to 'npm install' (allow-no-lockfile=true). This release is NOT reproducible."
+            echo "::warning::No package-lock.json or npm-shrinkwrap.json in '${PWD}'; falling back to 'npm install' (allow-no-lockfile=true). This release is NOT reproducible."
             npm install --no-audit --no-fund
           else
-            echo "::error::No package-lock.json in '${PWD}'. Commit a lockfile for reproducible releases, or set allow-no-lockfile: true to opt into 'npm install'."
+            echo "::error::No package-lock.json or npm-shrinkwrap.json in '${PWD}'. Commit a lockfile for reproducible releases, or set allow-no-lockfile: true to opt into 'npm install'."
             exit 1
           fi
 

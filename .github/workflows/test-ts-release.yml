@@ -19,6 +19,15 @@ on:
       - ".github/workflows/ts-release.yml"
       - ".github/workflows/test-ts-release.yml"
       - "_test-fixtures/ts-release/**"
+  # Manual trigger for the write-scoped end-to-end dry-run job (see Job 4). It is
+  # deliberately NOT run on pull_request: a local `uses: ./...` resolves to the
+  # PR's own (unreviewed) copy of ts-release.yml, and a same-repo PR's
+  # GITHUB_TOKEN carries the declared write scopes — so auto-running it on PRs
+  # would execute unreviewed code with packages/id-token/attestations: write.
+  # workflow_dispatch requires repo write access to invoke and is never
+  # auto-triggered by opening a PR, so a maintainer can still validate a branch
+  # end-to-end before merge.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -89,8 +98,12 @@ jobs:
             echo "Checking $file..."
             while IFS= read -r line; do
               trimmed="${line#"${line%%[![:space:]]*}"}"  # strip leading whitespace
-              # Skip local references (./.github/workflows/...)
-              echo "$trimmed" | grep -q '\./' && continue
+              # Skip local reusable-workflow references (uses: ./.github/...).
+              # Anchor to the start of the trimmed value so a third-party action
+              # that merely mentions './' in a trailing comment is still
+              # SHA-validated — a bare '\./' match would skip it and let an
+              # unpinned action slip through.
+              echo "$trimmed" | grep -qE '^uses:[[:space:]]+\./' && continue
               if ! echo "$trimmed" | grep -qE '@[a-f0-9]{40}\b'; then
                 echo "  FAIL: not SHA-pinned: $trimmed"
                 FAIL=1
@@ -112,8 +125,9 @@ jobs:
   # branch: asserting that a reusable-workflow *call* fails is not expressible
   # (a `uses:` job cannot set continue-on-error, so its failure can't be caught
   # by a downstream job). So we test the decision logic in isolation, with a
-  # grep that fails if the real guard pattern drifts out of sync. Runs on fork
-  # PRs too (read-only token suffices), unlike the dry-run job below.
+  # grep that fails if the real guard pattern drifts out of sync. Runs on all
+  # PRs (fork and same-repo) with only the read-only token this job needs —
+  # unlike the dry-run job below, which never runs on a PR (push/dispatch only).
   # ──────────────────────────────────────────────────────────────
   registry-fallback-guard:
     name: Registry fallback guard (unit)
@@ -139,8 +153,13 @@ jobs:
           # the Install and Publish steps of ts-release.yml. Fail loudly if the
           # real allow-list pattern changes so this test gets updated with it.
           PATTERN='https://npm.pkg.github.com|https://npm.pkg.github.com/*'
-          if ! grep -qF -- "$PATTERN" .github/workflows/ts-release.yml; then
-            echo "::error::Host-anchor allow-list pattern not found in ts-release.yml; the guard changed — update this unit test to match."
+          # The pattern must appear in BOTH guards — the Install step and the
+          # Publish step. A bare `grep -q` (>=1 match) would still pass if one of
+          # the two guards were deleted, so assert at least two occurrences.
+          # `|| true` keeps `set -e` from aborting on grep's exit 1 when count=0.
+          guard_count=$(grep -cF -- "$PATTERN" .github/workflows/ts-release.yml || true)
+          if [ "$guard_count" -lt 2 ]; then
+            echo "::error::Expected the host-anchor allow-list pattern in BOTH the Install and Publish guards of ts-release.yml (found ${guard_count} occurrence(s)); a guard was removed or the pattern changed — fix ts-release.yml or update this unit test to match."
             exit 1
           fi
 
@@ -191,14 +210,19 @@ jobs:
   # ──────────────────────────────────────────────────────────────
   call-ts-release-dry-run:
     name: Call ts-release (dry run)
-    # Skip on pull requests from forks. This repo is public, so a fork PR gets a
-    # read-only GITHUB_TOKEN regardless of the permissions: block below; relying
-    # on the reusable workflow's write-permission grant on such a run is at best
-    # untested and at worst rejected. Internal branches (same repo) and pushes to
-    # main still exercise the full end-to-end dry run.
+    # SECURITY: only on push (to main, i.e. post-review/merge) or a manual
+    # workflow_dispatch — never on pull_request. `uses: ./...` resolves to the
+    # triggering ref's copy of ts-release.yml, so on a pull_request this would
+    # run the PR's *unreviewed* reusable workflow, and a same-repo PR's
+    # GITHUB_TOKEN carries the packages/id-token/attestations write scopes
+    # granted below — auto-running it on PRs would execute unreviewed code with
+    # write-scoped credentials before review. The static jobs above (yaml-lint,
+    # SHA-pin check, registry-fallback-guard unit) give PR-time assurance with
+    # only contents: read; a maintainer can workflow_dispatch a branch to
+    # validate end-to-end before merge.
     if: >-
       github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/ts-release.yml
     # The called workflow's publish job declares packages/id-token/attestations
     # write (a reusable workflow cannot conditionally gate permissions on inputs).
