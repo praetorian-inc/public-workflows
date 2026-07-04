@@ -323,12 +323,13 @@ jobs:
           RG_SHA256="4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e"
           RG_DIR="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
           TMP="$(mktemp -d)"
-          if curl -fsSL --retry 2 -o "${TMP}/rg.tar.gz" \
+          if curl -fsSL --retry 2 --connect-timeout 5 --max-time 60 -o "${TMP}/rg.tar.gz" \
                "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_DIR}.tar.gz" \
              && echo "${RG_SHA256}  ${TMP}/rg.tar.gz" | sha256sum -c - \
              && tar -xzf "${TMP}/rg.tar.gz" -C "${TMP}" \
              && install -m 0755 "${TMP}/${RG_DIR}/rg" /usr/local/bin/rg; then
-            echo "Installed: $(rg --version | head -1)"
+            RG_BANNER="$(/usr/local/bin/rg --version | head -n 1 || true)"
+            echo "Installed: ${RG_BANNER}"
           else
             echo "::warning::ripgrep install failed — gemini-cli will fall back to the slower JS-RegExp GrepTool"
           fi
