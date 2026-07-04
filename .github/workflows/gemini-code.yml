@@ -312,6 +312,15 @@ jobs:
       # prefixes gemini-cli accepts for a PATH-resolved rg (isTrustedSystemPath in
       # packages/core/src/utils/paths.ts @ v0.45.2 — a binary under the workspace
       # cwd is rejected as untrusted, so it cannot live in the checkout).
+      # Installed as a thin wrapper (rg-pinned + /usr/local/bin/rg adding
+      # `--hidden --glob '!.git'`): RipGrepTool passes NO --hidden (ripGrep.ts
+      # rgArgs @ v0.45.2) and rg skips hidden paths by default, which would
+      # silently drop dot-directories — .github/workflows above all — from
+      # grep_search, a coverage REGRESSION vs the GrepTool fallback whose first
+      # strategy is `git grep --untracked` (searches tracked+untracked dotfiles).
+      # The '!.git' glob is required alongside --hidden because rg's hidden-skip
+      # was the only thing keeping it out of .git — gemini-cli's own exclude
+      # globs (COMMON_DIRECTORY_EXCLUDES) do not list it.
       # Fail-open by design: on download/checksum/install failure we warn and skip,
       # and the review still runs on the slower GrepTool fallback. A checksum
       # mismatch NEVER installs the binary. Egress (block mode): needs github.com:443
@@ -335,7 +344,9 @@ jobs:
                "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_DIR}.tar.gz" \
              && echo "${RG_SHA256}  ${TMP}/rg.tar.gz" | sha256sum -c - \
              && tar -xzf "${TMP}/rg.tar.gz" -C "${TMP}" \
-             && install -m 0755 "${TMP}/${RG_DIR}/rg" /usr/local/bin/rg; then
+             && install -m 0755 "${TMP}/${RG_DIR}/rg" /usr/local/bin/rg-pinned \
+             && printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/rg-pinned --hidden --glob "!.git" "$@"' > "${TMP}/rg-wrapper" \
+             && install -m 0755 "${TMP}/rg-wrapper" /usr/local/bin/rg; then
             RG_BANNER="$(/usr/local/bin/rg --version | head -n 1 || true)"
             echo "Installed: ${RG_BANNER}"
           else
