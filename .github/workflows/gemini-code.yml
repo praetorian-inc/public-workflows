@@ -83,7 +83,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443."
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443 (last two: pinned ripgrep download for grep_search)."
         required: false
         type: string
         default: ""
@@ -300,6 +300,40 @@ jobs:
           rm -f .gemini-review/pr.full.diff
           echo "PR diff: $(wc -c < .gemini-review/pr.diff) bytes across $(wc -l < .gemini-review/changed-files.txt) file(s)"
 
+      # grep_search backend: gemini-cli prefers ripgrep (RipGrepTool) and silently
+      # falls back to a JS-RegExp GrepTool when no `rg` binary is resolvable
+      # ("Ripgrep is not available. Falling back to GrepTool."). The fallback rejects
+      # common patterns the model writes — e.g. inline flags like `(?i)cadence`
+      # (valid in Rust/rg regex, invalid in JS RegExp) — and every failed search
+      # burns a session turn (observed as FatalTurnLimitedError on guard PR #6487).
+      # GitHub-hosted runners don't ship ripgrep, so install a pinned, checksum-
+      # verified static build into /usr/local/bin: runner-writable WITHOUT sudo
+      # (Harden-Runner's disable-sudo stays on) and one of the trusted system
+      # prefixes gemini-cli accepts for a PATH-resolved rg (isTrustedSystemPath in
+      # packages/core/src/utils/paths.ts @ v0.45.2 — a binary under the workspace
+      # cwd is rejected as untrusted, so it cannot live in the checkout).
+      # Fail-open by design: on download/checksum/install failure we warn and skip,
+      # and the review still runs on the slower GrepTool fallback. A checksum
+      # mismatch NEVER installs the binary. Egress (block mode): needs github.com:443
+      # + objects.githubusercontent.com:443 / release-assets.githubusercontent.com:443.
+      - name: Install ripgrep for grep_search (pinned, fail-open)
+        run: |
+          set -euo pipefail
+          RG_VERSION="14.1.1"
+          RG_SHA256="4cf9f2741e6c465ffdb7c26f38056a59e2a2544b51f7cc128ef28337eeae4d8e"
+          RG_DIR="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl"
+          TMP="$(mktemp -d)"
+          if curl -fsSL --retry 2 -o "${TMP}/rg.tar.gz" \
+               "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_DIR}.tar.gz" \
+             && echo "${RG_SHA256}  ${TMP}/rg.tar.gz" | sha256sum -c - \
+             && tar -xzf "${TMP}/rg.tar.gz" -C "${TMP}" \
+             && install -m 0755 "${TMP}/${RG_DIR}/rg" /usr/local/bin/rg; then
+            echo "Installed: $(rg --version | head -1)"
+          else
+            echo "::warning::ripgrep install failed — gemini-cli will fall back to the slower JS-RegExp GrepTool"
+          fi
+          rm -rf "${TMP}"
+
       # Run Gemini CLI as a read-only review agent. No github_token is passed — the
       # agent holds zero credentials. The hardcoded `settings` clamp the tool surface
       # to read-only built-ins; callers cannot widen it (CODEOWNERS / AppSec gate).
@@ -346,6 +380,10 @@ jobs:
           # backstop. (Under the action's non-interactive `--yolo`, gemini-cli also
           # advertises the excluded tools to the model — google-gemini/gemini-cli#5728,
           # #18807, #20469 — so the prompt explicitly tells it not to attempt them.)
+          # A second turn-exhaustion mode (guard PR #6487): grep_search calls that FAIL
+          # also burn turns — the JS GrepTool fallback rejects rg-flavored patterns like
+          # `(?i)foo`. The pinned ripgrep install step above keeps grep_search on the
+          # Rust engine so those searches succeed instead of looping.
           settings: |
             {
               "model": { "maxSessionTurns": 30 },
