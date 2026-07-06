@@ -24,6 +24,20 @@ name: TypeScript Release (Callable)
 # are auditable in the Actions log, and the published artifact is byte-identical
 # to the one that was tested and attested.
 #
+# Deployment environment (OIDC sub-claim note): the optional `environment` input
+# (default "") sets a deployment environment on the publish job. It exists
+# because a repo can customize its Actions OIDC subject claim to include
+# "environment" in include_claim_keys (Settings -> Actions -> General -> OIDC, or
+# `gh api repos/<org>/<repo>/actions/oidc/customization/sub`). In such a repo a
+# job that requests an id-token but runs with NO environment cannot mint an OIDC
+# token: it fails at job preparation with "OIDC error: the claim 'environment'
+# cannot be `null` or empty" before any step runs. The publish job here requests
+# id-token: write for build provenance, so an environment-less publish is fatal
+# in those repos. Passing an environment both satisfies that claim and lets a
+# caller bind required-reviewer approval to the publishing job itself (Settings
+# -> Environments). Callers that leave it "" are unchanged: an empty string
+# means "no environment", exactly as before this input existed.
+#
 # Access: invocable from any repo in the praetorian-inc org.
 #
 # Caller example (tag-push, GitHub Packages, npm workspace member):
@@ -173,6 +187,23 @@ on:
         type: boolean
         default: false
 
+      # ── Deployment environment ────────────────────────────────
+      environment:
+        description: >
+          Deployment environment for the publish job. Default "" runs the job
+          with NO environment — unchanged behavior for every existing caller.
+          Set this when the calling repo has an Actions OIDC sub-claim
+          customization that lists "environment" in include_claim_keys: such a
+          repo cannot mint an OIDC token in an environment-less job, and the
+          publish job requests id-token: write for build provenance, so it would
+          fail at job preparation ("the claim 'environment' cannot be null or
+          empty") before any step runs. Passing an environment satisfies that
+          claim, and it additionally lets a caller bind required-reviewer
+          approval to the publishing job itself (Settings -> Environments).
+        required: false
+        type: string
+        default: ""
+
       # ── Private dependencies (mirrors ts-ci.yml) ──────────────
       enable-private-deps:
         description: "Generate a GitHub App token for private dependency access before npm ci."
@@ -255,6 +286,13 @@ jobs:
   publish:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 20
+
+    # Optional deployment environment. Default "" evaluates to no environment, so
+    # callers that don't set the `environment` input are unaffected. A non-empty
+    # value binds this job to that environment — required for repos whose OIDC
+    # sub-claim customization includes "environment" (see the header), and it also
+    # gates the publish behind any required reviewers on that environment.
+    environment: ${{ inputs.environment }}
 
     # Reusable workflows cannot conditionally gate permissions on inputs.
     # packages: write is only exercised when publishing to GitHub Packages with
