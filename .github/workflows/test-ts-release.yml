@@ -240,3 +240,8 @@ jobs:
       dry-run: true
       enable-provenance: false
       verify-version-matches-tag: false
+      # This repo's OIDC sub-claim customization lists "environment" in
+      # include_claim_keys, so ts-release's publish job (id-token: write) fails
+      # at job preparation when run environment-less. release-dryrun is
+      # reviewer-less; it exists only to satisfy that claim.
+      environment: release-dryrun
