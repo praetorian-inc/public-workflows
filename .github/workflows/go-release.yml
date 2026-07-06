@@ -515,15 +515,22 @@ jobs:
             ${{ inputs.working-directory }}/dist/checksums.txt
 
   # ────────────────────────────────────────────────────────────
-  # Job 3: Cleanup on failure.
+  # Job 3: Cleanup on failure or cancellation.
   #
-  # If the release pipeline fails after creating a tag (auto-tag mode only),
-  # delete the draft release and tag so the next run can retry cleanly.
+  # If the release pipeline fails OR is cancelled after creating a tag
+  # (auto-tag mode only), delete the release and tag so the next run can
+  # retry cleanly. cancelled() matters because failure() is false on a
+  # cancelled run: without it, cancelling a run after resolve-version has
+  # pushed the tag — e.g. while goreleaser waits for environment approval —
+  # leaks a tag with no artifacts. Deleting on cancel matches the existing
+  # failure semantics (a post-publish failure already deletes the published
+  # release for clean retry); tag-push mode is never touched (tag_created
+  # is only 'true' in auto-tag mode).
   # ────────────────────────────────────────────────────────────
   cleanup-on-failure:
     needs: [resolve-version, goreleaser]
     if: >
-      failure() &&
+      (failure() || cancelled()) &&
       needs.resolve-version.outputs.tag_created == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
