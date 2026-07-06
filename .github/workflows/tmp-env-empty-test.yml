@@ -2,35 +2,39 @@
 name: "TEMP: empty-environment semantics probe"
 
 # THROWAWAY — DELETE BEFORE MERGE. Verifies the one empirical assumption behind
-# the ts-release.yml `environment` input: that `environment: ${{ inputs.X }}`
-# with an empty-string value means "no environment" and does NOT break job
+# the ts-release.yml `environment` input: that an `environment:` whose expression
+# evaluates to the empty string means "no environment" and does NOT break job
 # scheduling. If empty-string were rejected, adding the input would break every
-# existing ts-release caller (they all leave it ""). Neither job requests
-# id-token: write — public-workflows itself has an OIDC sub-claim customization
-# that includes "environment", so an id-token job with no environment would fail
-# for that unrelated reason; this probe isolates empty-string semantics only.
+# existing ts-release caller (they all leave it "", i.e. inputs.environment -> "").
+# `${{ '' }}` is the exact value `${{ inputs.environment }}` produces when unset.
+#
+# Uses a push trigger (not workflow_dispatch) because a workflow that has never
+# been on the default branch cannot be dispatched — a push-triggered workflow
+# runs from its own branch. Neither job requests id-token: write: public-workflows
+# itself has an OIDC sub-claim customization that includes "environment", so an
+# id-token job with no environment would fail for that unrelated reason. This
+# probe isolates empty-string environment semantics only.
 
 on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: "Environment string (leave empty to test empty-string semantics)."
-        required: false
-        type: string
-        default: ""
+  push:
+    branches:
+      - feat/ts-release-environment-input
+    paths:
+      - .github/workflows/tmp-env-empty-test.yml
 
 permissions: {}
 
 jobs:
   empty-env:
-    # Empty string by default — this is the case existing callers hit.
-    environment: ${{ inputs.environment }}
+    # Expression evaluates to the empty string — identical to what an unset
+    # `inputs.environment` yields. This is the case every existing caller hits.
+    environment: ${{ '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Report
         shell: bash
-        run: echo "empty-env job scheduled and ran; inputs.environment='${{ inputs.environment }}'"
+        run: echo "empty-env job scheduled and ran with an empty-string environment expression"
 
   named-env:
     # Control: a concrete environment that GitHub auto-creates (unprotected).
