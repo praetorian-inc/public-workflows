@@ -11,6 +11,21 @@ name: Go Release (Callable)
 #                            this workflow calculates the next semver tag,
 #                            creates it, then runs GoReleaser against it.
 #
+# Deployment environment (OIDC sub-claim note): the optional `environment` input
+# (default "") sets a deployment environment on the goreleaser job. It exists
+# because a repo can customize its Actions OIDC subject claim to include
+# "environment" in include_claim_keys (Settings -> Actions -> General -> OIDC, or
+# `gh api repos/<org>/<repo>/actions/oidc/customization/sub`). In such a repo a
+# job that requests an id-token but runs with NO environment cannot mint an OIDC
+# token: it fails at job preparation with "OIDC error: the claim 'environment'
+# cannot be `null` or empty" before any step runs. The goreleaser job here
+# requests id-token: write for cosign keyless signing and build provenance
+# attestation, so an environment-less release is fatal in those repos. Passing
+# an environment both satisfies that claim and lets a caller bind
+# required-reviewer approval to the release job itself (Settings ->
+# Environments). Callers that leave it "" are unchanged: an empty string means
+# "no environment", exactly as before this input existed.
+#
 # Access: invocable from any repo in the praetorian-inc org.
 #
 # Caller examples:
@@ -153,6 +168,27 @@ on:
         required: false
         type: string
         default: "go.mod"
+
+      # ── Deployment environment ────────────────────────────────
+      environment:
+        description: >
+          Deployment environment for the goreleaser job. Default "" runs the job
+          with NO environment — unchanged behavior for every existing caller.
+          Set this when the calling repo has an Actions OIDC sub-claim
+          customization that lists "environment" in include_claim_keys: such a
+          repo cannot mint an OIDC token in an environment-less job, and the
+          goreleaser job requests id-token: write (cosign keyless signing +
+          provenance attestation), so it would fail at job preparation ("the
+          claim 'environment' cannot be null or empty") before any step runs.
+          Passing an environment satisfies that claim, and it additionally lets
+          a caller bind required-reviewer approval to the release job itself
+          (Settings -> Environments). Caveat for auto-tag-from-main callers:
+          that mode releases on every merge to main, so an environment with
+          required reviewers will pause every such release for manual approval —
+          leave the environment reviewer-less there unless that gate is intended.
+        required: false
+        type: string
+        default: ""
 
       # ── Harden-Runner ────────────────────────────────────────
       enable-harden-runner:
@@ -387,6 +423,13 @@ jobs:
     if: needs.resolve-version.outputs.should_release == 'true'
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 30
+
+    # Optional deployment environment. Default "" evaluates to no environment, so
+    # callers that don't set the `environment` input are unaffected. A non-empty
+    # value binds this job to that environment — required for repos whose OIDC
+    # sub-claim customization includes "environment" (see the header), and it also
+    # gates the release behind any required reviewers on that environment.
+    environment: ${{ inputs.environment }}
 
     # Reusable workflows cannot conditionally gate permissions on inputs.
     # packages: write is only exercised when publish-container=true.
