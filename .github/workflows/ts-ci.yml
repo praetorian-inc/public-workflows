@@ -273,7 +273,10 @@ jobs:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          # Run-scoped (github.run_id): the cache is produced+consumed within one
+          # run, so a run-unique key avoids cross-PR key collisions and zombie
+          # reservations left by cancelled runs. See PR description for detail.
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ github.run_id }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
 
   typecheck:
     name: Type check
@@ -308,13 +311,18 @@ jobs:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          # Run-scoped (github.run_id): the cache is produced+consumed within one
+          # run, so a run-unique key avoids cross-PR key collisions and zombie
+          # reservations left by cancelled runs. See PR description for detail.
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ github.run_id }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
 
       - name: Type check
         working-directory: ${{ inputs.working-directory }}
         run: |
           if [ -f tsconfig.json ]; then
-            npx tsc --noEmit
+            # --no-install: use the repo's own typescript; never silently fetch the
+            # unrelated "tsc" npm package if a dep is missing (masks the real cause).
+            npx --no-install tsc --noEmit
           else
             echo "No tsconfig.json found — skipping type check"
           fi
@@ -352,7 +360,10 @@ jobs:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          # Run-scoped (github.run_id): the cache is produced+consumed within one
+          # run, so a run-unique key avoids cross-PR key collisions and zombie
+          # reservations left by cancelled runs. See PR description for detail.
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ github.run_id }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
 
       - name: Lint
         working-directory: ${{ inputs.working-directory }}
@@ -433,16 +444,16 @@ jobs:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          # Run-scoped (github.run_id): the cache is produced+consumed within one
+          # run, so a run-unique key avoids cross-PR key collisions and zombie
+          # reservations left by cancelled runs. See PR description for detail.
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ github.run_id }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
-        run: |
-          if npm run "$TEST_SCRIPT" --if-present 2>/dev/null; then
-            echo "Tests passed"
-          else
-            echo "::error::Test script '$TEST_SCRIPT' failed or not found"
-            exit 1
-          fi
+        # No 2>/dev/null: surface the real test-runner error instead of a generic
+        # "failed or not found". --if-present keeps a missing script a no-op success;
+        # a present script that fails still fails the job.
+        run: npm run "$TEST_SCRIPT" --if-present
