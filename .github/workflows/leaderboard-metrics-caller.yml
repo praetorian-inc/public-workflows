@@ -1,0 +1,18 @@
+# Self-caller: opts THIS repo's merged PRs into the org leaderboard by
+# calling the reusable workflow that lives alongside it. Named
+# leaderboard-metrics-caller.yml because leaderboard-metrics.yml here IS the
+# reusable — same path can't host both.
+name: Leaderboard Metrics Caller
+
+on:
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  metrics:
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main
