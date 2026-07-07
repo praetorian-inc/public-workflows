@@ -1,5 +1,5 @@
 name: Collect Leaderboard Metrics
-description: Collect PR metrics for leaderboard scoring and write payload to /tmp/payload.json
+description: Collect PR metrics for leaderboard scoring and write payload to $RUNNER_TEMP/payload.json
 
 inputs:
   github-token:
@@ -79,7 +79,7 @@ runs:
           echo "has_payload=false" >> "$GITHUB_OUTPUT"
           exit 1
         fi
-        if [ -f /tmp/payload.json ]; then
+        if [ -f "${RUNNER_TEMP:-/tmp}/payload.json" ]; then
           echo "has_payload=true" >> "$GITHUB_OUTPUT"
         else
           echo "::warning::No payload produced (author email not mapped). Skipping SQS send."

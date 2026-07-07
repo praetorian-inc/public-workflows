@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect PR metrics for the leaderboard and write the Lambda payload to /tmp/payload.json.
+"""Collect PR metrics for the leaderboard and write the Lambda payload to $RUNNER_TEMP/payload.json.
 
 Inputs come from environment variables set by the GitHub Actions workflow.
 The only external dependency is `gh` (GitHub CLI), pre-installed on ubuntu-latest.
@@ -7,14 +7,13 @@ The only external dependency is `gh` (GitHub CLI), pre-installed on ubuntu-lates
 
 import json
 import os
-import random
 import re
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import PurePosixPath
 
-OUTPUT_PATH = "/tmp/payload.json"
+OUTPUT_PATH = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "payload.json")
 
 
 def env(name: str, default: str = "") -> str:
@@ -61,7 +60,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 def fetch_commit_file_stats(base_sha: str, head_sha: str) -> dict[str, list[tuple[int, int, str]]]:
     """Return {sha: [(adds, dels, filepath), ...]} via a single git-log call."""
     result = subprocess.run(
-        ["git", "log", "--numstat", "--format=%H", f"{base_sha}...{head_sha}"],
+        ["git", "log", "--numstat", "--no-renames", "--format=%H", f"{base_sha}...{head_sha}"],
         capture_output=True, text=True,
     )
     stats: dict[str, list[tuple[int, int, str]]] = {}
@@ -93,7 +92,7 @@ def determine_authors(
     commit_stats: dict[str, list[tuple[int, int, str]]],
     email_map: dict[str, str],
 ) -> tuple[str | None, list[str], list[dict]]:
-    """Pick primary author by most lines; others are co-authors. Ties broken randomly.
+    """Pick primary author by most lines; others are co-authors. Ties broken lexicographically.
 
     Returns (primary_email, co_author_emails, author_stats_list).
     author_stats_list has per-author additions/deletions for proportional scoring.
@@ -121,7 +120,7 @@ def determine_authors(
     author_stats.sort(key=lambda x: -x[1])
     max_lines = author_stats[0][1]
     tied = [email for email, lines, _, _ in author_stats if lines == max_lines]
-    primary = random.choice(tied)
+    primary = min(tied)
     co_authors = [email for email, _, _, _ in author_stats if email != primary]
     stats_list = [
         {"email": email, "additions": adds, "deletions": dels}
@@ -138,11 +137,13 @@ def collect_reviewers(repo: str, pr_number: str, email_map: dict[str, str]) -> l
     result = subprocess.run(
         [
             "gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews",
-            "--jq", '[.[] | select(.state=="APPROVED" or .state=="COMMENTED" or .state=="CHANGES_REQUESTED") | .user.login | select(endswith("[bot]") | not)] | unique | .[]',
+            "--paginate",
+            "--jq", '[.[] | select(.state=="APPROVED" or .state=="COMMENTED" or .state=="CHANGES_REQUESTED") | select(.user != null) | .user.login | select(endswith("[bot]") | not)] | unique | .[]',
         ],
         capture_output=True, text=True, check=True,
     )
-    logins = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    # --paginate applies the jq filter per page, so dedupe across pages here.
+    logins = list(dict.fromkeys(l.strip() for l in result.stdout.strip().splitlines() if l.strip()))
 
     pr_author_login = env("PR_AUTHOR")
     emails = []
@@ -256,6 +257,11 @@ def build_payload(
         pr_commits = fetch_pr_commits(repo, pr_number)
     if commit_stats is None:
         commit_stats = fetch_commit_file_stats(base_sha, head_sha)
+        if pr_commits and not commit_stats:
+            gh_warning(
+                f"git log produced no stats for {base_sha}...{head_sha} "
+                "(shallow or missing checkout?); falling back to PR-opener attribution"
+            )
 
     primary, co_authors, author_stats = determine_authors(pr_commits, commit_stats, email_map)
 
@@ -292,6 +298,13 @@ def build_payload(
 
 
 def main() -> None:
+    # Remove any leftover payload so the wrapper's existence check can never
+    # report a stale file from a previous invocation.
+    try:
+        os.remove(OUTPUT_PATH)
+    except FileNotFoundError:
+        pass
+
     payload = build_payload()
     if payload is None:
         sys.exit(0)
