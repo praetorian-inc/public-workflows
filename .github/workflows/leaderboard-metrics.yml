@@ -144,14 +144,17 @@ jobs:
         if: steps.collect.outputs.has-payload == 'true'
         env:
           QUEUE_URL: ${{ vars.LEADERBOARD_METRICS_QUEUE_URL }}
+        # Runs under bash -e: an aws CLI failure aborts the step with its
+        # stderr in the job log. The jq guard below covers only the exit-0
+        # no-MessageId edge; file:// sidesteps ARG_MAX on huge payloads.
         run: |
           aws sqs send-message \
             --queue-url "$QUEUE_URL" \
-            --message-body "$(cat "$RUNNER_TEMP/payload.json")" \
+            --message-body "file://$RUNNER_TEMP/payload.json" \
             --output json > "$RUNNER_TEMP/sqs-response.json"
 
-          if ! jq -e '.MessageId' "$RUNNER_TEMP/sqs-response.json" > /dev/null 2>&1; then
-            echo "::error::SQS send failed: $(cat "$RUNNER_TEMP/sqs-response.json")"
+          if ! message_id=$(jq -re '.MessageId' "$RUNNER_TEMP/sqs-response.json"); then
+            echo "::error::SQS response missing MessageId: $(cat "$RUNNER_TEMP/sqs-response.json")"
             exit 1
           fi
-          echo "Metrics queued: $(jq -r '.MessageId' "$RUNNER_TEMP/sqs-response.json")"
+          echo "Metrics queued: $message_id"
