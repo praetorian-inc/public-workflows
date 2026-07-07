@@ -9,4 +9,8 @@ describe('add', () => {
   it('handles negative numbers', () => {
     expect(add(-1, 1)).toBe(0);
   });
+
+  it('handles zero', () => {
+    expect(add(0, 0)).toBe(0);
+  });
 });
