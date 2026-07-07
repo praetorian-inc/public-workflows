@@ -15,6 +15,19 @@
 # (repo ruleset "protect-reusable-workflows"), and the trust condition accepts
 # only THIS path at refs/heads/main.
 #
+# ⚠⚠ PHASE-2 IAM TRUST — MUST retain a caller-org anchor. `job_workflow_ref`
+# names the CALLED (this) workflow and is IDENTICAL no matter who calls it, so
+# ANY GitHub org can invoke this PUBLIC reusable and mint a token bearing this
+# job_workflow_ref. `sub`/`repository`/`repository_owner`, by contrast, name
+# the CALLER. Therefore the trust `sub` condition MUST keep the caller-org
+# wildcard AND-ed with the path — canonical form (GitHub's own recipe):
+#   repo:praetorian-inc/*:environment:leaderboard:job_workflow_ref:\
+#     praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@refs/heads/main
+# NEVER gate on job_workflow_ref + environment ALONE — that lets an external
+# org set vars.LEADERBOARD_METRICS_ROLE_ARN to our role, call this reusable,
+# and assume it. The job-level `github.repository_owner` guard below is the
+# defense-in-depth second layer; the trust `sub` anchor is the real boundary.
+#
 # Caller template (drop in .github/workflows/leaderboard-metrics.yml):
 #
 #   name: Leaderboard Metrics
@@ -73,7 +86,13 @@ env:
 
 jobs:
   submit-metrics:
-    if: github.event.pull_request.merged == true
+    # repository_owner names the CALLER (see header): a non-praetorian org that
+    # calls this PUBLIC reusable is skipped before any id-token / AWS step runs.
+    # Defense-in-depth under the Phase-2 IAM trust caller-org anchor, not a
+    # substitute for it.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.repository_owner == 'praetorian-inc'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: leaderboard
