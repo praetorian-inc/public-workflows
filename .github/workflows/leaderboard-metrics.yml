@@ -130,9 +130,11 @@ jobs:
       #                                      run-actions-3-azure-eastus.…)
       #   sts.us-east-2.amazonaws.com       (AssumeRoleWithWebIdentity)
       #   sqs.us-east-2.amazonaws.com       (metrics send)
-      # codeload/objects.githubusercontent.com never appeared in audit (action
-      # tarballs download during job set-up, before step monitoring starts) but
-      # are GitHub-owned and kept for robustness. Runner-infra endpoints
+      # codeload/objects/release-assets.githubusercontent.com never appeared
+      # in audit (action tarballs download during job set-up, before step
+      # monitoring starts) but are GitHub-owned read-only CDNs — kept for
+      # robustness; api.github.com is the only real bidirectional channel and
+      # is required regardless. Runner-infra endpoints
       # (results-receiver, log-upload blob storage) need no entry — proven by
       # changelog-scan.yml, which runs in block mode without them. If a future
       # run fails on a blocked endpoint, the harden-runner step summary names
@@ -148,10 +150,14 @@ jobs:
             api.github.com:443
             codeload.github.com:443
             objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
             *.actions.githubusercontent.com:443
             sts.us-east-2.amazonaws.com:443
             sqs.us-east-2.amazonaws.com:443
-          disable-sudo: true
+          # No step here needs sudo or containers, and a spawned container
+          # would re-enter an unrestricted network namespace — close that
+          # egress-bypass path too (same posture as changelog-scan.yml).
+          disable-sudo-and-containers: true
 
       # Check out the CALLER repo's BASE ref (pull_request_target semantics) —
       # PR head code is never executed; the head SHA is fetched below as diff
