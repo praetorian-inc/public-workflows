@@ -282,7 +282,12 @@ jobs:
       # symlinks, which would leave node_modules/.bin/* non-executable (vitest et
       # al. fail with "Permission denied"). tar round-trips perms and symlinks.
       - name: Archive node_modules
-        run: tar -cf "${{ runner.temp }}/node-modules.tar" -C "${{ inputs.working-directory }}" node_modules
+        env:
+          # Passed via env (not inline ${{ }}) so caller-controlled inputs can't
+          # inject into the shell — matches the repo's TEST_SCRIPT pattern.
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -cf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY" node_modules
 
       - name: Upload node_modules for downstream jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -328,7 +333,10 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Extract node_modules
-        run: tar -xf "${{ runner.temp }}/node-modules.tar" -C "${{ inputs.working-directory }}"
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -xf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY"
 
       - name: Type check
         working-directory: ${{ inputs.working-directory }}
@@ -373,7 +381,10 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Extract node_modules
-        run: tar -xf "${{ runner.temp }}/node-modules.tar" -C "${{ inputs.working-directory }}"
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -xf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY"
 
       - name: Lint
         working-directory: ${{ inputs.working-directory }}
@@ -455,7 +466,10 @@ jobs:
           path: ${{ runner.temp }}
 
       - name: Extract node_modules
-        run: tar -xf "${{ runner.temp }}/node-modules.tar" -C "${{ inputs.working-directory }}"
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -xf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY"
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}
