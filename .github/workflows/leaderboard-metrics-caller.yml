@@ -1,0 +1,21 @@
+# Self-caller: opts THIS repo's merged PRs into the org leaderboard by
+# calling the reusable workflow that lives alongside it. Named
+# leaderboard-metrics-caller.yml because leaderboard-metrics.yml here IS the
+# reusable — same path can't host both.
+name: Leaderboard Metrics Caller
+
+on:
+  # zizmor: ignore[dangerous-triggers]  # merge-event metadata only: no PR code checkout, read-only perms; reusable gates on merged == true internally
+  pull_request_target:
+    types: [closed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  metrics:
+    # @main is required by the AWS IAM trust condition (job_workflow_ref ...@refs/heads/main);
+    # SHA-pinning breaks OIDC until the coordinated pin+IAM rotation (ENG-4163 Phase 2).
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main # zizmor: ignore[unpinned-uses] IAM trust keys on @refs/heads/main
