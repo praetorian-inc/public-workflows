@@ -562,15 +562,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Delete the partial release only if one exists. A missing release
-          # is a clean no-op; a real deletion failure fails the step loudly.
-          if gh release view -- "$VERSION" >/dev/null 2>&1; then
-            echo "Deleting partial release $VERSION"
-            gh release delete --yes -- "$VERSION"
-          else
-            echo "No release found for $VERSION - nothing to delete."
-          fi
-
+          # Emit the orphan-tag report FIRST: it is about the tag, which is true
+          # regardless of the release-deletion outcome, so it must appear even
+          # when the gh API check below hard-fails.
           echo "::warning title=Orphan version tag $VERSION::The release failed after tag $VERSION was pushed. The tag is left in place by design: version tags are immutable (the org ruleset blocks deletion). To ship $VERSION, use 'Re-run failed jobs' on this run; otherwise the next merge to main auto-bumps past it."
 
           {
@@ -587,3 +581,21 @@ jobs:
             echo "2. **Abandon it** — do nothing; the next merge to main auto-bumps past"
             echo "   \`$VERSION\`."
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # Delete the partial release only if one exists. Distinguish a
+          # genuinely absent release (clean no-op) from any other gh failure
+          # (auth, rate limit, network), which must fail the step loudly —
+          # otherwise a partial release could silently stay published.
+          set +e
+          VIEW_ERR=$(gh release view -- "$VERSION" 2>&1 >/dev/null)
+          VIEW_RC=$?
+          set -e
+          if [ "$VIEW_RC" -eq 0 ]; then
+            echo "Deleting partial release $VERSION"
+            gh release delete --yes -- "$VERSION"
+          elif printf '%s' "$VIEW_ERR" | grep -qi 'release not found'; then
+            echo "No release found for $VERSION - nothing to delete."
+          else
+            echo "::error title=Release cleanup failed::Could not determine whether a release exists for $VERSION: $VIEW_ERR"
+            exit 1
+          fi
