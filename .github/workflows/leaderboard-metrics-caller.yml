@@ -5,6 +5,7 @@
 name: Leaderboard Metrics Caller
 
 on:
+  # zizmor: ignore[dangerous-triggers]  # merge-event metadata only: no PR code checkout, read-only perms; reusable gates on merged == true internally
   pull_request_target:
     types: [closed]
 
@@ -15,4 +16,6 @@ permissions:
 
 jobs:
   metrics:
-    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main
+    # @main is required by the AWS IAM trust condition (job_workflow_ref ...@refs/heads/main);
+    # SHA-pinning breaks OIDC until the coordinated pin+IAM rotation (ENG-4163 Phase 2).
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main # zizmor: ignore[unpinned-uses] IAM trust keys on @refs/heads/main
