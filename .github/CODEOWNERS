@@ -16,6 +16,12 @@
 # pwn-request) can't land unreviewed. Specific reviewers below add finer rationale.
 /.github/workflows/                         @praetorian-inc/security-engineering @nsportsman
 
+# Composite actions execute inside caller jobs with the caller's token and
+# OIDC identity (collect-metrics runs in every leaderboard caller's privileged
+# pull_request_target context, one step away from `id-token: write`). Same
+# review bar as the workflows that invoke them.
+/.github/actions/                           @praetorian-inc/security-engineering @nsportsman
+
 # Claude-code.yml reviews content from PRs (including CLAUDE.md, PR bodies, comments)
 # through Claude with a hardcoded, non-configurable tool allowlist. Any change to the
 # allowlist, trigger gates, or Claude invocation requires Security Engineering review

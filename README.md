@@ -864,6 +864,43 @@ jobs:
 
 No secrets required — uses the auto-granted `GITHUB_TOKEN`.
 
+### `leaderboard-metrics.yml` — Org leaderboard PR metrics (OIDC → SQS)
+
+Collects merged-PR metrics (author, additions/deletions, changed files, capability attribution) and sends them to the Guard leaderboard SQS queue via OIDC federation — no static AWS credentials. Runs on `pull_request_target: [closed]` in the caller and internally gates on `merged == true`; the caller checkout is the **base** ref, and the PR head SHA is fetched as diff *data* only, never executed. Hosted here (public) because GitHub forbids public repos from calling reusable workflows in internal/private repos — this is the only host visibility that serves the org's public, internal, and private repos alike.
+
+**Minimal caller** (drop this in `.github/workflows/leaderboard-metrics.yml`):
+
+```yaml
+name: Leaderboard Metrics
+on:
+  pull_request_target:
+    types: [closed]
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+jobs:
+  metrics:
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main  # see pinning exception below
+    with:
+      capability_map: '[]'
+```
+
+**⚠ Pinned `@main` by design — the one exception to this repo's SHA-pinning policy.** The AWS IAM trust for the metrics role anchors on the OIDC `job_workflow_ref` claim (`.../leaderboard-metrics.yml@refs/heads/main`); a caller pinned `@<sha>` presents `job_workflow_ref: ...@<sha>`, fails the trust match, and metrics silently stop. Compensating controls: this workflow and its composite action are CODEOWNERS-gated to Security Engineering, `main` requires code-owner review (repo ruleset `protect-reusable-workflows`), and the trust condition accepts only this path at `refs/heads/main`. See "Pinning requirements" below.
+
+**Caller one-time setup:**
+
+- Create a `leaderboard` GitHub environment (no protection rules needed).
+- If the repo carries the Actions OIDC sub-claim customization (`include_claim_keys: [job_workflow_ref, environment]`), every **other** job requesting `id-token: write` must also run in an environment or it fails at job preparation — see `go-release.yml`'s `environment` input.
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `capability_map` | `[]` | JSON array mapping changed paths → capability names for FP-impact attribution. `{"path": "dir/", "name": "cap"}` (fixed name), `{"path": "dir/", "depth": N}` (name from path depth), `{"path": "dir/", "filename": true}` (name from file stem), `{"path": ".", "name": "repo"}` (whole repo). |
+
+No secrets required — OIDC federation (`vars.LEADERBOARD_METRICS_ROLE_ARN`) + org-level vars (`ENGINEER_EMAIL_MAP`, `LEADERBOARD_METRICS_QUEUE_URL`).
+
 ### Internal building blocks (not called directly by consumer repos)
 
 These reusables exist to be composed by the workflows above; consumer repos don't call them directly:
@@ -884,6 +921,8 @@ uses: praetorian-inc/public-workflows/.github/workflows/go-ci.yml@v1
 ```
 
 Use [ratchet](https://github.com/sethvargo/ratchet) to auto-pin.
+
+**Sole exception: `leaderboard-metrics.yml` is called `@main`.** Its AWS IAM trust anchors on the OIDC `job_workflow_ref` claim at `refs/heads/main`; a SHA-pinned caller presents a different claim and silently loses the ability to assume the metrics role. The mutable-ref risk is compensated by the CODEOWNERS gate (Security Engineering owns `/.github/workflows/` and `/.github/actions/`) and the `protect-reusable-workflows` ruleset requiring code-owner review on `main` — a malicious change cannot reach `refs/heads/main` unreviewed, which is the only ref the trust accepts.
 
 ## Contributing
 
