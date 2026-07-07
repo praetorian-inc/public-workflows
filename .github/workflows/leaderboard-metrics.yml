@@ -15,18 +15,36 @@
 # (repo ruleset "protect-reusable-workflows"), and the trust condition accepts
 # only THIS path at refs/heads/main.
 #
-# ⚠⚠ PHASE-2 IAM TRUST — MUST retain a caller-org anchor. `job_workflow_ref`
-# names the CALLED (this) workflow and is IDENTICAL no matter who calls it, so
-# ANY GitHub org can invoke this PUBLIC reusable and mint a token bearing this
-# job_workflow_ref. `sub`/`repository`/`repository_owner`, by contrast, name
-# the CALLER. Therefore the trust `sub` condition MUST keep the caller-org
-# wildcard AND-ed with the path — canonical form (GitHub's own recipe):
-#   repo:praetorian-inc/*:environment:leaderboard:job_workflow_ref:\
-#     praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@refs/heads/main
-# NEVER gate on job_workflow_ref + environment ALONE — that lets an external
-# org set vars.LEADERBOARD_METRICS_ROLE_ARN to our role, call this reusable,
-# and assume it. The job-level `github.repository_owner` guard below is the
-# defense-in-depth second layer; the trust `sub` anchor is the real boundary.
+# ⚠⚠ CALLER-ORG BOUNDARY — currently the job-level `github.repository_owner`
+# guard below, NOT the IAM trust. `job_workflow_ref` names the CALLED (this)
+# workflow and is IDENTICAL no matter who calls it, and with the callers' OIDC
+# sub customization (include_claim_keys: [job_workflow_ref, environment]) the
+# emitted `sub` carries NO caller identity at all — verified 2026-07-07 by
+# decoding a live token (an earlier revision of this header claimed a
+# `repo:praetorian-inc/*`-prefixed sub; that never matches under this
+# customization). An IAM-level anchor on other claims does NOT work either:
+# AWS maps only `sub`/`aud` into the condition context for this provider — a
+# trust condition on `token.actions.githubusercontent.com:repository_owner`
+# DENIES a token that provably carries that claim (A/B-tested 2026-07-07 with
+# IAM propagation control). So the prod trust pins the exact customized sub
+#   job_workflow_ref:<this path>@refs/heads/main:environment:leaderboard
+# and the `if:` guard below is the PRIMARY caller-org boundary: an external
+# org calling this PUBLIC reusable is skipped before the id-token step and
+# never mints a token bearing this job_workflow_ref. Do NOT weaken or remove
+# that guard — regressing it would let any org (with their own matching sub
+# customization + a `leaderboard` environment) assume the metrics role.
+# Compensating controls: this file is CODEOWNERS-gated to Security
+# Engineering and main enforces code-owner review (ruleset
+# "protect-reusable-workflows"). Blast radius if all layers fail:
+# sqs:SendMessage to the metrics queue (forged leaderboard data) — the role
+# has no other permissions.
+#
+# Phase-2 hardening (tracked in Linear): add `repo` (or `repository_owner`)
+# to every caller's include_claim_keys so the sub itself carries caller
+# identity, then pin the trust to the new byte-exact layout (claim order in
+# the sub follows include_claim_keys order). Requires a coordinated ~31-repo
+# customization change + trust update, plus an inventory of other IAM trusts
+# keyed on those repos' current customized subs (they break until updated).
 #
 # Caller template (drop in .github/workflows/leaderboard-metrics.yml):
 #
@@ -88,8 +106,8 @@ jobs:
   submit-metrics:
     # repository_owner names the CALLER (see header): a non-praetorian org that
     # calls this PUBLIC reusable is skipped before any id-token / AWS step runs.
-    # Defense-in-depth under the Phase-2 IAM trust caller-org anchor, not a
-    # substitute for it.
+    # This is the PRIMARY caller-org boundary — the IAM trust sub carries no
+    # caller identity (see header). Do not weaken or remove.
     if: >-
       github.event.pull_request.merged == true &&
       github.repository_owner == 'praetorian-inc'
