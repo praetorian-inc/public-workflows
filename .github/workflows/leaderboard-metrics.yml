@@ -1,0 +1,179 @@
+# Reusable workflow for leaderboard metrics collection.
+#
+# Hosted in public-workflows (a PUBLIC repo) so that public, internal, and
+# private praetorian-inc repos can all call it — GitHub forbids public repos
+# from calling reusable workflows hosted in internal/private repos, which is
+# why this moved here from praetorian-inc/.github (internal).
+#
+# ⚠ Callers reference this workflow @main — a DOCUMENTED EXCEPTION to this
+# repo's SHA-pinning policy (see README "Pinning requirements"). The AWS IAM
+# trust for the metrics role anchors on the OIDC `job_workflow_ref` claim
+# `praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@refs/heads/main`.
+# A caller pinned to @<sha> presents `job_workflow_ref: ...@<sha>`, fails the
+# trust match, and metrics silently stop. Compensating controls: this file is
+# CODEOWNERS-gated to Security Engineering, main requires code-owner review
+# (repo ruleset "protect-reusable-workflows"), and the trust condition accepts
+# only THIS path at refs/heads/main.
+#
+# ⚠⚠ PHASE-2 IAM TRUST — MUST retain a caller-org anchor. `job_workflow_ref`
+# names the CALLED (this) workflow and is IDENTICAL no matter who calls it, so
+# ANY GitHub org can invoke this PUBLIC reusable and mint a token bearing this
+# job_workflow_ref. `sub`/`repository`/`repository_owner`, by contrast, name
+# the CALLER. Therefore the trust `sub` condition MUST keep the caller-org
+# wildcard AND-ed with the path — canonical form (GitHub's own recipe):
+#   repo:praetorian-inc/*:environment:leaderboard:job_workflow_ref:\
+#     praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@refs/heads/main
+# NEVER gate on job_workflow_ref + environment ALONE — that lets an external
+# org set vars.LEADERBOARD_METRICS_ROLE_ARN to our role, call this reusable,
+# and assume it. The job-level `github.repository_owner` guard below is the
+# defense-in-depth second layer; the trust `sub` anchor is the real boundary.
+#
+# Caller template (drop in .github/workflows/leaderboard-metrics.yml):
+#
+#   name: Leaderboard Metrics
+#   on:
+#     pull_request_target:
+#       types: [closed]
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#     id-token: write
+#   jobs:
+#     metrics:
+#       uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main
+#       with:
+#         capability_map: '[]'
+#
+# Caller repo one-time setup:
+#   - A "leaderboard" GitHub environment (no protection rules needed).
+#   - If the repo has the Actions OIDC sub-claim customization
+#     (include_claim_keys: [job_workflow_ref, environment]), every OTHER job in
+#     the repo that requests `id-token: write` must ALSO run in an environment,
+#     or it fails at job preparation with "the claim 'environment' cannot be
+#     null or empty" before any step runs. See go-release.yml's `environment`
+#     input for the release-job fix.
+#
+# Org-level variables (visibility: all repositories):
+#   ENGINEER_EMAIL_MAP               — JSON: GitHub login → @praetorian.com email
+#   LEADERBOARD_METRICS_ROLE_ARN     — IAM role ARN for OIDC federation
+#   LEADERBOARD_METRICS_QUEUE_URL    — SQS queue URL for metrics ingestion
+#
+# capability_map format (JSON array):
+#   [{"path": "dir/", "name": "fixed-name"}]      — all changes under dir/ → one capability
+#   [{"path": "dir/", "depth": 5}]                — derive name from path component at depth N (extension stripped)
+#   [{"path": "dir/", "filename": true}]           — derive name from filename stem (no extension), any nesting depth
+#   [{"path": ".", "name": "repo-name"}]           — whole-repo = single capability
+#   []  or omitted                                 — no capability tracking
+
+name: Leaderboard Metrics
+
+on:
+  workflow_call:
+    inputs:
+      capability_map:
+        description: >
+          JSON array of capability path mappings.
+          Each entry: {"path": "dir/", "name": "cap"}, {"path": "dir/", "depth": N}, or {"path": "dir/", "filename": true}.
+          "name" rolls all changes under that path into one capability.
+          "depth" derives the name from the path component at that depth (extension stripped).
+          "filename" uses each file's stem (name without extension) as the capability name.
+        required: false
+        type: string
+        default: '[]'
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  submit-metrics:
+    # repository_owner names the CALLER (see header): a non-praetorian org that
+    # calls this PUBLIC reusable is skipped before any id-token / AWS step runs.
+    # Defense-in-depth under the Phase-2 IAM trust caller-org anchor, not a
+    # substitute for it.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.repository_owner == 'praetorian-inc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: leaderboard
+    # Request id-token only in the job that federates to AWS (min-scope).
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      # Egress control. Running in AUDIT first to learn this job's real
+      # destinations without risking a silent metrics-send failure. Flip to
+      # `egress-policy: block` with the allowlist below after one clean run:
+      # api.github.com, github.com, codeload.github.com,
+      # objects.githubusercontent.com, release-assets.githubusercontent.com,
+      # sts.us-east-2.amazonaws.com, sqs.us-east-2.amazonaws.com (all :443).
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+          disable-sudo: true
+
+      # Check out the CALLER repo's BASE ref (pull_request_target semantics) —
+      # PR head code is never executed; the head SHA is fetched below as diff
+      # DATA only. Credentials persist because the fetch step below needs them
+      # on internal/private caller repos.
+      - name: Checkout caller repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR head ref
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch origin "$HEAD_SHA"
+
+      # The collect-metrics composite lives in THIS repo but must be referenced
+      # by immutable SHA (a floating @main composite would drift at runtime even
+      # though this reusable is itself reviewed — the exact failure class the
+      # SHA-pin policy exists for). Any change to the action therefore requires
+      # a follow-up PR here bumping this pin — reviewed drift only.
+      - name: Collect PR metrics
+        id: collect
+        uses: praetorian-inc/public-workflows/.github/actions/collect-metrics@5d40d2300abf493740f98b0a1f53620eb6921310 # v2.15.0
+        with:
+          github-token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ github.event.pull_request.number }}
+          pr-author: ${{ github.event.pull_request.user.login }}
+          pr-additions: ${{ github.event.pull_request.additions }}
+          pr-deletions: ${{ github.event.pull_request.deletions }}
+          pr-files: ${{ github.event.pull_request.changed_files }}
+          pr-merged-at: ${{ github.event.pull_request.merged_at }}
+          pr-title: ${{ github.event.pull_request.title }}
+          pr-body: ${{ github.event.pull_request.body }}
+          base-sha: ${{ github.event.pull_request.base.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          email-map: ${{ vars.ENGINEER_EMAIL_MAP }}
+          capability-map: ${{ inputs.capability_map }}
+
+      - name: Configure AWS credentials
+        if: steps.collect.outputs.has-payload == 'true'
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.LEADERBOARD_METRICS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send metrics to SQS
+        if: steps.collect.outputs.has-payload == 'true'
+        env:
+          QUEUE_URL: ${{ vars.LEADERBOARD_METRICS_QUEUE_URL }}
+        # Runs under bash -e: an aws CLI failure aborts the step with its
+        # stderr in the job log. The jq guard below covers only the exit-0
+        # no-MessageId edge; file:// sidesteps ARG_MAX on huge payloads.
+        run: |
+          aws sqs send-message \
+            --queue-url "$QUEUE_URL" \
+            --message-body "file://$RUNNER_TEMP/payload.json" \
+            --output json > "$RUNNER_TEMP/sqs-response.json"
+
+          if ! message_id=$(jq -re '.MessageId' "$RUNNER_TEMP/sqs-response.json"); then
+            echo "::error::SQS response missing MessageId: $(cat "$RUNNER_TEMP/sqs-response.json")"
+            exit 1
+          fi
+          echo "Metrics queued: $message_id"
