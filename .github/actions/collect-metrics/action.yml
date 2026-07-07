@@ -1,5 +1,11 @@
 name: Collect Leaderboard Metrics
-description: Collect PR metrics for leaderboard scoring and write payload to $RUNNER_TEMP/payload.json
+description: >-
+  Collect PR metrics for leaderboard scoring and write payload to
+  $RUNNER_TEMP/payload.json. Precondition: the job must have checked out the
+  base repo with full history (fetch-depth: 0) AND fetched the PR head SHA, so
+  `git log base...head` can resolve the commit range. If the range cannot be
+  resolved, the action does not fail — it warns and falls back to attributing
+  the whole PR to the opener (co-author and capability attribution are lost).
 
 inputs:
   github-token:

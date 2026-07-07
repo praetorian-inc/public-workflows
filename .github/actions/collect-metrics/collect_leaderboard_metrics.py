@@ -13,7 +13,9 @@ import sys
 from collections import defaultdict
 from pathlib import PurePosixPath
 
-OUTPUT_PATH = os.path.join(os.environ.get("RUNNER_TEMP", "/tmp"), "payload.json")
+# `or` (not a .get default) so a set-but-empty RUNNER_TEMP also falls back to
+# /tmp, matching the wrapper's ${RUNNER_TEMP:-/tmp} semantics.
+OUTPUT_PATH = os.path.join(os.environ.get("RUNNER_TEMP") or "/tmp", "payload.json")
 
 
 def env(name: str, default: str = "") -> str:
@@ -47,10 +49,18 @@ def fetch_pr_commits(repo: str, pr_number: str) -> list[tuple[str, str]]:
         capture_output=True, text=True, check=True,
     )
     commits = []
+    dropped = 0
     for line in result.stdout.strip().splitlines():
         parts = line.strip().split("\t", 1)
         if len(parts) == 2 and parts[1]:
             commits.append((parts[0], parts[1]))
+        else:
+            dropped += 1
+    if dropped:
+        gh_warning(
+            f"{dropped} commit(s) have no linked GitHub account "
+            "(unlinked email or deleted user) and are excluded from attribution"
+        )
     return commits
 
 
@@ -77,7 +87,11 @@ def fetch_commit_file_stats(base_sha: str, head_sha: str) -> dict[str, list[tupl
             parts = stripped.split("\t")
             if len(parts) >= 3:
                 try:
-                    stats[current_sha].append((int(parts[0]), int(parts[1]), parts[2]))
+                    # Binary files report "-" for both counts; keep the row at
+                    # (0, 0) so path-based capability matching still fires.
+                    adds = 0 if parts[0] == "-" else int(parts[0])
+                    dels = 0 if parts[1] == "-" else int(parts[1])
+                    stats[current_sha].append((adds, dels, parts[2]))
                 except ValueError:
                     pass
     return stats
@@ -94,25 +108,33 @@ def determine_authors(
 ) -> tuple[str | None, list[str], list[dict]]:
     """Pick primary author by most lines; others are co-authors. Ties broken lexicographically.
 
+    Aggregates by resolved email (not GitHub login), so multiple logins mapping
+    to the same engineer are counted as one author.
+
     Returns (primary_email, co_author_emails, author_stats_list).
     author_stats_list has per-author additions/deletions for proportional scoring.
     """
-    login_adds: dict[str, int] = defaultdict(int)
-    login_dels: dict[str, int] = defaultdict(int)
+    email_adds: dict[str, int] = defaultdict(int)
+    email_dels: dict[str, int] = defaultdict(int)
+    unmapped: set[str] = set()
     for sha, login in pr_commits:
-        for adds, dels, _ in commit_stats.get(sha, []):
-            login_adds[login] += adds
-            login_dels[login] += dels
-
-    author_stats: list[tuple[str, int, int, int]] = []
-    for login in login_adds:
+        rows = commit_stats.get(sha, [])
+        if not rows:
+            continue
         email = resolve_email(login, email_map)
-        adds = login_adds[login]
-        dels = login_dels[login]
-        if email:
-            author_stats.append((email, adds + dels, adds, dels))
-        else:
-            gh_warning(f"No email mapping for committer {login}")
+        if not email:
+            if login not in unmapped:
+                unmapped.add(login)
+                gh_warning(f"No email mapping for committer {login}")
+            continue
+        for adds, dels, _ in rows:
+            email_adds[email] += adds
+            email_dels[email] += dels
+
+    author_stats: list[tuple[str, int, int, int]] = [
+        (email, email_adds[email] + email_dels[email], email_adds[email], email_dels[email])
+        for email in email_adds
+    ]
 
     if not author_stats:
         return None, [], []
@@ -143,7 +165,9 @@ def collect_reviewers(repo: str, pr_number: str, email_map: dict[str, str]) -> l
         capture_output=True, text=True, check=True,
     )
     # --paginate applies the jq filter per page, so dedupe across pages here.
-    logins = list(dict.fromkeys(l.strip() for l in result.stdout.strip().splitlines() if l.strip()))
+    logins = list(dict.fromkeys(
+        line.strip() for line in result.stdout.strip().splitlines() if line.strip()
+    ))
 
     pr_author_login = env("PR_AUTHOR")
     emails = []
@@ -164,7 +188,7 @@ def collect_reviewers(repo: str, pr_number: str, email_map: dict[str, str]) -> l
 
 def extract_tickets(title: str, body: str) -> list[str]:
     text = f"{title} {body}"
-    return sorted(set(re.findall(r"ENG-\d+", text)))
+    return sorted({t.upper() for t in re.findall(r"ENG-\d+", text, re.IGNORECASE)})
 
 
 # ---------------------------------------------------------------------------
