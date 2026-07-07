@@ -1,0 +1,38 @@
+name: Test collect-metrics
+# Unit tests for the collect-metrics composite action's Python script.
+# Stdlib unittest only — no pip installs, no network beyond the checkout.
+# Guards the attribution logic (author aggregation, reviewer dedupe,
+# capability path matching, stale-payload cleanup) against regression.
+
+on:
+  pull_request:
+    paths:
+      - ".github/actions/collect-metrics/**"
+      - ".github/workflows/test-collect-metrics.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/actions/collect-metrics/**"
+      - ".github/workflows/test-collect-metrics.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s .github/actions/collect-metrics -v
