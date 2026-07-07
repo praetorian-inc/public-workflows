@@ -186,8 +186,10 @@ on:
           the version tag is created and pushed by resolve-version BEFORE this
           gate, so required reviewers approve the artifacts, not the tag — a
           rejected or expired (30-day) approval fails the run and
-          cleanup-on-failure deletes the tag, but the tag is publicly visible
-          while approval is pending. That mode also releases on every merge to
+          cleanup-on-failure deletes any partial release, but the tag remains
+          (version tags are immutable by policy) and the next release simply
+          bumps past it — and the tag is publicly visible while approval is
+          pending. That mode also releases on every merge to
           main, pausing each one for approval. Keep the environment
           reviewer-less in auto-tag mode; if you want approval-gated releases,
           use tag-push mode, where the tag exists before the workflow runs.
@@ -518,14 +520,18 @@ jobs:
   # Job 3: Cleanup on failure or cancellation.
   #
   # If the release pipeline fails OR is cancelled after creating a tag
-  # (auto-tag mode only), delete the release and tag so the next run can
-  # retry cleanly. cancelled() matters because failure() is false on a
-  # cancelled run: without it, cancelling a run after resolve-version has
-  # pushed the tag — e.g. while goreleaser waits for environment approval —
-  # leaks a tag with no artifacts. Deleting on cancel matches the existing
-  # failure semantics (a post-publish failure already deletes the published
-  # release for clean retry); tag-push mode is never touched (tag_created
-  # is only 'true' in auto-tag mode).
+  # (auto-tag mode only), delete the partial GitHub release so no
+  # half-published artifact set stays consumable. The tag is intentionally
+  # LEFT IN PLACE: version tags are immutable — the org Protected-Version-Tags
+  # ruleset blocks deletion (and a deletion-bypass grant would enable tag
+  # repointing, since the ruleset doesn't block creation). Recovery paths:
+  # "Re-run failed jobs" on this run releases the same version (goreleaser
+  # checks out refs/tags/$VERSION), or the next merge to main auto-bumps
+  # past the orphan. cancelled() matters because failure() is false on a
+  # cancelled run: without it, cancelling after resolve-version has pushed
+  # the tag — e.g. while goreleaser waits for environment approval — would
+  # skip cleanup entirely; tag-push mode is never touched (tag_created is
+  # only 'true' in auto-tag mode).
   # ────────────────────────────────────────────────────────────
   cleanup-on-failure:
     needs: [resolve-version, goreleaser]
@@ -547,17 +553,37 @@ jobs:
           allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
           disable-sudo-and-containers: true
 
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          # Deletion uses GH_TOKEN (env) via the gh CLI, not the git credential.
-          persist-credentials: false
-
-      - name: Delete release and tag
+      # No checkout: only gh API calls remain; GH_REPO points gh at the repo.
+      - name: Delete partial release, report orphan tag
         env:
           VERSION: ${{ needs.resolve-version.outputs.version }}
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          echo "Cleaning up failed release $VERSION"
-          gh release delete --yes -- "$VERSION" || true
-          git push --delete origin "refs/tags/$VERSION" || true
+          set -euo pipefail
+
+          # Delete the partial release only if one exists. A missing release
+          # is a clean no-op; a real deletion failure fails the step loudly.
+          if gh release view -- "$VERSION" >/dev/null 2>&1; then
+            echo "Deleting partial release $VERSION"
+            gh release delete --yes -- "$VERSION"
+          else
+            echo "No release found for $VERSION - nothing to delete."
+          fi
+
+          echo "::warning title=Orphan version tag $VERSION::The release failed after tag $VERSION was pushed. The tag is left in place by design: version tags are immutable (the org ruleset blocks deletion). To ship $VERSION, use 'Re-run failed jobs' on this run; otherwise the next merge to main auto-bumps past it."
+
+          {
+            echo "## Orphan version tag: \`$VERSION\`"
+            echo ""
+            echo "The release pipeline failed (or was cancelled) after tag \`$VERSION\` was pushed."
+            echo "Any partial GitHub release for it has been deleted; the tag itself is left in"
+            echo "place by design — version tags are immutable (the org ruleset blocks deletion)."
+            echo ""
+            echo "Recovery options:"
+            echo ""
+            echo "1. **Ship \`$VERSION\`** — use *Re-run failed jobs* on this run; goreleaser"
+            echo "   checks out \`refs/tags/$VERSION\` and releases that same version."
+            echo "2. **Abandon it** — do nothing; the next merge to main auto-bumps past"
+            echo "   \`$VERSION\`."
+          } >> "$GITHUB_STEP_SUMMARY"
