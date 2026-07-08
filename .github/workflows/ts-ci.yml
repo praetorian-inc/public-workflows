@@ -261,8 +261,7 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: ${{ inputs.node-version }}
-          # Cross-run npm download cache (keyed by lockfile). node_modules itself
-          # is handed to downstream jobs via an artifact, not this cache.
+          # Cross-run npm cache; node_modules is handed off via artifact, not this.
           cache: npm
           cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
@@ -275,20 +274,12 @@ jobs:
             npm install --no-audit --no-fund
           fi
 
-      # Hand node_modules to typecheck/lint/test via an artifact rather than a
-      # cache. This is an intra-run handoff, and artifacts are the right tool for
-      # it: they are inherently scoped to this run, so there is no cross-PR key
-      # collision and no shared reservation a cancelled run can leave stuck (the
-      # failure modes an actions/cache key suffered here). Artifacts also survive
-      # partial "re-run failed jobs" and do not consume the repo's cache quota.
-      #
-      # Archive into a tar first: artifacts do NOT preserve the executable bit or
-      # symlinks, which would leave node_modules/.bin/* non-executable (vitest et
-      # al. fail with "Permission denied"). tar round-trips perms and symlinks.
+      # Hand node_modules to downstream jobs via a run-scoped artifact (no cross-PR
+      # cache-key collisions). tar first: artifacts drop the exec bit and symlinks,
+      # which would leave node_modules/.bin/* non-executable.
       - name: Archive node_modules
         env:
-          # Passed via env (not inline ${{ }}) so caller-controlled inputs can't
-          # inject into the shell — matches the repo's TEST_SCRIPT pattern.
+          # Via env, not inline ${{ }}, to avoid shell injection (zizmor).
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
           NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
         run: tar -cf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY" node_modules
@@ -479,13 +470,8 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
-        # Fail-closed on the real bug (a typo'd test-script or dropped script that
-        # --if-present used to pass silently), without breaking script-less repos:
-        #   - script exists            -> run it (real exit code gates the job)
-        #   - explicit test-script set
-        #     but missing              -> fail (misconfiguration)
-        #   - default "test" missing   -> skip with a notice (repo has no tests)
-        # npm pkg get prints "{}" for an absent script; no jq/file-sniffing needed.
+        # Run the script if it exists; fail if an explicit test-script is missing
+        # (misconfig); skip if only the default "test" is absent (repo has none).
         run: |
           set -euo pipefail
           script="${TEST_SCRIPT:-test}"
