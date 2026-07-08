@@ -5,15 +5,19 @@
 # from calling reusable workflows hosted in internal/private repos, which is
 # why this moved here from praetorian-inc/.github (internal).
 #
-# ⚠ Callers reference this workflow @main — a DOCUMENTED EXCEPTION to this
-# repo's SHA-pinning policy (see README "Pinning requirements"). The AWS IAM
-# trust for the metrics role anchors on the OIDC `job_workflow_ref` claim
-# `praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@refs/heads/main`.
-# A caller pinned to @<sha> presents `job_workflow_ref: ...@<sha>`, fails the
-# trust match, and metrics silently stop. Compensating controls: this file is
-# CODEOWNERS-gated to Security Engineering, main requires code-owner review
-# (repo ruleset "protect-reusable-workflows"), and the trust condition accepts
-# only THIS path at refs/heads/main.
+# ⚠ Callers pin this workflow to a FULL 40-char commit SHA (the exact form
+# the OIDC `job_workflow_ref` claim carries), per this repo's SHA-pinning
+# policy. The AWS IAM trust for the metrics role (guard backend/template.yml,
+# LeaderboardMetricsRole) lists the accepted `job_workflow_ref` sub for each
+# trusted SHA; a caller on any UNLISTED ref fails the trust match and its
+# metrics stop at AssumeRole. Bumping the pinned SHA therefore requires the
+# coordinated runbook (ENG-4164):
+#   1. guard PR ADDS the new SHA's sub to the trust list
+#   2. prod deploy — verify both subs live via `aws iam get-role`
+#   3. roll every caller's `uses:` pin to the new SHA
+#   4. follow-up guard PR REMOVES the old SHA's sub
+# Defense in depth: this file is CODEOWNERS-gated to Security Engineering and
+# main requires code-owner review (repo ruleset "protect-reusable-workflows").
 #
 # ⚠⚠ CALLER-ORG BOUNDARY — currently the job-level `github.repository_owner`
 # guard below, NOT the IAM trust. `job_workflow_ref` names the CALLED (this)
@@ -27,7 +31,7 @@
 # trust condition on `token.actions.githubusercontent.com:repository_owner`
 # DENIES a token that provably carries that claim (A/B-tested 2026-07-07 with
 # IAM propagation control). So the prod trust pins the exact customized sub
-#   job_workflow_ref:<this path>@refs/heads/main:environment:leaderboard
+#   job_workflow_ref:<this path>@<trusted sha>:environment:leaderboard
 # and the `if:` guard below is the PRIMARY caller-org boundary: an external
 # org calling this PUBLIC reusable is skipped before the id-token step and
 # never mints a token bearing this job_workflow_ref. Do NOT weaken or remove
@@ -39,7 +43,7 @@
 # sqs:SendMessage to the metrics queue (forged leaderboard data) — the role
 # has no other permissions.
 #
-# Phase-2 hardening (tracked in Linear): add `repo` (or `repository_owner`)
+# Future hardening (ENG-4219): add `repo` (or `repository_owner`)
 # to every caller's include_claim_keys so the sub itself carries caller
 # identity, then pin the trust to the new byte-exact layout (claim order in
 # the sub follows include_claim_keys order). Requires a coordinated ~31-repo
@@ -58,18 +62,24 @@
 #     id-token: write
 #   jobs:
 #     metrics:
-#       uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main
+#       uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@c351826e6de27cadeb5b32ce81157355b283518b # v2.16.3
 #       with:
 #         capability_map: '[]'
 #
 # Caller repo one-time setup:
 #   - A "leaderboard" GitHub environment (no protection rules needed).
-#   - If the repo has the Actions OIDC sub-claim customization
-#     (include_claim_keys: [job_workflow_ref, environment]), every OTHER job in
-#     the repo that requests `id-token: write` must ALSO run in an environment,
-#     or it fails at job preparation with "the claim 'environment' cannot be
-#     null or empty" before any step runs. See go-release.yml's `environment`
-#     input for the release-job fix.
+#   - REQUIRED: the Actions OIDC sub-claim customization — without it the
+#     token presents the default `repo:...` sub and AssumeRole is denied
+#     (proven 2026-07-08: three repos onboarded without it all failed):
+#       PUT /repos/{owner}/{repo}/actions/oidc/customization/sub
+#       {"use_default": false,
+#        "include_claim_keys": ["job_workflow_ref", "environment"]}
+#     ⚠ Check FIRST for other workflows requesting `id-token: write`: the
+#     customization changes the sub for EVERY OIDC job in the repo — each
+#     must ALSO run in an environment (or it fails at job preparation with
+#     "the claim 'environment' cannot be null or empty") and any IAM/cloud
+#     trust keyed on its old sub must be updated. See go-release.yml's
+#     `environment` input for the release-job fix.
 #
 # Org-level variables (visibility: all repositories):
 #   ENGINEER_EMAIL_MAP               — JSON: GitHub login → @praetorian.com email

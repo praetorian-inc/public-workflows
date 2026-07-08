@@ -881,17 +881,17 @@ permissions:
   id-token: write
 jobs:
   metrics:
-    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main  # see pinning exception below
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@c351826e6de27cadeb5b32ce81157355b283518b  # v2.16.3
     with:
       capability_map: '[]'
 ```
 
-**⚠ Pinned `@main` by design — the one exception to this repo's SHA-pinning policy.** The AWS IAM trust for the metrics role anchors on the OIDC `job_workflow_ref` claim (`.../leaderboard-metrics.yml@refs/heads/main`); a caller pinned `@<sha>` presents `job_workflow_ref: ...@<sha>`, fails the trust match, and metrics silently stop. Compensating controls: this workflow and its composite action are CODEOWNERS-gated to Security Engineering, `main` requires code-owner review (repo ruleset `protect-reusable-workflows`), and the trust condition accepts only this path at `refs/heads/main`. See "Pinning requirements" below.
+**⚠ Pin the FULL 40-char commit SHA** — that is the exact form the OIDC `job_workflow_ref` claim carries, and the AWS IAM trust for the metrics role lists the accepted `job_workflow_ref` sub per trusted SHA. A caller on any unlisted ref fails the trust match and its metrics stop at AssumeRole. Bumping the pin is a coordinated four-step runbook (add new SHA's sub to the guard trust → prod deploy → roll caller pins → remove old sub); see the header of `leaderboard-metrics.yml` and [ENG-4164](https://linear.app/praetorianlabs/issue/ENG-4164).
 
 **Caller one-time setup:**
 
 - Create a `leaderboard` GitHub environment (no protection rules needed).
-- If the repo carries the Actions OIDC sub-claim customization (`include_claim_keys: [job_workflow_ref, environment]`), every **other** job requesting `id-token: write` must also run in an environment or it fails at job preparation — see `go-release.yml`'s `environment` input.
+- **Required:** apply the Actions OIDC sub-claim customization — without it the token presents the default `repo:...` sub and AssumeRole is denied: `PUT /repos/{owner}/{repo}/actions/oidc/customization/sub` with `{"use_default": false, "include_claim_keys": ["job_workflow_ref", "environment"]}`. ⚠ Check first for other workflows requesting `id-token: write`: the customization changes the sub for **every** OIDC job in the repo — each must also run in an environment (or it fails at job preparation) and any cloud trust keyed on its old sub must be updated. See `go-release.yml`'s `environment` input.
 
 **Inputs** (all optional):
 
@@ -922,7 +922,7 @@ uses: praetorian-inc/public-workflows/.github/workflows/go-ci.yml@v1
 
 Use [ratchet](https://github.com/sethvargo/ratchet) to auto-pin.
 
-**Sole exception: `leaderboard-metrics.yml` is called `@main`.** Its AWS IAM trust anchors on the OIDC `job_workflow_ref` claim at `refs/heads/main`; a SHA-pinned caller presents a different claim and silently loses the ability to assume the metrics role. The mutable-ref risk is compensated by the CODEOWNERS gate (Security Engineering owns `/.github/workflows/` and `/.github/actions/`) and the `protect-reusable-workflows` ruleset requiring code-owner review on `main` — a malicious change cannot reach `refs/heads/main` unreviewed, which is the only ref the trust accepts.
+**`leaderboard-metrics.yml` has an extra coupling:** its callers' pinned SHA must also be listed in the AWS IAM trust for the metrics role (the trust matches the OIDC `job_workflow_ref` claim byte-for-byte), so pin bumps follow the coordinated runbook in that workflow's header ([ENG-4164](https://linear.app/praetorianlabs/issue/ENG-4164)) rather than a plain `uses:` edit. The former `@main` exception is closed; during the ENG-4164 migration window the trust temporarily accepts both `@refs/heads/main` and the pinned SHA until the fleet is rolled.
 
 ## Contributing
 

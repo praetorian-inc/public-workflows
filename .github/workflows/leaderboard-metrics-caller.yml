@@ -16,6 +16,8 @@ permissions:
 
 jobs:
   metrics:
-    # @main is required by the AWS IAM trust condition (job_workflow_ref ...@refs/heads/main);
-    # SHA-pinning breaks OIDC until the coordinated pin+IAM rotation (ENG-4163 Phase 2).
-    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@main # zizmor: ignore[unpinned-uses] IAM trust keys on @refs/heads/main
+    # The pinned SHA must be listed in the AWS IAM trust condition
+    # (job_workflow_ref sub) — bump ONLY via the runbook in
+    # leaderboard-metrics.yml's header (add new sub → deploy → roll pins →
+    # remove old sub), or metrics stop at AssumeRole.
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@c351826e6de27cadeb5b32ce81157355b283518b # v2.16.3
