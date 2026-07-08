@@ -65,10 +65,14 @@ on:
         default: true
 
       test-script:
-        description: "npm script to run for tests. Must be a key in package.json scripts."
+        description: >
+          npm script to run for tests. Left empty, it defaults to the "test"
+          script and is skipped (with a notice) if that script doesn't exist —
+          so repos with no tests aren't forced to fail. Set explicitly and the
+          named script must exist, or the Test job fails.
         required: false
         type: string
-        default: "test"
+        default: ""
 
       enable-private-deps:
         description: "Generate a GitHub App token for private dependency access before npm ci."
@@ -292,7 +296,7 @@ jobs:
       - name: Upload node_modules for downstream jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: node-modules-${{ inputs.node-version }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
           path: ${{ runner.temp }}/node-modules.tar
           if-no-files-found: error
           retention-days: 1
@@ -329,7 +333,7 @@ jobs:
       - name: Download node_modules
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: node-modules-${{ inputs.node-version }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
           path: ${{ runner.temp }}
 
       - name: Extract node_modules
@@ -377,7 +381,7 @@ jobs:
       - name: Download node_modules
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: node-modules-${{ inputs.node-version }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
           path: ${{ runner.temp }}
 
       - name: Extract node_modules
@@ -462,7 +466,7 @@ jobs:
       - name: Download node_modules
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: node-modules-${{ inputs.node-version }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
           path: ${{ runner.temp }}
 
       - name: Extract node_modules
@@ -475,14 +479,21 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
-        # A missing test script is a misconfiguration, not a pass: fail loudly
-        # instead of --if-present's silent no-op (which let a typo'd test-script or
-        # a dropped "test" script report green with no tests run). No 2>/dev/null,
-        # so the real runner error surfaces; npm run's exit code fails the job.
+        # Fail-closed on the real bug (a typo'd test-script or dropped script that
+        # --if-present used to pass silently), without breaking script-less repos:
+        #   - script exists            -> run it (real exit code gates the job)
+        #   - explicit test-script set
+        #     but missing              -> fail (misconfiguration)
+        #   - default "test" missing   -> skip with a notice (repo has no tests)
+        # npm pkg get prints "{}" for an absent script; no jq/file-sniffing needed.
         run: |
-          if jq -e --arg s "$TEST_SCRIPT" '.scripts[$s]' package.json >/dev/null 2>&1; then
-            npm run "$TEST_SCRIPT"
-          else
-            echo "::error::Test script '$TEST_SCRIPT' not found in package.json scripts (set enable-test: false to skip tests intentionally)."
+          set -euo pipefail
+          script="${TEST_SCRIPT:-test}"
+          if [ "$(npm pkg get "scripts.$script")" != "{}" ]; then
+            npm run "$script"
+          elif [ -n "${TEST_SCRIPT:-}" ]; then
+            echo "::error::test-script '$TEST_SCRIPT' is not defined in package.json scripts."
             exit 1
+          else
+            echo "::notice::No 'test' script in package.json — no tests to run. Set enable-test: false to be explicit."
           fi
