@@ -342,9 +342,13 @@ jobs:
   # code — it only posts the final-message output from the previous job.
   # Uses pulls.createReview with hardcoded event='COMMENT' so reviews appear in
   # the PR Reviews tab. There is no path to APPROVE — the event is not configurable.
+  # Post-feedback: posts the Codex review as a PR review on success, or a fixed
+  # failure notice when the agent job failed (API timeout, model error, etc.).
+  # Uses always() so a failed review never disappears silently (parity with Gemini).
+  # It does NOT run when codex-review was skipped (preflight skip, draft PR, etc.).
   post-feedback:
     needs: codex-review
-    if: needs.codex-review.outputs.final_message != ''
+    if: ${{ always() && (needs.codex-review.result == 'success' || needs.codex-review.result == 'failure') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -360,6 +364,7 @@ jobs:
           disable-sudo-and-containers: true
 
       - name: Post review comment
+        if: ${{ needs.codex-review.result == 'success' && needs.codex-review.outputs.final_message != '' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           CODEX_FINAL_MESSAGE: ${{ needs.codex-review.outputs.final_message }}
@@ -384,5 +389,24 @@ jobs:
                 `*Reviewed by Codex (${process.env.CODEX_MODEL})*`,
               ].join('\n'),
               event: 'COMMENT',
+            });
+
+      - name: Post failure notice
+        if: ${{ needs.codex-review.result == 'failure' }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '## Codex Review',
+                '',
+                `⚠️ Codex review did not complete — the review job failed. See the [run logs](${process.env.RUN_URL}).`,
+                'Push a new commit or comment `@codex` on a review comment to re-trigger.',
+              ].join('\n'),
             });
 
