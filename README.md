@@ -891,7 +891,7 @@ jobs:
 **Caller one-time setup:**
 
 - Create a `leaderboard` GitHub environment (no protection rules needed).
-- Nothing else. **Do NOT apply the Actions OIDC sub-claim customization** — the IAM trust matches the default `repo:...` sub (native GitHub condition keys, since 2026-07-10), and the customization is repo-wide and breaks Dependabot (GitHub refuses OIDC token issuance for jobs without an environment, which Dependabot's GitHub-managed job can never have — 14T-154). If a repo still carries one from the pre-2026-07-10 onboarding, revert it: `PUT /repos/{owner}/{repo}/actions/oidc/customization/sub` with `{"use_default": true}`.
+- Nothing else. **Do NOT apply the Actions OIDC sub-claim customization** — the IAM trust matches the default `repo:...` sub (native GitHub condition keys, since 2026-07-10), including GitHub's immutable subject-claim format (`repo:praetorian-inc@8173787/...`, automatic for repos created after 2026-07-15), and the customization is repo-wide and breaks Dependabot (GitHub refuses OIDC token issuance for jobs without an environment, which Dependabot's GitHub-managed job can never have — 14T-154). If a repo still carries one from the pre-2026-07-10 onboarding, revert it: `PUT /repos/{owner}/{repo}/actions/oidc/customization/sub` with `{"use_default": true}`.
 
 **Inputs** (all optional):
 

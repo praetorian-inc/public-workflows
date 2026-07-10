@@ -24,8 +24,11 @@
 #    keys AWS added for this provider in Jan 2026 —
 #    `repository_owner_id: "8173787"` (praetorian-inc's immutable org ID)
 #    plus `environment: leaderboard`, the pinned `job_workflow_ref` list,
-#    and `StringLike sub: repo:praetorian-inc/*` (IAM mandates a sub
-#    condition; every DEFAULT sub starts `repo:<owner>/<repo>`). An external
+#    and a StringLike `sub` condition (IAM mandates one) matching BOTH
+#    default-sub shapes GitHub emits: `repo:praetorian-inc/*` (classic) and
+#    `repo:praetorian-inc@8173787/*` (immutable subject claims — automatic
+#    for repos created after 2026-07-15 and for renames/transfers after
+#    that date, per the 2026-04-23 GitHub changelog). An external
 #    org's token carries its own repository_owner_id and fails the trust.
 #    (`repository_owner` — the org NAME — is still NOT mapped by AWS for
 #    this provider; A/B-verified 2026-07-07. Only the _id key works.)
@@ -46,9 +49,10 @@
 # (GitHub refuses OIDC token issuance for any job without an environment,
 # and Dependabot's GitHub-managed job can never have one — proven on
 # aurelian, tracked 14T-154). All 34 fleet repos were reverted to the
-# default sub on 2026-07-10 after a successful aurelian canary. A legacy
-# trust statement matching the old customized subs remains in guard's
-# template.yml until a follow-up PR deletes it.
+# default sub on 2026-07-10 after a successful aurelian canary. The legacy
+# trust statement matching the old customized subs — and the
+# @refs/heads/main job_workflow_ref entry (all callers are SHA-pinned) —
+# were deleted from guard's template.yml in guard PR #6664.
 #
 # Caller template (drop in .github/workflows/leaderboard-metrics.yml):
 #
