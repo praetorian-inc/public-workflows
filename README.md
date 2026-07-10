@@ -886,12 +886,12 @@ jobs:
       capability_map: '[]'
 ```
 
-**⚠ Pin the FULL 40-char commit SHA** — that is the exact form the OIDC `job_workflow_ref` claim carries, and the AWS IAM trust for the metrics role lists the accepted `job_workflow_ref` sub per trusted SHA. A caller on any unlisted ref fails the trust match and its metrics stop at AssumeRole. Bumping the pin is a coordinated four-step runbook (add new SHA's sub to the guard trust → prod deploy → roll caller pins → remove old sub); see the header of `leaderboard-metrics.yml` and [ENG-4164](https://linear.app/praetorianlabs/issue/ENG-4164).
+**⚠ Pin the FULL 40-char commit SHA** — that is the exact form the OIDC `job_workflow_ref` claim carries, and the AWS IAM trust for the metrics role lists the accepted `job_workflow_ref` value per trusted SHA as a native STS condition key. A caller on any unlisted ref fails the trust match and its metrics stop at AssumeRole. Bumping the pin is a coordinated four-step runbook (add new SHA's `job_workflow_ref` to the guard trust → prod deploy → roll caller pins → remove old value); see the header of `leaderboard-metrics.yml` and [ENG-4164](https://linear.app/praetorianlabs/issue/ENG-4164).
 
 **Caller one-time setup:**
 
 - Create a `leaderboard` GitHub environment (no protection rules needed).
-- **Required:** apply the Actions OIDC sub-claim customization — without it the token presents the default `repo:...` sub and AssumeRole is denied: `PUT /repos/{owner}/{repo}/actions/oidc/customization/sub` with `{"use_default": false, "include_claim_keys": ["job_workflow_ref", "environment"]}`. ⚠ Check first for other workflows requesting `id-token: write`: the customization changes the sub for **every** OIDC job in the repo — each must also run in an environment (or it fails at job preparation) and any cloud trust keyed on its old sub must be updated. See `go-release.yml`'s `environment` input.
+- Nothing else. **Do NOT apply the Actions OIDC sub-claim customization** — the IAM trust matches the default `repo:...` sub (native GitHub condition keys, since 2026-07-10), and the customization is repo-wide and breaks Dependabot (GitHub refuses OIDC token issuance for jobs without an environment, which Dependabot's GitHub-managed job can never have — 14T-154). If a repo still carries one from the pre-2026-07-10 onboarding, revert it: `PUT /repos/{owner}/{repo}/actions/oidc/customization/sub` with `{"use_default": true}`.
 
 **Inputs** (all optional):
 
