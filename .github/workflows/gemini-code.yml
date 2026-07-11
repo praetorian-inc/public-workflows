@@ -71,13 +71,13 @@ on:
         default: "gemini-3.1-pro-preview"
 
       review_exclude_pathspecs:
-        description: "Newline-separated git pathspec patterns (e.g. `.claude/**`, `AGENTS.md`) excluded from the reviewed diff. For generated artifacts (e.g. agentsmesh mirrors) that CI independently verifies against their canonical sources — reviewing them is pure duplication. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff."
+        description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff."
         required: false
         type: string
         default: ""
 
       force_review_regex:
-        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md files and .agentsmesh/ canonical config). Passed through to the shared preflight."
+        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md, agent instruction files like AGENTS.md/CLAUDE.md/GEMINI.md, harness config dirs, and .agentsmesh/ canonical config). Passed through to the shared preflight."
         required: false
         type: string
         default: ""
@@ -298,6 +298,11 @@ jobs:
           # has the merge commit and both parents locally. This step is fully
           # deterministic and offline — the agent step that follows holds zero
           # credentials, mirroring codex-code.yml's tokenless sandbox.
+          # Recreate the context dir from scratch: the merged tree is untrusted PR
+          # content, and a PR could commit its own .gemini-review/excluded-paths.txt
+          # (or a symlinked .gemini-review) to blind the reviewer — the prompts treat
+          # this dir as workflow-authored, so nothing PR-supplied may survive into it.
+          rm -rf .gemini-review
           mkdir -p .gemini-review
           # Caller-declared generated paths (e.g. agentsmesh mirrors) are excluded
           # from the reviewed diff via `:(exclude)` pathspecs: they are expensive

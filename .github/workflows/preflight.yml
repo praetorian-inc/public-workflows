@@ -25,7 +25,7 @@ on:
         type: string
 
       force_review_regex:
-        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md files and .agentsmesh/ canonical config). Empty = built-in coverage only."
+        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md, agent instruction files like AGENTS.md/CLAUDE.md/GEMINI.md, harness config dirs, and .agentsmesh/ canonical config). Empty = built-in coverage only."
         required: false
         type: string
         default: ""
@@ -130,15 +130,19 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          # FORCE_RE: agent-behavior sources. A SKILL.md or .agentsmesh/ file is
-          # executable prompt-code (it changes how AI agents behave), not docs —
-          # a change there must be reviewed even though it is markdown. Callers
-          # extend this via the force_review_regex input (OR-combined). Note this
-          # deliberately also matches generated mirror copies of SKILL.md (e.g.
+          # FORCE_RE: agent-behavior sources. These are executable prompt-code
+          # (they change how AI agents behave), not docs — a change there must be
+          # reviewed even though it is markdown. Covers SKILL.md, `.agentsmesh/**`
+          # canonical config, agent instruction files (AGENTS.md /
+          # AGENTS.override.md / CLAUDE.md / GEMINI.md), and harness config dirs
+          # (`.agents/` `.claude/` `.gemini/` `.codex/`). The trailing `/` in the
+          # dir alternation keeps `.claude-plugin/**` in SKIP_RE territory.
+          # Callers extend this via the force_review_regex input (OR-combined).
+          # Note this deliberately also matches generated mirror copies (e.g.
           # .claude/skills/**): forcing a run on a mirror-only PR is harmless —
           # such PRs fail the consumer's drift gate anyway, and the reviewers'
           # exclude pathspecs keep generated mirrors out of the reviewed diff.
-          FORCE_RE='(^|/)SKILL\.md$|^\.agentsmesh/'
+          FORCE_RE='(^|/)SKILL\.md$|^\.agentsmesh/|(^|/)(AGENTS|AGENTS\.override|CLAUDE|GEMINI)\.md$|(^|/)\.(agents|claude|gemini|codex)/'
           if [ -n "$FORCE_REVIEW_REGEX" ]; then
             FORCE_RE="$FORCE_RE|$FORCE_REVIEW_REGEX"
           fi
@@ -165,5 +169,5 @@ jobs:
             echo "⊘ Docs/config-only PR — $REVIEWER_NAME review will be skipped."
             gh pr comment "$PR_NUMBER" \
               --repo "$REPO" \
-              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files; skill sources like \`SKILL.md\` / \`.agentsmesh/**\` would have forced a review). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
+              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files; agent-behavior sources like \`SKILL.md\`, \`AGENTS.md\`/\`CLAUDE.md\`, or \`.agentsmesh/**\` would have forced a review). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
           fi
