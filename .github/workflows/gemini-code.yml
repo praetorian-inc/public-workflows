@@ -459,6 +459,12 @@ jobs:
           LTRIMMED="${RAW_REVIEW#"${RAW_REVIEW%%[![:space:]]*}"}"
           if [[ "${LTRIMMED}" == '{'* && "${RAW_REVIEW}" == *'"session_id"'* ]]; then
             ERR_MSG=$(jq -r '.error.message // empty' <<<"${RAW_REVIEW}" 2>/dev/null || true)
+            # Escape workflow-command metacharacters (GitHub toolkit order: % first,
+            # then CR/LF) so an attacker-influenced error message cannot smuggle a
+            # newline that terminates this ::error:: command and injects new ones.
+            ERR_MSG="${ERR_MSG//'%'/%25}"
+            ERR_MSG="${ERR_MSG//$'\r'/%0D}"
+            ERR_MSG="${ERR_MSG//$'\n'/%0A}"
             echo "::error title=Gemini review failed::Gemini CLI returned its error envelope instead of a review${ERR_MSG:+: ${ERR_MSG}}"
             exit 1
           fi
