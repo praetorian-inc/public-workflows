@@ -170,12 +170,16 @@ jobs:
           # intentionally NOT skipped — workflow/CI config, job permissions, and
           # secrets passthrough are high-risk and deserve AI review.
           # License matching is by EXPLICIT filename (LICENSE/LICENCE/COPYING/NOTICE,
-          # optionally with a dotted suffix like LICENSE.md or NOTICE.Apache-2.0, at
-          # the root or in a subdir) — deliberately NOT a `^LICENSE` prefix, which
+          # optionally with an SPDX-ish dotted suffix that starts with an uppercase
+          # letter or digit — e.g. NOTICE.Apache-2.0, COPYING.LESSER, LICENSE.0BSD —
+          # at the root or in a subdir) — deliberately NOT a `^LICENSE` prefix, which
           # would also skip code files like LICENSE_CHECK.py or LICENSEValidator.go.
-          # Near-miss names (e.g. LICENSE-MIT) fall through to review: the tradeoff
-          # errs toward reviewing too much, never toward silently skipping code.
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|(^|/)(LICENSE|LICENCE|COPYING|NOTICE)(\.[A-Za-z0-9.-]+)?$|^\.gitignore$|^docs/|^\.claude-plugin/'
+          # Lowercase-extension files (LICENSE.py, NOTICE.go) fall through to review;
+          # plain-doc variants (LICENSE.md, LICENSE.txt) still skip via the extension
+          # branch below. Near-miss names (e.g. LICENSE-MIT) fall through to review:
+          # the tradeoff errs toward reviewing too much, never toward silently
+          # skipping code.
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|(^|/)(LICENSE|LICENCE|COPYING|NOTICE)(\.[A-Z0-9][A-Za-z0-9.-]*)?$|^\.gitignore$|^docs/|^\.claude-plugin/'
 
           if echo "$FILES" | grep -vE -- "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
