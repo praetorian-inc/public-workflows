@@ -149,7 +149,7 @@ jobs:
             # and silently skip the review. Warn-and-ignore instead — the built-in
             # FORCE_RE still applies either way.
             rc=0
-            grep -qE "$FORCE_REVIEW_REGEX" /dev/null 2>/dev/null || rc=$?
+            grep -qE -- "$FORCE_REVIEW_REGEX" /dev/null 2>/dev/null || rc=$?
             if [ "$rc" -eq 2 ]; then
               echo "::warning::force_review_regex is not a valid extended regex — ignoring the caller extension (built-in FORCE_RE still applies)."
             else
@@ -157,7 +157,7 @@ jobs:
             fi
           fi
 
-          if echo "$FILES" | grep -qE "$FORCE_RE"; then
+          if echo "$FILES" | grep -qE -- "$FORCE_RE"; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
             echo "⚡ Agent-behavior source changed (FORCE_RE match) — $REVIEWER_NAME will review this PR."
             exit 0
@@ -171,7 +171,7 @@ jobs:
           # secrets passthrough are high-risk and deserve AI review.
           SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^docs/|^\.claude-plugin/'
 
-          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
+          if echo "$FILES" | grep -vE -- "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
             echo "✓ Code changes detected — $REVIEWER_NAME will review this PR."
           else

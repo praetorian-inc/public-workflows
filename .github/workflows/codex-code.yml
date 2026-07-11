@@ -49,7 +49,7 @@ on:
         default: "medium"
 
       review_exclude_pathspecs:
-        description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff."
+        description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
         required: false
         type: string
         default: ""
@@ -147,6 +147,7 @@ jobs:
 
     outputs:
       final_message: ${{ steps.run_codex.outputs.final-message }}
+      empty_scope: ${{ steps.context.outputs.empty_scope }}
 
     # Mapped from the secret so the optional palatine-token step can be gated in `if:`
     # (a step `if:` cannot read `secrets.*` directly).
@@ -215,6 +216,7 @@ jobs:
           git rev-parse --verify HEAD^2 >/dev/null
 
       - name: Build review context (PR diff + changed files)
+        id: context
         env:
           REVIEW_EXCLUDE_PATHSPECS: ${{ inputs.review_exclude_pathspecs }}
         run: |
@@ -243,15 +245,17 @@ jobs:
           fi
           git -c core.quotePath=false diff --no-color HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .codex-review/pr.diff
           git -c core.quotePath=false diff --name-only HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .codex-review/changed-files.txt
-          # Guard: exclusions must never blank the whole review. If the scoped diff
-          # is empty while the PR itself is not, the caller's excludes swallowed
-          # every changed file — the agent would review nothing and post a hollow
-          # LGTM (worst on PRs preflight's FORCE_RE deliberately forced). Fail loud:
-          # a misconfigured caller finds out here, and a generated-artifacts-only PR
-          # should have been caught by the consumer's own drift gate before review.
+          # Empty-scope skip: if the scoped diff is empty while the PR itself is
+          # not, every changed file is a caller-declared generated artifact. The
+          # caller has explicitly marked those paths reviewless (their CI verifies
+          # them mechanically), so this is the docs-only-skip case, not an error —
+          # skip the agent and post an explanatory comment instead of reviewing an
+          # empty diff (a hollow LGTM) or failing red (a false alarm on legitimate
+          # regenerate-only PRs). PRs mixing real changes with excluded artifacts
+          # never take this branch: their scoped diff is non-empty.
           if [ ! -s .codex-review/pr.diff ] && ! git diff --quiet HEAD^1 HEAD; then
-            echo "::error::review_exclude_pathspecs excluded every changed file in this PR — refusing to run a review with an empty scope. Excludes must cover only generated artifacts."
-            exit 1
+            echo "empty_scope=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::All changed files match review_exclude_pathspecs (caller-declared generated artifacts) — skipping the review agent."
           fi
           echo "PR diff: $(wc -c < .codex-review/pr.diff) bytes across $(wc -l < .codex-review/changed-files.txt) file(s)"
 
@@ -348,6 +352,7 @@ jobs:
 
       - name: Run Codex
         id: run_codex
+        if: steps.context.outputs.empty_scope != 'true'
         uses: openai/codex-action@c25d10f3f498316d4b2496cc4c6dd58057a7b031  # v1.6 (2026-03-16)
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -403,7 +408,7 @@ jobs:
   # the PR Reviews tab. There is no path to APPROVE — the event is not configurable.
   post-feedback:
     needs: codex-review
-    if: needs.codex-review.outputs.final_message != ''
+    if: needs.codex-review.outputs.final_message != '' || needs.codex-review.outputs.empty_scope == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -419,6 +424,7 @@ jobs:
           disable-sudo-and-containers: true
 
       - name: Post review comment
+        if: needs.codex-review.outputs.final_message != ''
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           CODEX_FINAL_MESSAGE: ${{ needs.codex-review.outputs.final_message }}
@@ -443,5 +449,17 @@ jobs:
                 `*Reviewed by Codex (${process.env.CODEX_MODEL})*`,
               ].join('\n'),
               event: 'COMMENT',
+            });
+
+      - name: Post empty-scope skip notice
+        if: needs.codex-review.outputs.empty_scope == 'true'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: 'Codex review skipped — every changed file in this PR matches the caller\'s `review_exclude_pathspecs` (generated artifacts verified by this repo\'s own CI). Nothing reviewable remains in scope.',
             });
 

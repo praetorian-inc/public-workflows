@@ -71,7 +71,7 @@ on:
         default: "gemini-3.1-pro-preview"
 
       review_exclude_pathspecs:
-        description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff."
+        description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
         required: false
         type: string
         default: ""
@@ -170,6 +170,7 @@ jobs:
 
     outputs:
       review_output: ${{ steps.sanitize.outputs.review }}
+      empty_scope: ${{ steps.context.outputs.empty_scope }}
 
     # Mapped from the secret so the optional palatine-token step can be gated in `if:`
     # (a step `if:` cannot read `secrets.*` directly).
@@ -290,6 +291,7 @@ jobs:
           ls -1 .gemini/skills
 
       - name: Build review context (PR diff + changed files)
+        id: context
         env:
           REVIEW_EXCLUDE_PATHSPECS: ${{ inputs.review_exclude_pathspecs }}
         run: |
@@ -322,15 +324,17 @@ jobs:
           # keeps non-ASCII paths raw so the agent can open them by name.
           git -c core.quotePath=false diff --no-color HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .gemini-review/pr.full.diff
           git -c core.quotePath=false diff --name-only HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .gemini-review/changed-files.txt
-          # Guard: exclusions must never blank the whole review. If the scoped diff
-          # is empty while the PR itself is not, the caller's excludes swallowed
-          # every changed file — the agent would review nothing and post a hollow
-          # LGTM (worst on PRs preflight's FORCE_RE deliberately forced). Fail loud:
-          # a misconfigured caller finds out here, and a generated-artifacts-only PR
-          # should have been caught by the consumer's own drift gate before review.
+          # Empty-scope skip: if the scoped diff is empty while the PR itself is
+          # not, every changed file is a caller-declared generated artifact. The
+          # caller has explicitly marked those paths reviewless (their CI verifies
+          # them mechanically), so this is the docs-only-skip case, not an error —
+          # skip the agent and post an explanatory comment instead of reviewing an
+          # empty diff (a hollow LGTM) or failing red (a false alarm on legitimate
+          # regenerate-only PRs). PRs mixing real changes with excluded artifacts
+          # never take this branch: their scoped diff is non-empty.
           if [ ! -s .gemini-review/pr.full.diff ] && ! git diff --quiet HEAD^1 HEAD; then
-            echo "::error::review_exclude_pathspecs excluded every changed file in this PR — refusing to run a review with an empty scope. Excludes must cover only generated artifacts."
-            exit 1
+            echo "empty_scope=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::All changed files match review_exclude_pathspecs (caller-declared generated artifacts) — skipping the review agent."
           fi
 
           MAX=100000
@@ -369,6 +373,7 @@ jobs:
       # mismatch NEVER installs the binary. Egress (block mode): needs github.com:443
       # + objects.githubusercontent.com:443 / release-assets.githubusercontent.com:443.
       - name: Install ripgrep for grep_search (pinned, fail-open)
+        if: steps.context.outputs.empty_scope != 'true'
         run: |
           set -euo pipefail
           RG_VERSION="14.1.1"
@@ -402,6 +407,7 @@ jobs:
       # to read-only built-ins; callers cannot widen it (CODEOWNERS / AppSec gate).
       - name: Run Gemini PR Review
         id: gemini
+        if: steps.context.outputs.empty_scope != 'true'
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489  # v0.1.22
         env:
           # gemini-cli 0.45.2 refuses to run tools in an "untrusted" folder in headless
@@ -555,6 +561,18 @@ jobs:
                 `*Reviewed by Gemini (${process.env.GEMINI_MODEL})*`,
               ].join('\n'),
               event: 'COMMENT',
+            });
+
+      - name: Post empty-scope skip notice
+        if: ${{ needs.gemini-review.result == 'success' && needs.gemini-review.outputs.empty_scope == 'true' }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: 'Gemini review skipped — every changed file in this PR matches the caller\'s `review_exclude_pathspecs` (generated artifacts verified by this repo\'s own CI). Nothing reviewable remains in scope.',
             });
 
       # Failure parity: if the agent job failed (API timeout, model error, etc.), post
