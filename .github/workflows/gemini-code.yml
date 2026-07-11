@@ -439,13 +439,39 @@ jobs:
       # post-feedback would post to the PR (bypassing Actions log masking). The key
       # is the ONLY secret in this job (no GITHUB_TOKEN here), so strip its exact
       # value from the captured output before it can leave the read-only job.
-      - name: Redact secrets from review output
+      # Second responsibility (LAB-4839): reject the Gemini CLI's diagnostic error
+      # envelope when it leaks into the summary output, failing this job so a model
+      # flake takes the failure-parity path in post-feedback instead of posting garbage.
+      - name: Sanitize review output
         id: sanitize
         env:
           RAW_REVIEW: ${{ steps.gemini.outputs.summary }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euo pipefail
+          # LAB-4839: the Gemini CLI can exit 0 while emitting its diagnostic JSON
+          # envelope instead of a review ("response": "" + error.INVALID_STREAM), and
+          # run-gemini-cli's empty-response fallback dumps that raw envelope into the
+          # summary output — often with leaked $GITHUB_OUTPUT heredoc text appended,
+          # so the value is NOT reliably valid JSON. Detect the envelope by shape
+          # (leading '{' plus the CLI-metadata keys "session_id" and "stats" —
+          # substring checks, since the value is not reliably parseable JSON) and
+          # fail this job so post-feedback posts the fixed failure notice instead of
+          # the blob (observed live: public-workflows PR #141).
+          if [[ "${RAW_REVIEW}" =~ ^[[:space:]]*\{ && "${RAW_REVIEW}" == *'"session_id"'* && "${RAW_REVIEW}" == *'"stats"'* ]]; then
+            ERR_MSG=$(jq -r '.error.message // empty' <<<"${RAW_REVIEW}" 2>/dev/null || true)
+            # Same literal-key redaction as CLEAN below — ERR_MSG is derived from the
+            # untrusted output before that substitution runs.
+            ERR_MSG="${ERR_MSG//"$GEMINI_API_KEY"/[REDACTED]}"
+            # Escape workflow-command metacharacters (GitHub toolkit order: % first,
+            # then CR/LF) so an attacker-influenced error message cannot smuggle a
+            # newline that terminates this ::error:: command and injects new ones.
+            ERR_MSG="${ERR_MSG//'%'/%25}"
+            ERR_MSG="${ERR_MSG//$'\r'/%0D}"
+            ERR_MSG="${ERR_MSG//$'\n'/%0A}"
+            echo "::error title=Gemini review failed::Gemini CLI returned its error envelope instead of a review${ERR_MSG:+: ${ERR_MSG}}"
+            exit 1
+          fi
           # Quote the key so it is matched as a LITERAL, not a bash glob pattern.
           CLEAN="${RAW_REVIEW//"$GEMINI_API_KEY"/[REDACTED]}"
           # Unguessable delimiter so untrusted model output can't break out of the
@@ -510,8 +536,9 @@ jobs:
               event: 'COMMENT',
             });
 
-      # Failure parity: if the agent job failed (API timeout, model error, etc.), post
-      # a fixed notice instead of failing silently. Hardcoded body — no untrusted input.
+      # Failure parity: if the agent job failed (API timeout, model error, or the
+      # sanitize step rejecting the CLI's error envelope — LAB-4839), post a fixed
+      # notice instead of failing silently. Hardcoded body — no untrusted input.
       - name: Post failure notice
         if: ${{ needs.gemini-review.result == 'failure' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
