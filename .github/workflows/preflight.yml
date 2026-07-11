@@ -24,6 +24,12 @@ on:
         required: true
         type: string
 
+      force_review_regex:
+        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md files and .agentsmesh/ canonical config). Empty = built-in coverage only."
+        required: false
+        type: string
+        default: ""
+
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner."
         required: false
@@ -100,6 +106,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEWER_NAME: ${{ inputs.reviewer_name }}
           MENTION_KEYWORD: ${{ inputs.mention_keyword }}
+          FORCE_REVIEW_REGEX: ${{ inputs.force_review_regex }}
         run: |
           set -eu
 
@@ -123,7 +130,28 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          # SKIP_RE: docs, licenses, images, plugin metadata.
+          # FORCE_RE: agent-behavior sources. A SKILL.md or .agentsmesh/ file is
+          # executable prompt-code (it changes how AI agents behave), not docs —
+          # a change there must be reviewed even though it is markdown. Callers
+          # extend this via the force_review_regex input (OR-combined). Note this
+          # deliberately also matches generated mirror copies of SKILL.md (e.g.
+          # .claude/skills/**): forcing a run on a mirror-only PR is harmless —
+          # such PRs fail the consumer's drift gate anyway, and the reviewers'
+          # exclude pathspecs keep generated mirrors out of the reviewed diff.
+          FORCE_RE='(^|/)SKILL\.md$|^\.agentsmesh/'
+          if [ -n "$FORCE_REVIEW_REGEX" ]; then
+            FORCE_RE="$FORCE_RE|$FORCE_REVIEW_REGEX"
+          fi
+
+          if echo "$FILES" | grep -qE "$FORCE_RE"; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "⚡ Agent-behavior source changed (FORCE_RE match) — $REVIEWER_NAME will review this PR."
+            exit 0
+          fi
+
+          # SKIP_RE: docs, licenses, images, plugin metadata. Evaluated only after
+          # FORCE_RE above — a FORCE_RE match short-circuits to has_code=true, so
+          # skip-pattern matches on forced paths (e.g. SKILL.md is *.md) never apply.
           # If ALL changed files match, this is a non-code PR. NOTE: .github/ is
           # intentionally NOT skipped — workflow/CI config, job permissions, and
           # secrets passthrough are high-risk and deserve AI review.
@@ -137,5 +165,5 @@ jobs:
             echo "⊘ Docs/config-only PR — $REVIEWER_NAME review will be skipped."
             gh pr comment "$PR_NUMBER" \
               --repo "$REPO" \
-              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
+              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files; skill sources like \`SKILL.md\` / \`.agentsmesh/**\` would have forced a review). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
           fi

@@ -279,7 +279,7 @@ Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusabl
 **Security posture** (as of v2.9.3):
 
 - **Same-repo-only gate**: `github.event.pull_request.head.repo.full_name == github.repository`. Fork PRs are blocked outright — stricter than the previously-used `author_association` check (which reports org members as `CONTRIBUTOR` on public repos and silently skipped runs, hit in v2.0.3-v2.0.5). Closes the CVSS 9.4 [comment-and-control](https://oddguan.com/blog/comment-and-control-prompt-injection-credential-theft-claude-code-gemini-cli-github-copilot/) attack path on both PR and review-comment triggers.
-- **Preflight job** skips Claude entirely on non-code PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / .claude-plugin/** / LICENSE / .gitignore / images`). `.github/` workflow changes are intentionally NOT skipped — CI config, job permissions, and secrets passthrough deserve AI review. Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override).
+- **Preflight job** skips Claude entirely on non-code PRs (files matching `*.md / *.markdown / *.rst / *.txt / docs/** / .claude-plugin/** / LICENSE / .gitignore / images`). `.github/` workflow changes are intentionally NOT skipped — CI config, job permissions, and secrets passthrough deserve AI review. Uses paginated `gh api pulls/N/files` (handles PRs >100 files per cli/cli#5368). `@claude` on a PR review comment bypasses the filter (documented override). Agent-behavior sources (`SKILL.md`, `.agentsmesh/**`) always force a review even when markdown-only (built-in `FORCE_RE`; extend via the `force_review_regex` input).
 - **Model hardcoded**: `--model claude-opus-4-8`. Claude runs once per PR (on `opened` or `ready_for_review`; `synchronize` is intentionally excluded — CodeRabbit + Codex already run on every push). `ready_for_review` covers PRs opened as drafts — without it, the `opened` event fires while `draft==true` (skipped) and the PR never gets a Claude review. Opus is paid 1x per PR for the highest-capability senior-engineer review.
 - `--allowedTools "Bash(gh pr comment/diff/view:*), Read, Grep, Glob"` — the minimum surface needed to review a PR and post the top-level summary comment. Inline line-anchored commenting deliberately NOT included (CodeRabbit covers it).
 - `--disallowedTools` floor: explicitly denies `Bash(curl:*)`, `Bash(wget:*)`, `Bash(gh api:*)`, `Bash(gh auth:*)`, `Bash(git add|commit|push|rm:*)`, `Write`, `Edit`, `MultiEdit`. Defense-in-depth against [claude-code-action#860](https://github.com/anthropics/claude-code-action/issues/860) where `track_progress: true` would union-merge write tools into the allowlist.
@@ -332,6 +332,8 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as the first step of both jobs. |
 | `harden-runner-policy` | `audit` | `audit` (observe + report) or `block` (deny-by-default egress). |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist when policy is `block`. Recommended: `api.anthropic.com:443, statsig.anthropic.com:443, api.github.com:443, github.com:443, release-assets.githubusercontent.com:443, registry.npmjs.org:443`. |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors). |
+| `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 
 **Secrets:**
 
@@ -359,7 +361,7 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 - **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
 - **Separate post-feedback job**: A minimal `pull-requests: write` job (runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` — no APPROVE path. If the agent job fails, it posts a fixed failure notice instead of failing silently (parity with the previous reviewer); it does not run when the review was skipped.
 - **Same-repo-only gate**: Fork PRs blocked outright (`head.repo.full_name == github.repository`)
-- **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter
+- **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter. Agent-behavior sources (`SKILL.md`, `.agentsmesh/**`) always force a review even when markdown-only (built-in `FORCE_RE`; extend via the `force_review_regex` input). `review_exclude_pathspecs` (newline-separated git pathspecs) excludes generated artifacts (e.g. agentsmesh mirrors) from the reviewed diff.
 - **Anti-injection prompt**: Gemini instructed to treat all PR content (including `GEMINI.md`) as untrusted data
 - **Pinned**: `run-gemini-cli` action SHA-pinned; the CLI version is hardcoded (`0.45.2`, **not** a caller input — it governs folder-trust/tool-policy semantics); `palatine` checkout pinned by commit SHA
 - **Wall-clock ceiling**: `timeout-minutes: 15` on the review job (`5` on the post-feedback job)
@@ -417,7 +419,7 @@ Runs OpenAI Codex as a complementary **second-vendor** PR reviewer alongside the
 
 - **Three-job defense-in-depth split** (mirrors `gemini-code.yml`): a `preflight` job (shared `preflight.yml`) skips docs-only PRs; a `codex-review` job runs the agent read-only in a sandbox; a minimal `post-feedback` job (`pull-requests: write`, runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` (no APPROVE path).
 - **Depth-2 merge-ref checkout**: `HEAD^1` is the immutable base, `HEAD^2` is the PR head; review scope (`git diff HEAD^1 HEAD`) and skill application are enforced by a hardcoded wrapper prepended to every review — the caller-supplied `prompt` is appended after it (output format/emphasis only).
-- **Same-repo-only gate**: fork PRs blocked outright; `@codex` on a PR review comment bypasses the docs-only preflight filter.
+- **Same-repo-only gate**: fork PRs blocked outright; `@codex` on a PR review comment bypasses the docs-only preflight filter. Agent-behavior sources (`SKILL.md`, `.agentsmesh/**`) always force a review even when markdown-only (built-in `FORCE_RE`; extend via the `force_review_regex` input). `review_exclude_pathspecs` (newline-separated git pathspecs) excludes generated artifacts (e.g. agentsmesh mirrors) from the reviewed diff.
 - **Pinned**: `openai/codex-action` SHA-pinned (`@c25d10f...` = v1.6).
 - **Wall-clock ceiling**: `timeout-minutes: 10` on the review job (`5` on post-feedback).
 

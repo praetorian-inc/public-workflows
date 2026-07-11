@@ -70,6 +70,18 @@ on:
         type: string
         default: "gemini-3.1-pro-preview"
 
+      review_exclude_pathspecs:
+        description: "Newline-separated git pathspec patterns (e.g. `.claude/**`, `AGENTS.md`) excluded from the reviewed diff. For generated artifacts (e.g. agentsmesh mirrors) that CI independently verifies against their canonical sources — reviewing them is pure duplication. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff."
+        required: false
+        type: string
+        default: ""
+
+      force_review_regex:
+        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md files and .agentsmesh/ canonical config). Passed through to the shared preflight."
+        required: false
+        type: string
+        default: ""
+
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner as the first step of every job."
         required: false
@@ -113,6 +125,7 @@ jobs:
     with:
       mention_keyword: "@gemini"
       reviewer_name: "Gemini"
+      force_review_regex: ${{ inputs.force_review_regex }}
       enable-harden-runner: ${{ inputs.enable-harden-runner }}
       harden-runner-policy: ${{ inputs.harden-runner-policy }}
       harden-runner-allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
@@ -277,6 +290,8 @@ jobs:
           ls -1 .gemini/skills
 
       - name: Build review context (PR diff + changed files)
+        env:
+          REVIEW_EXCLUDE_PATHSPECS: ${{ inputs.review_exclude_pathspecs }}
         run: |
           set -euo pipefail
           # No token and no network here: the depth-2 merge-ref checkout already
@@ -284,11 +299,24 @@ jobs:
           # deterministic and offline — the agent step that follows holds zero
           # credentials, mirroring codex-code.yml's tokenless sandbox.
           mkdir -p .gemini-review
+          # Caller-declared generated paths (e.g. agentsmesh mirrors) are excluded
+          # from the reviewed diff via `:(exclude)` pathspecs: they are expensive
+          # duplicated content whose integrity the consumer's CI verifies against
+          # the canonical sources independently of review. The exclusion list is
+          # also materialized for the agent so it knows not to open those paths.
+          EXCLUDES=()
+          while IFS= read -r p; do
+            [ -n "$p" ] && EXCLUDES+=(":(exclude)$p")
+          done <<< "$REVIEW_EXCLUDE_PATHSPECS"
+          if [ "${#EXCLUDES[@]}" -gt 0 ]; then
+            printf '%s\n' "$REVIEW_EXCLUDE_PATHSPECS" | grep -v '^[[:space:]]*$' > .gemini-review/excluded-paths.txt
+            echo "Excluding ${#EXCLUDES[@]} generated pathspec(s) from review scope."
+          fi
           # HEAD is the PR merge commit (parent1 = base, parent2 = PR head).
           # Diffing parent1..HEAD yields exactly the PR's net change. quotePath=false
           # keeps non-ASCII paths raw so the agent can open them by name.
-          git -c core.quotePath=false diff --no-color HEAD^1 HEAD > .gemini-review/pr.full.diff
-          git -c core.quotePath=false diff --name-only HEAD^1 HEAD > .gemini-review/changed-files.txt
+          git -c core.quotePath=false diff --no-color HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .gemini-review/pr.full.diff
+          git -c core.quotePath=false diff --name-only HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .gemini-review/changed-files.txt
 
           MAX=100000
           if [ "$(wc -c < .gemini-review/pr.full.diff)" -gt "$MAX" ]; then
@@ -430,6 +458,10 @@ jobs:
             limited turn budget. To inspect code, read files directly with read_file /
             grep_search / glob; never try to run `git`, `grep`, `cat`, or any
             shell command. You cannot modify the repo; produce your review as text only.
+
+            SCOPE: If `.gemini-review/excluded-paths.txt` exists, the paths listed in it
+            are generated artifacts that CI verifies mechanically — they are excluded
+            from the diff by the workflow and MUST NOT be read, grepped, or reviewed.
 
             ${{ inputs.prompt }}
 
