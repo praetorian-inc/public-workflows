@@ -322,6 +322,16 @@ jobs:
           # keeps non-ASCII paths raw so the agent can open them by name.
           git -c core.quotePath=false diff --no-color HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .gemini-review/pr.full.diff
           git -c core.quotePath=false diff --name-only HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .gemini-review/changed-files.txt
+          # Guard: exclusions must never blank the whole review. If the scoped diff
+          # is empty while the PR itself is not, the caller's excludes swallowed
+          # every changed file — the agent would review nothing and post a hollow
+          # LGTM (worst on PRs preflight's FORCE_RE deliberately forced). Fail loud:
+          # a misconfigured caller finds out here, and a generated-artifacts-only PR
+          # should have been caught by the consumer's own drift gate before review.
+          if [ ! -s .gemini-review/pr.full.diff ] && ! git diff --quiet HEAD^1 HEAD; then
+            echo "::error::review_exclude_pathspecs excluded every changed file in this PR — refusing to run a review with an empty scope. Excludes must cover only generated artifacts."
+            exit 1
+          fi
 
           MAX=100000
           if [ "$(wc -c < .gemini-review/pr.full.diff)" -gt "$MAX" ]; then

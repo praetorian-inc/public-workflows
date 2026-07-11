@@ -144,7 +144,17 @@ jobs:
           # exclude pathspecs keep generated mirrors out of the reviewed diff.
           FORCE_RE='(^|/)SKILL\.md$|^\.agentsmesh/|(^|/)(AGENTS|AGENTS\.override|CLAUDE|GEMINI)\.md$|(^|/)\.(agents|claude|gemini|codex)/'
           if [ -n "$FORCE_REVIEW_REGEX" ]; then
-            FORCE_RE="$FORCE_RE|$FORCE_REVIEW_REGEX"
+            # Validate the caller's ERE before trusting it: grep exits 2 on a
+            # malformed pattern, which under `set -eu` would hard-fail preflight
+            # and silently skip the review. Warn-and-ignore instead — the built-in
+            # FORCE_RE still applies either way.
+            rc=0
+            grep -qE "$FORCE_REVIEW_REGEX" /dev/null 2>/dev/null || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "::warning::force_review_regex is not a valid extended regex — ignoring the caller extension (built-in FORCE_RE still applies)."
+            else
+              FORCE_RE="$FORCE_RE|$FORCE_REVIEW_REGEX"
+            fi
           fi
 
           if echo "$FILES" | grep -qE "$FORCE_RE"; then
