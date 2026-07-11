@@ -202,7 +202,7 @@ jobs:
           mkdir -p .claude-review
           EXCLUDES=()
           while IFS= read -r p; do
-            [ -n "$p" ] && EXCLUDES+=(":(exclude)$p")
+            [ -n "${p//[[:space:]]/}" ] && EXCLUDES+=(":(exclude)$p")
           done <<< "$REVIEW_EXCLUDE_PATHSPECS"
           if [ "${#EXCLUDES[@]}" -gt 0 ]; then
             printf '%s\n' "$REVIEW_EXCLUDE_PATHSPECS" | grep -v '^[[:space:]]*$' > .claude-review/excluded-paths.txt
