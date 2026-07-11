@@ -332,7 +332,7 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner as the first step of both jobs. |
 | `harden-runner-policy` | `audit` | `audit` (observe + report) or `block` (deny-by-default egress). |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated egress allowlist when policy is `block`. Recommended: `api.anthropic.com:443, statsig.anthropic.com:443, api.github.com:443, github.com:443, release-assets.githubusercontent.com:443, registry.npmjs.org:443`. |
-| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. Threat model: on same-repo `pull_request` runs the caller workflow — including this input — executes from the PR merge ref and is therefore PR-author-modifiable, the standing property of all `pull_request`-triggered CI (an author could equally delete or neuter the caller); guard the caller's `.github/workflows/**` with CODEOWNERS if that matters, and note the skip notice leaves an on-PR audit trail. |
 | `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 
 **Secrets:**
@@ -401,7 +401,7 @@ jobs:
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443` |
-| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. Threat model: on same-repo `pull_request` runs the caller workflow — including this input — executes from the PR merge ref and is therefore PR-author-modifiable, the standing property of all `pull_request`-triggered CI (an author could equally delete or neuter the caller); guard the caller's `.github/workflows/**` with CODEOWNERS if that matters, and note the skip notice leaves an on-PR audit trail. |
 | `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 
 **Secrets:**
@@ -457,7 +457,7 @@ jobs:
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `api.openai.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443` |
-| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. Threat model: on same-repo `pull_request` runs the caller workflow — including this input — executes from the PR merge ref and is therefore PR-author-modifiable, the standing property of all `pull_request`-triggered CI (an author could equally delete or neuter the caller); guard the caller's `.github/workflows/**` with CODEOWNERS if that matters, and note the skip notice leaves an on-PR audit trail. |
 | `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 
 **Secrets:**
