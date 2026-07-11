@@ -260,6 +260,7 @@ jobs:
           echo "PR diff: $(wc -c < .codex-review/pr.diff) bytes across $(wc -l < .codex-review/changed-files.txt) file(s)"
 
       - name: Purge PR-supplied agent config (before staging trusted skills)
+        if: steps.context.outputs.empty_scope != 'true'
         run: |
           set -euo pipefail
           # Codex auto-discovers agent config — .agents/skills (skills, implicit
@@ -301,7 +302,7 @@ jobs:
       # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
       - name: Mint palatine read token
         id: skills-token
-        if: ${{ env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
@@ -311,7 +312,7 @@ jobs:
 
       # Staged AFTER the purge so the sweep above never touches this trusted tree.
       - name: Load curated review skills (palatine)
-        if: ${{ steps.skills-token.outputs.token != '' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: praetorian-inc/palatine
@@ -322,7 +323,7 @@ jobs:
           persist-credentials: false
 
       - name: Stage curated skills
-        if: ${{ steps.skills-token.outputs.token != '' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         run: |
           set -euo pipefail
           mkdir -p .agents/skills
@@ -339,6 +340,7 @@ jobs:
       # This runs while sudo is still available and BEFORE Codex executes; once
       # codex-action drops sudo, Codex has neither sudo nor a container runtime.
       - name: Lock down container runtime (preserve CVE-2025-32955 protection)
+        if: steps.context.outputs.empty_scope != 'true'
         run: |
           set -u
           sudo systemctl stop docker.socket docker.service containerd.service 2>/dev/null || true

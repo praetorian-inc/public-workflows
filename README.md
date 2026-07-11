@@ -401,6 +401,8 @@ jobs:
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443` |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. |
+| `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 
 **Secrets:**
 
@@ -455,6 +457,8 @@ jobs:
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `api.openai.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443` |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. |
+| `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 
 **Secrets:**
 

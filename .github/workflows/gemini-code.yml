@@ -207,99 +207,23 @@ jobs:
           fetch-depth: 2
           persist-credentials: false
 
-      # Neutralize PR-supplied agent config BEFORE anything trusted is staged. The merged
-      # tree is untrusted PR content and workspace trust is enabled (see
-      # GEMINI_CLI_TRUST_WORKSPACE below), so gemini-cli would honor any agent-control
-      # files it finds. Purge ALL of them so a same-repo PR cannot steer or blind the
-      # review:
-      #   - .gemini / .agents : skill + settings discovery dirs. `.agents/skills` takes
-      #     PRECEDENCE over `.gemini/skills`, so a PR-authored skill would load as a
-      #     "trusted" skill and drive the review via activate_skill.
-      #   - GEMINI.md / AGENTS.md (recursive): hierarchical agent instructions, loaded
-      #     from subdirectories too — root-only removal is insufficient, and gemini-cli
-      #     honors the AGENTS.md legacy name as well.
-      #   - .geminiignore (recursive): would silently blind glob/list_directory.
-      #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this cwd; a
-      #     PR-supplied registry override is a supply-chain vector.
-      # This runs BEFORE the palatine checkout (which lands in .pr-skills), so the sweep
-      # is UNCONDITIONAL — there is NO .pr-skills carve-out. A PR shipping its own
-      # .pr-skills/GEMINI.md is therefore purged too; and if the gated checkout is skipped
-      # (no token: public repos / fork PRs) nothing trusted is staged and Gemini reviews
-      # with no agent config at all — never the attacker's. Settings + skills then come
-      # ONLY from the action input and, when present, the SHA-pinned palatine checkout.
-      # find flags:
-      #   - no -type f, so a *symlinked* GEMINI.md/AGENTS.md is removed (not skipped);
-      #     gemini-cli would otherwise resolve the link. -iname covers case variants.
-      #   - -prune on matches so find does NOT descend into a matched directory: with
-      #     -exec rm -rf {} + an ARG_MAX flush could otherwise delete a parent dir
-      #     mid-traversal and crash find under set -e.
-      #   - -exec rm -rf {} + (not -delete) removes files, symlinks AND directories
-      #     uniformly, so a dir named GEMINI.md can't break the sweep.
-      #   - skip .git (speed).
-      # .npmrc/.yarnrc* are root-only supply-chain files, removed directly.
-      - name: Purge PR-supplied agent config
-        run: |
-          set -euo pipefail
-          rm -rf .npmrc .yarnrc .yarnrc.yml
-          find . -name .git -prune -o \
-            \( -iname '.gemini' -o -iname '.agents' -o -iname 'GEMINI.md' -o -iname 'AGENTS.md' -o -iname '.geminiignore' \) \
-            -prune -exec rm -rf {} +
-
-      # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
-      # praetorian-inc/palatine is the canonical-source-of-truth repo (agentmesh
-      # materializes one canonical skill set into each runtime's native dir) and is
-      # INTERNAL, so reading it requires a token. We mint a short-lived GitHub App token
-      # scoped to palatine ONLY when the caller supplies the App credentials — i.e. on
-      # trusted internal callers. On public repos / fork PRs no such secret is available,
-      # so the mint + checkout + stage are skipped and the review runs without curated
-      # skills (fail-closed: internal skills are never pulled into a public run's logs).
-      # The purge step above ALWAYS runs, so PR-supplied agent config is neutralized
-      # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
-      - name: Mint palatine read token
-        id: skills-token
-        if: ${{ env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
-        with:
-          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
-          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
-          owner: praetorian-inc
-          repositories: palatine
-
-      - name: Load curated review skills (palatine)
-        if: ${{ steps.skills-token.outputs.token != '' }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          repository: praetorian-inc/palatine
-          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
-          path: .pr-skills
-          fetch-depth: 1
-          token: ${{ steps.skills-token.outputs.token }}
-          persist-credentials: false
-
-      # Stage the trusted curated tree after the SHA-pinned palatine checkout. Gated on
-      # the token: skipped when no curated skills were checked out (public repos / fork
-      # PRs) — Gemini then reviews with no skills dir (PR-supplied config already purged
-      # unconditionally by the step above).
-      - name: Stage curated skills
-        if: ${{ steps.skills-token.outputs.token != '' }}
-        run: |
-          set -euo pipefail
-          mkdir -p .gemini/skills
-          cp -R .pr-skills/.gemini/skills/. .gemini/skills/
-          rm -rf .pr-skills
-          echo "Staged review skills:"
-          ls -1 .gemini/skills
-
       - name: Build review context (PR diff + changed files)
         id: context
         env:
           REVIEW_EXCLUDE_PATHSPECS: ${{ inputs.review_exclude_pathspecs }}
         run: |
           set -euo pipefail
-          # No token and no network here: the depth-2 merge-ref checkout already
-          # has the merge commit and both parents locally. This step is fully
-          # deterministic and offline — the agent step that follows holds zero
-          # credentials, mirroring codex-code.yml's tokenless sandbox.
+          # Runs immediately after checkout, BEFORE any token is minted and before
+          # any other setup: no token and no network here — the depth-2 merge-ref
+          # checkout already has the merge commit and both parents locally, so the
+          # commit-to-commit diff is fully deterministic and offline (the agent
+          # step that follows holds zero credentials, mirroring codex-code.yml's
+          # tokenless sandbox). Running first also lets an empty-scope PR
+          # (every changed file caller-excluded) short-circuit the fallible setup
+          # below — purge, token mint, skills checkout — via empty_scope gates,
+          # so such PRs always reach the deterministic skip notice instead of
+          # dying in setup. The later purge only mutates the working tree, which
+          # cannot affect this commit-to-commit diff.
           # Recreate the context dir from scratch: the merged tree is untrusted PR
           # content, and a PR could commit its own .gemini-review/excluded-paths.txt
           # (or a symlinked .gemini-review) to blind the reviewer — the prompts treat
@@ -346,6 +270,90 @@ jobs:
           fi
           rm -f .gemini-review/pr.full.diff
           echo "PR diff: $(wc -c < .gemini-review/pr.diff) bytes across $(wc -l < .gemini-review/changed-files.txt) file(s)"
+
+      # Neutralize PR-supplied agent config BEFORE anything trusted is staged. The merged
+      # tree is untrusted PR content and workspace trust is enabled (see
+      # GEMINI_CLI_TRUST_WORKSPACE below), so gemini-cli would honor any agent-control
+      # files it finds. Purge ALL of them so a same-repo PR cannot steer or blind the
+      # review:
+      #   - .gemini / .agents : skill + settings discovery dirs. `.agents/skills` takes
+      #     PRECEDENCE over `.gemini/skills`, so a PR-authored skill would load as a
+      #     "trusted" skill and drive the review via activate_skill.
+      #   - GEMINI.md / AGENTS.md (recursive): hierarchical agent instructions, loaded
+      #     from subdirectories too — root-only removal is insufficient, and gemini-cli
+      #     honors the AGENTS.md legacy name as well.
+      #   - .geminiignore (recursive): would silently blind glob/list_directory.
+      #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this cwd; a
+      #     PR-supplied registry override is a supply-chain vector.
+      # This runs BEFORE the palatine checkout (which lands in .pr-skills), so the sweep
+      # is UNCONDITIONAL — there is NO .pr-skills carve-out. A PR shipping its own
+      # .pr-skills/GEMINI.md is therefore purged too; and if the gated checkout is skipped
+      # (no token: public repos / fork PRs) nothing trusted is staged and Gemini reviews
+      # with no agent config at all — never the attacker's. Settings + skills then come
+      # ONLY from the action input and, when present, the SHA-pinned palatine checkout.
+      # find flags:
+      #   - no -type f, so a *symlinked* GEMINI.md/AGENTS.md is removed (not skipped);
+      #     gemini-cli would otherwise resolve the link. -iname covers case variants.
+      #   - -prune on matches so find does NOT descend into a matched directory: with
+      #     -exec rm -rf {} + an ARG_MAX flush could otherwise delete a parent dir
+      #     mid-traversal and crash find under set -e.
+      #   - -exec rm -rf {} + (not -delete) removes files, symlinks AND directories
+      #     uniformly, so a dir named GEMINI.md can't break the sweep.
+      #   - skip .git (speed).
+      # .npmrc/.yarnrc* are root-only supply-chain files, removed directly.
+      - name: Purge PR-supplied agent config
+        if: steps.context.outputs.empty_scope != 'true'
+        run: |
+          set -euo pipefail
+          rm -rf .npmrc .yarnrc .yarnrc.yml
+          find . -name .git -prune -o \
+            \( -iname '.gemini' -o -iname '.agents' -o -iname 'GEMINI.md' -o -iname 'AGENTS.md' -o -iname '.geminiignore' \) \
+            -prune -exec rm -rf {} +
+
+      # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
+      # praetorian-inc/palatine is the canonical-source-of-truth repo (agentmesh
+      # materializes one canonical skill set into each runtime's native dir) and is
+      # INTERNAL, so reading it requires a token. We mint a short-lived GitHub App token
+      # scoped to palatine ONLY when the caller supplies the App credentials — i.e. on
+      # trusted internal callers. On public repos / fork PRs no such secret is available,
+      # so the mint + checkout + stage are skipped and the review runs without curated
+      # skills (fail-closed: internal skills are never pulled into a public run's logs).
+      # The purge step above ALWAYS runs, so PR-supplied agent config is neutralized
+      # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
+      - name: Mint palatine read token
+        id: skills-token
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
+        with:
+          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
+          owner: praetorian-inc
+          repositories: palatine
+
+      - name: Load curated review skills (palatine)
+        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: praetorian-inc/palatine
+          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
+          path: .pr-skills
+          fetch-depth: 1
+          token: ${{ steps.skills-token.outputs.token }}
+          persist-credentials: false
+
+      # Stage the trusted curated tree after the SHA-pinned palatine checkout. Gated on
+      # the token: skipped when no curated skills were checked out (public repos / fork
+      # PRs) — Gemini then reviews with no skills dir (PR-supplied config already purged
+      # unconditionally by the step above).
+      - name: Stage curated skills
+        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p .gemini/skills
+          cp -R .pr-skills/.gemini/skills/. .gemini/skills/
+          rm -rf .pr-skills
+          echo "Staged review skills:"
+          ls -1 .gemini/skills
 
       # grep_search backend: gemini-cli prefers ripgrep (RipGrepTool) and silently
       # falls back to a JS-RegExp GrepTool when no `rg` binary is resolvable
