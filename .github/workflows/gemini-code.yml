@@ -453,12 +453,16 @@ jobs:
           # envelope instead of a review ("response": "" + error.INVALID_STREAM), and
           # run-gemini-cli's empty-response fallback dumps that raw envelope into the
           # summary output — often with leaked $GITHUB_OUTPUT heredoc text appended,
-          # so the value is NOT reliably valid JSON. Detect the envelope by shape and
+          # so the value is NOT reliably valid JSON. Detect the envelope by shape
+          # (leading '{' plus the CLI-metadata keys "session_id" and "stats" —
+          # substring checks, since the value is not reliably parseable JSON) and
           # fail this job so post-feedback posts the fixed failure notice instead of
           # the blob (observed live: public-workflows PR #141).
-          LTRIMMED="${RAW_REVIEW#"${RAW_REVIEW%%[![:space:]]*}"}"
-          if [[ "${LTRIMMED}" == '{'* && "${RAW_REVIEW}" == *'"session_id"'* ]]; then
+          if [[ "${RAW_REVIEW}" =~ ^[[:space:]]*\{ && "${RAW_REVIEW}" == *'"session_id"'* && "${RAW_REVIEW}" == *'"stats"'* ]]; then
             ERR_MSG=$(jq -r '.error.message // empty' <<<"${RAW_REVIEW}" 2>/dev/null || true)
+            # Same literal-key redaction as CLEAN below — ERR_MSG is derived from the
+            # untrusted output before that substitution runs.
+            ERR_MSG="${ERR_MSG//"$GEMINI_API_KEY"/[REDACTED]}"
             # Escape workflow-command metacharacters (GitHub toolkit order: % first,
             # then CR/LF) so an attacker-influenced error message cannot smuggle a
             # newline that terminates this ::error:: command and injects new ones.
