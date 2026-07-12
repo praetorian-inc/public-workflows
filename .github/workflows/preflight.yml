@@ -24,6 +24,12 @@ on:
         required: true
         type: string
 
+      force_review_regex:
+        description: "Extended regex (grep -E) of changed-file paths that force a review even when every changed file matches the docs-only skip pattern. OR-combined with the built-in FORCE_RE, which always covers agent-behavior sources (SKILL.md, agent instruction files like AGENTS.md/CLAUDE.md/GEMINI.md, harness config dirs, and .agentsmesh/ canonical config). Empty = built-in coverage only."
+        required: false
+        type: string
+        default: ""
+
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner."
         required: false
@@ -100,6 +106,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REVIEWER_NAME: ${{ inputs.reviewer_name }}
           MENTION_KEYWORD: ${{ inputs.mention_keyword }}
+          FORCE_REVIEW_REGEX: ${{ inputs.force_review_regex }}
         run: |
           set -eu
 
@@ -123,13 +130,58 @@ jobs:
           echo "$FILES" | sed 's/^/  /'
           echo
 
-          # SKIP_RE: docs, licenses, images, plugin metadata.
+          # FORCE_RE: agent-behavior sources. These are executable prompt-code
+          # (they change how AI agents behave), not docs — a change there must be
+          # reviewed even though it is markdown. Covers SKILL.md, `.agentsmesh/**`
+          # canonical config, agent instruction files (AGENTS.md /
+          # AGENTS.override.md / CLAUDE.md / GEMINI.md), and harness config dirs
+          # (`.agents/` `.claude/` `.gemini/` `.codex/`). The trailing `/` in the
+          # dir alternation keeps `.claude-plugin/**` in SKIP_RE territory.
+          # Callers extend this via the force_review_regex input (OR-combined).
+          # Note this deliberately also matches generated mirror copies (e.g.
+          # .claude/skills/**): forcing a run on a mirror-only PR is harmless —
+          # such PRs fail the consumer's drift gate anyway, and the reviewers'
+          # exclude pathspecs keep generated mirrors out of the reviewed diff.
+          FORCE_RE='(^|/)SKILL\.md$|^\.agentsmesh/|(^|/)(AGENTS|AGENTS\.override|CLAUDE|GEMINI)\.md$|(^|/)\.(agents|claude|gemini|codex)/'
+          if [ -n "$FORCE_REVIEW_REGEX" ]; then
+            # Validate the caller's ERE before trusting it: grep exits 2 on a
+            # malformed pattern, which under `set -eu` would hard-fail preflight
+            # and silently skip the review. Warn-and-ignore instead — the built-in
+            # FORCE_RE still applies either way.
+            rc=0
+            grep -qE -- "$FORCE_REVIEW_REGEX" /dev/null 2>/dev/null || rc=$?
+            if [ "$rc" -eq 2 ]; then
+              echo "::warning::force_review_regex is not a valid extended regex — ignoring the caller extension (built-in FORCE_RE still applies)."
+            else
+              FORCE_RE="$FORCE_RE|$FORCE_REVIEW_REGEX"
+            fi
+          fi
+
+          if echo "$FILES" | grep -qE -- "$FORCE_RE"; then
+            echo "has_code=true" >> "$GITHUB_OUTPUT"
+            echo "⚡ Agent-behavior source changed (FORCE_RE match) — $REVIEWER_NAME will review this PR."
+            exit 0
+          fi
+
+          # SKIP_RE: docs, licenses, images, plugin metadata. Evaluated only after
+          # FORCE_RE above — a FORCE_RE match short-circuits to has_code=true, so
+          # skip-pattern matches on forced paths (e.g. SKILL.md is *.md) never apply.
           # If ALL changed files match, this is a non-code PR. NOTE: .github/ is
           # intentionally NOT skipped — workflow/CI config, job permissions, and
           # secrets passthrough are high-risk and deserve AI review.
-          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|^LICENSE|^\.gitignore$|^docs/|^\.claude-plugin/'
+          # License matching is by EXPLICIT filename (LICENSE/LICENCE/COPYING/NOTICE,
+          # optionally with an SPDX-ish dotted suffix that starts with an uppercase
+          # letter or digit — e.g. NOTICE.Apache-2.0, COPYING.LESSER, LICENSE.0BSD —
+          # at the root or in a subdir) — deliberately NOT a `^LICENSE` prefix, which
+          # would also skip code files like LICENSE_CHECK.py or LICENSEValidator.go.
+          # Lowercase-extension files (LICENSE.py, NOTICE.go) fall through to review;
+          # plain-doc variants (LICENSE.md, LICENSE.txt) still skip via the extension
+          # branch below. Near-miss names (e.g. LICENSE-MIT) fall through to review:
+          # the tradeoff errs toward reviewing too much, never toward silently
+          # skipping code.
+          SKIP_RE='\.(md|markdown|rst|txt|png|jpg|jpeg|svg|gif|webp|ico)$|(^|/)(LICENSE|LICENCE|COPYING|NOTICE)(\.[A-Z0-9][A-Za-z0-9.-]*)?$|^\.gitignore$|^docs/|^\.claude-plugin/'
 
-          if echo "$FILES" | grep -vE "$SKIP_RE" | grep -q .; then
+          if echo "$FILES" | grep -vE -- "$SKIP_RE" | grep -q .; then
             echo "has_code=true" >> "$GITHUB_OUTPUT"
             echo "✓ Code changes detected — $REVIEWER_NAME will review this PR."
           else
@@ -137,5 +189,5 @@ jobs:
             echo "⊘ Docs/config-only PR — $REVIEWER_NAME review will be skipped."
             gh pr comment "$PR_NUMBER" \
               --repo "$REPO" \
-              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
+              --body "$REVIEWER_NAME review skipped — non-code PR (only changed files matching \`docs/**\`, \`.claude-plugin/**\`, \`*.md\`, \`*.txt\`, images, or license-like files; agent-behavior sources like \`SKILL.md\`, \`AGENTS.md\`/\`CLAUDE.md\`, or \`.agentsmesh/**\` would have forced a review). Post \`$MENTION_KEYWORD\` on a review comment to force a review."
           fi
