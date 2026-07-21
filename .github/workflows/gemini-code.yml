@@ -68,7 +68,9 @@ on:
         description: "Gemini model ID"
         required: false
         type: string
-        default: "gemini-3.1-pro-preview"
+        # GA model: the -preview models hallucinate the excluded run_shell_command
+        # and death-spiral into FatalTurnLimitedError (exit 53); 2.5-pro is stable. (ENG-4900)
+        default: "gemini-2.5-pro"
 
       review_exclude_pathspecs:
         description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
