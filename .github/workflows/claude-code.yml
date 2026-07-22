@@ -70,13 +70,13 @@ on:
         default: 30
 
       model:
-        description: "Claude model ID for the review run. Default claude-opus-4-8 keeps existing callers on Opus (the senior-engineer review model). Callers pinning a non-default primary (e.g. claude-fable-5) should also set fallback_model so availability/guardrail downgrades don't fail the review."
+        description: "Claude model ID for the review run. Default claude-opus-4-8 keeps existing callers on Opus (the senior-engineer review model). Callers pinning a non-default primary (e.g. claude-fable-5) should also set fallback_model so overload/availability errors degrade to the fallback instead of failing the review."
         required: false
         type: string
         default: "claude-opus-4-8"
 
       fallback_model:
-        description: "Optional comma-separated fallback model chain passed to Claude Code's `--fallback-model`, used when the primary model is overloaded or unavailable (e.g. callers pinning claude-fable-5 as primary should set claude-opus-4-8 here so guardrail/availability downgrades degrade the review instead of failing it). Empty = no fallback flag."
+        description: "Optional comma-separated fallback model chain passed to Claude Code's `--fallback-model`, used when the primary model is overloaded, unavailable, or returns a non-retryable server error (e.g. claude-opus-4-8 for callers pinning claude-fable-5). Caveat: a safety-classifier decline is not an availability error — it returns stop_reason 'refusal' and ends the review turn without switching models. Empty = no fallback flag."
         required: false
         type: string
         default: ""
