@@ -76,7 +76,7 @@ on:
         default: "claude-opus-4-8"
 
       fallback_model:
-        description: "Optional comma-separated fallback model chain passed to Claude Code's `--fallback-model`, used when the primary model is overloaded, unavailable, or returns a non-retryable server error (e.g. claude-opus-4-8 for callers pinning claude-fable-5). Caveat: a safety-classifier decline is not an availability error — it returns stop_reason 'refusal' and ends the review turn without switching models. Empty = no fallback flag."
+        description: "Optional comma-separated fallback model chain (no spaces — `a, b` fails validation) passed to Claude Code's `--fallback-model`, used when the primary model is overloaded, unavailable, or returns a non-retryable server error (e.g. claude-opus-4-8 for callers pinning claude-fable-5). Caveat: a safety-classifier decline is not an availability error — it returns stop_reason 'refusal' and ends the review turn without switching models. Empty = no fallback flag."
         required: false
         type: string
         default: ""
