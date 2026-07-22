@@ -37,10 +37,10 @@ on:
           - If nothing significant in any section: "No critical issues — LGTM pending human review."
 
       model:
-        description: "Codex model ID. gpt-5.5 is the standard default for reviews (validated accessible). Override per-caller only for special cases (e.g. gpt-5.4-mini for cost-sensitive repos, gpt-5.3-codex for complex multi-file reviews)."
+        description: "Codex review model ID. Default gpt-5.6-sol — the flagship, Codex-optimized 5.6 tier (validated accessible in CI). Override per-caller only for special cases: gpt-5.6-luna (fast/cheap, cost-sensitive repos) or gpt-5.6-terra (balanced cost/quality). Note: there is no plain 'gpt-5.6' — the 5.6 generation ships only as the luna/terra/sol tiers."
         required: false
         type: string
-        default: "gpt-5.5"
+        default: "gpt-5.6-sol"
 
       effort:
         description: "Reasoning effort level (minimal, low, medium, high)"
