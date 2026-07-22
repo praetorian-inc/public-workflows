@@ -26,6 +26,7 @@ jobs:
   # these files, the branch name of this PR itself (fix/eng-4658-…) contains a
   # Linear ID, so the call-positive job exercises the happy path end-to-end.
   call-positive:
+    if: github.event_name == 'pull_request'
     name: Call linear-id-required (this PR's branch has an ID)
     uses: ./.github/workflows/linear-id-required.yml
     permissions:
