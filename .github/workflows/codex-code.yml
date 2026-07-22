@@ -43,7 +43,7 @@ on:
         default: "gpt-5.6-sol"
 
       effort:
-        description: "Reasoning effort level (minimal, low, medium, high)"
+        description: "Reasoning effort level (none, low, medium, high, xhigh)"
         required: false
         type: string
         default: "medium"
