@@ -240,9 +240,11 @@ jobs:
       # interpolated into the claude_args block below; without this gate a
       # caller could smuggle extra CLI flags through them (e.g. append
       # `--allowedTools ...` to widen the toolset) and defeat the hardened,
-      # non-configurable tool surface this file guarantees. Restricting to
-      # model-ID characters (alnum, dot, underscore, comma, hyphen) makes flag
-      # injection impossible — no spaces, no quotes, no leading-dash words.
+      # non-configurable tool surface this file guarantees. model must be a
+      # SINGLE model ID (alnum, dot, underscore, hyphen; no commas) and
+      # fallback_model a comma-separated list of such IDs; both must start
+      # with an alphanumeric character, so flag injection is impossible — no
+      # spaces, no quotes, no leading-dash words.
       # Inputs are passed via env: (never inline into the script body) so the
       # shell never parses caller-controlled text as code.
       # Matching is done with bash's whole-string [[ =~ ]] — deliberately, not
@@ -261,14 +263,16 @@ jobs:
           FALLBACK_MODEL: ${{ inputs.fallback_model }}
         run: |
           set -euo pipefail
-          if [[ ! "$MODEL" =~ ^[A-Za-z0-9._,-]+$ ]]; then
-            echo "::error::Invalid model input — must match ^[A-Za-z0-9._,-]+$ (single-line model IDs only, no flags)."
+          model_re='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          fallback_re='^[A-Za-z0-9][A-Za-z0-9._-]*(,[A-Za-z0-9][A-Za-z0-9._-]*)*$'
+          if [[ ! "$MODEL" =~ $model_re ]]; then
+            echo "::error::Invalid model input — must be a single model ID starting with an alphanumeric character, matching ^[A-Za-z0-9][A-Za-z0-9._-]*$ (no commas, no flags)."
             printf 'offending value: %q\n' "$MODEL"
             exit 1
           fi
           # fallback_model is optional; skip the check when empty (no flag emitted).
-          if [[ -n "$FALLBACK_MODEL" && ! "$FALLBACK_MODEL" =~ ^[A-Za-z0-9._,-]+$ ]]; then
-            echo "::error::Invalid fallback_model input — must match ^[A-Za-z0-9._,-]+$ (single-line, comma-separated model IDs only, no flags)."
+          if [[ -n "$FALLBACK_MODEL" && ! "$FALLBACK_MODEL" =~ $fallback_re ]]; then
+            echo "::error::Invalid fallback_model input — must be comma-separated model IDs, each starting with an alphanumeric character and matching [A-Za-z0-9][A-Za-z0-9._-]* (no empty elements, no leading/trailing comma, no flags)."
             printf 'offending value: %q\n' "$FALLBACK_MODEL"
             exit 1
           fi
