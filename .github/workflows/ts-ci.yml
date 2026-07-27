@@ -65,10 +65,14 @@ on:
         default: true
 
       test-script:
-        description: "npm script to run for tests. Must be a key in package.json scripts."
+        description: >
+          npm script to run for tests. Left empty, it defaults to the "test"
+          script and is skipped (with a notice) if that script doesn't exist —
+          so repos with no tests aren't forced to fail. Set explicitly and the
+          named script must exist, or the Test job fails.
         required: false
         type: string
-        default: "test"
+        default: ""
 
       enable-private-deps:
         description: "Generate a GitHub App token for private dependency access before npm ci."
@@ -257,6 +261,9 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: ${{ inputs.node-version }}
+          # Cross-run npm cache; node_modules is handed off via artifact, not this.
+          cache: npm
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
 
       - name: Install dependencies
         working-directory: ${{ inputs.working-directory }}
@@ -267,13 +274,25 @@ jobs:
             npm install --no-audit --no-fund
           fi
 
-      - name: Cache node_modules for downstream jobs
-        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+      # Hand node_modules to downstream jobs via a run-scoped artifact (no cross-PR
+      # cache-key collisions). tar first: artifacts drop the exec bit and symlinks,
+      # which would leave node_modules/.bin/* non-executable.
+      - name: Archive node_modules
+        env:
+          # Via env, not inline ${{ }}, to avoid shell injection (zizmor).
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -cf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY" node_modules
+
+      - name: Upload node_modules for downstream jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          path: |
-            ${{ inputs.working-directory }}/node_modules
-            ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          path: ${{ runner.temp }}/node-modules.tar
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+          compression-level: 1
 
   typecheck:
     name: Type check
@@ -302,13 +321,17 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Restore node_modules
-        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+      - name: Download node_modules
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: |
-            ${{ inputs.working-directory }}/node_modules
-            ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          path: ${{ runner.temp }}
+
+      - name: Extract node_modules
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -xf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY"
 
       - name: Type check
         working-directory: ${{ inputs.working-directory }}
@@ -346,13 +369,17 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Restore node_modules
-        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+      - name: Download node_modules
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: |
-            ${{ inputs.working-directory }}/node_modules
-            ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          path: ${{ runner.temp }}
+
+      - name: Extract node_modules
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -xf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY"
 
       - name: Lint
         working-directory: ${{ inputs.working-directory }}
@@ -427,22 +454,32 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
-      - name: Restore node_modules
-        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+      - name: Download node_modules
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: |
-            ${{ inputs.working-directory }}/node_modules
-            ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          name: node-modules-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          path: ${{ runner.temp }}
+
+      - name: Extract node_modules
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+          NODE_MODULES_TAR: ${{ runner.temp }}/node-modules.tar
+        run: tar -xf "$NODE_MODULES_TAR" -C "$WORKING_DIRECTORY"
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
+        # Run the script if it exists; fail if an explicit test-script is missing
+        # (misconfig); skip if only the default "test" is absent (repo has none).
         run: |
-          if npm run "$TEST_SCRIPT" --if-present 2>/dev/null; then
-            echo "Tests passed"
-          else
-            echo "::error::Test script '$TEST_SCRIPT' failed or not found"
+          set -euo pipefail
+          script="${TEST_SCRIPT:-test}"
+          if [ "$(npm pkg get "scripts.$script")" != "{}" ]; then
+            npm run "$script"
+          elif [ -n "${TEST_SCRIPT:-}" ]; then
+            echo "::error::test-script '$TEST_SCRIPT' is not defined in package.json scripts."
             exit 1
+          else
+            echo "::notice::No 'test' script in package.json — no tests to run. Set enable-test: false to be explicit."
           fi
