@@ -303,12 +303,16 @@ jobs:
       - name: Mint palatine read token
         id: skills-token
         if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0 # zizmor: ignore[github-app] token scoped to palatine read via owner/repositories inputs, bounded by App install
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
           private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
           owner: praetorian-inc
           repositories: palatine
+          # Pin the token to the one permission its only consumer (the read-only
+          # checkout below) needs, so widening the App installation's grant cannot
+          # widen this token. metadata:read is omitted — GitHub adds that baseline.
+          permission-contents: read
 
       # Staged AFTER the purge so the sweep above never touches this trusted tree.
       - name: Load curated review skills (palatine)
