@@ -2,7 +2,8 @@ name: "CLAUDE.md Drift Detection (Callable)"
 # Detects when code changes in a PR may have made CLAUDE.md documentation stale.
 # Two-phase design: a zero-cost shell pre-filter determines which CLAUDE.md files
 # are relevant to the PR's code changes, then Claude (Haiku) performs a read-only
-# semantic check only when needed.
+# semantic check only when needed. A pre-filter failure fails OPEN at the job
+# boundary — drift-check then examines every CLAUDE.md (ENG-5425).
 #
 # Caller template (add to each repo):
 #
@@ -81,7 +82,7 @@ jobs:
       !contains(github.actor, 'dependabot') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10  # backstop only; the checkout and filter steps carry their own 4-minute caps so a stall surfaces as a step FAILURE (fail-open reachable), not a job-level cancel (ENG-5425)
     permissions:
       contents: read
     outputs:
@@ -99,8 +100,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
           persist-credentials: false
+        timeout-minutes: 4
 
       - name: Find relevant CLAUDE.md files
         id: check
@@ -110,21 +113,48 @@ jobs:
           REPO: ${{ github.repository }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        timeout-minutes: 4
         run: |
           set -eu
 
           # ── Step 1: Get changed files from the local checkout via git diff ──
-          # This job already checks out the full history (fetch-depth: 0), so we
-          # diff the merge base against the PR head locally — no API call. That
-          # needs only `contents: read`; the old pulls/{n}/files API required
-          # `pull-requests: read`, which a narrow-permission caller cannot grant
-          # (logless startup_failure). Three-dot base...head matches pulls/files
-          # semantics (changes relative to the merge base).
+          # The checkout is shallow (fetch-depth: 1) and deepened below just far
+          # enough to reach the merge base, so we diff the merge base against
+          # the PR head locally — no API call. That needs only `contents: read`;
+          # the old pulls/{n}/files API required `pull-requests: read`, which a
+          # narrow-permission caller cannot grant (logless startup_failure).
+          # Three-dot base...head matches pulls/files semantics (changes
+          # relative to the merge base).
           #
-          # Fail open — same posture as the compare-API preflights in the sibling
-          # reusables: if the diff can't be computed (a SHA or the merge base is
-          # somehow unavailable), drift-check every CLAUDE.md rather than letting
-          # `set -e` abort the run and silently skip drift detection.
+          # Fail open, two tiers. Tier 1 (in-step): if the diff can't be
+          # computed (a SHA or the merge base is unavailable), drift-check every
+          # CLAUDE.md rather than letting `set -e` abort the run and silently
+          # skip drift detection. Tier 2 (job boundary): if this whole step or
+          # job dies, drift-check's `if:` treats a failed pre-filter as "check
+          # everything" — ENG-5425: a fail-open inside a step cannot survive the
+          # death of its own job.
+
+          # Acquire just enough history for the three-dot diff: fetch base and
+          # head at depth 1, then deepen geometrically until the merge base is
+          # reachable. Best-effort by design — on any miss the git-diff fail-open
+          # below fires. fetch-depth: 0 is deliberately avoided: a full clone of
+          # the largest consumer cannot finish inside any fixed timeout, and a
+          # timed-out job is `cancelled`, which skips this step entirely
+          # (ENG-5425). persist-credentials is false, so pass the token per
+          # invocation as an ephemeral header instead of persisting it.
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          fetch() { git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"; }
+          fetch --depth=1 origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+          depth=8
+          until git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1; do
+            if [ "$depth" -gt 4096 ]; then
+              echo "⚠ merge base not reachable within deepen budget (depth cap 4096)"
+              break
+            fi
+            fetch --deepen="$depth" origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || break
+            depth=$((depth * 4))
+          done
+
           if ! FILES=$(git diff --name-only "$BASE_SHA...$HEAD_SHA" 2>/dev/null); then
             all_mds=$(find . -name "CLAUDE.md" -type f | sed 's|^\./||' | sort | tr '\n' ',' | sed 's/,$//')
             if [ -z "$all_mds" ]; then
@@ -233,9 +263,15 @@ jobs:
   # comment if stale content is found, does NOT edit any files.
   drift-check:
     needs: pre-filter
-    if: needs.pre-filter.outputs.should_run == 'true'
+    # A failed pre-filter (step timeout or script error) must degrade to
+    # "drift-check every CLAUDE.md", never to `skipped`; `!cancelled()` keeps
+    # supersession cancels and skipped pre-filters (draft/bot PRs) skipped.
+    if: >-
+      !cancelled() &&
+      (needs.pre-filter.outputs.should_run == 'true' ||
+       needs.pre-filter.result == 'failure')
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15  # fallback mode may examine every CLAUDE.md in a large consumer
     permissions:
       contents: read
       pull-requests: write
@@ -251,10 +287,62 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
           persist-credentials: false
+        timeout-minutes: 4
+
+      - name: Resolve scope and fetch diff history
+        id: scope
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PRE_FILTER_RESULT: ${{ needs.pre-filter.result }}
+          RELEVANT_MDS: ${{ needs.pre-filter.outputs.relevant_mds }}
+        timeout-minutes: 4
+        run: |
+          set -eu
+
+          # Same shallow-deepen acquisition as pre-filter (see that step for
+          # rationale); here it also materializes origin/<base-ref> so the
+          # prompt's documented `git diff origin/<base>...HEAD` works without
+          # a full clone. Best-effort: the model can fall back to `gh pr diff`.
+          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          fetch() { git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"; }
+          fetch --depth=1 origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || true
+          depth=8
+          until git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1; do
+            if [ "$depth" -gt 4096 ]; then
+              echo "⚠ merge base not reachable within deepen budget"
+              break
+            fi
+            fetch --deepen="$depth" origin "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || break
+            depth=$((depth * 4))
+          done
+          if git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            git update-ref "refs/remotes/origin/$BASE_REF" "$BASE_SHA"
+          fi
+
+          # Scope: pre-filter's list when it produced one; otherwise the
+          # job-boundary fail-open is live — check every CLAUDE.md and say so
+          # where it is visible without opening logs (ENG-5425 AC4).
+          if [ -n "$RELEVANT_MDS" ]; then
+            echo "relevant_mds=$RELEVANT_MDS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::warning title=CLAUDE.md drift fail-open::pre-filter result was '$PRE_FILTER_RESULT' with no file list — drift-checking every CLAUDE.md in the repo."
+          all_mds=$(find . -name "CLAUDE.md" -type f | sed 's|^\./||' | sort | tr '\n' ',' | sed 's/,$//')
+          if [ -z "$all_mds" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "⊘ No CLAUDE.md files in repo — nothing to check."
+            exit 0
+          fi
+          echo "relevant_mds=$all_mds" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude drift analysis
+        if: steps.scope.outputs.skip != 'true'
         uses: anthropics/claude-code-action@e34df8781c2370c1c9d3b83ae47286a7ae2d1ea6  # v1.0.135
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -267,7 +355,7 @@ jobs:
             TASK: Check if code changes in this PR have made CLAUDE.md documentation
             stale. This is a READ-ONLY audit — do NOT edit any files.
 
-            RELEVANT CLAUDE.md FILES: ${{ needs.pre-filter.outputs.relevant_mds }}
+            RELEVANT CLAUDE.md FILES: ${{ steps.scope.outputs.relevant_mds }}
 
             PROCEDURE — for each CLAUDE.md file listed above:
             1. Read the CLAUDE.md file completely
