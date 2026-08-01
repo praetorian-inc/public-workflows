@@ -153,7 +153,9 @@ jobs:
           # worst-case final rung (3 × 45s hanging attempts) finishes at ~225s,
           # inside the 4-minute step timeout so a stall can never fail this step
           # (ENG-5425).
-          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          b64_token=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$b64_token"   # derived secret — register it so a stray echo of the command line is redacted
+          auth_header="AUTHORIZATION: basic $b64_token"
           fetch() { timeout 45 git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"; }
           fetch_retry() { fetch "$@" || fetch "$@" || fetch "$@"; }
           deadline=$(( $(date +%s) + 90 ))
@@ -340,7 +342,9 @@ jobs:
           # worst-case final rung (3 × 45s hanging attempts) finishes at ~225s,
           # inside the 4-minute step timeout so a stall can never fail this step
           # (ENG-5425).
-          auth_header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          b64_token=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$b64_token"   # derived secret — register it so a stray echo of the command line is redacted
+          auth_header="AUTHORIZATION: basic $b64_token"
           fetch() { timeout 45 git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"; }
           fetch_retry() { fetch "$@" || fetch "$@" || fetch "$@"; }
           deadline=$(( $(date +%s) + 90 ))
