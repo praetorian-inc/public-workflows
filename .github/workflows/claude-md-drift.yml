@@ -156,7 +156,14 @@ jobs:
           b64_token=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$b64_token"   # derived secret — register it so a stray echo of the command line is redacted
           auth_header="AUTHORIZATION: basic $b64_token"
-          fetch() { timeout 45 git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"; }
+          fetch() {
+            # Each attempt is clamped to the remaining wall-clock deadline so a
+            # retry group started late cannot overrun the 90s acquisition cap.
+            local remaining; remaining=$(( deadline - $(date +%s) ))
+            [ "$remaining" -le 0 ] && return 124
+            [ "$remaining" -gt 45 ] && remaining=45
+            timeout "$remaining" git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"
+          }
           fetch_retry() { fetch "$@" || fetch "$@" || fetch "$@"; }
           deadline=$(( $(date +%s) + 90 ))
           fetch_retry --depth=1 origin "$BASE_SHA" "$HEAD_SHA" || true
@@ -345,7 +352,14 @@ jobs:
           b64_token=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
           echo "::add-mask::$b64_token"   # derived secret — register it so a stray echo of the command line is redacted
           auth_header="AUTHORIZATION: basic $b64_token"
-          fetch() { timeout 45 git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"; }
+          fetch() {
+            # Each attempt is clamped to the remaining wall-clock deadline so a
+            # retry group started late cannot overrun the 90s acquisition cap.
+            local remaining; remaining=$(( deadline - $(date +%s) ))
+            [ "$remaining" -le 0 ] && return 124
+            [ "$remaining" -gt 45 ] && remaining=45
+            timeout "$remaining" git -c http.extraheader="$auth_header" fetch --no-tags --quiet "$@"
+          }
           fetch_retry() { fetch "$@" || fetch "$@" || fetch "$@"; }
           deadline=$(( $(date +%s) + 90 ))
           fetch_retry --depth=1 origin "$BASE_SHA" "$HEAD_SHA" || true
@@ -361,7 +375,10 @@ jobs:
             depth=$((depth * 4))
           done
           if git cat-file -e "$BASE_SHA" 2>/dev/null; then
-            git update-ref "refs/remotes/origin/$BASE_REF" "$BASE_SHA"
+            # Non-fatal: this step's contract is to never fail (the Claude
+            # analysis step must run whenever fail-open is live).
+            git update-ref "refs/remotes/origin/$BASE_REF" "$BASE_SHA" \
+              || echo "::warning::could not materialize refs/remotes/origin/$BASE_REF at $BASE_SHA — continuing without it"
           fi
 
           # Scope: pre-filter's list when it produced one; otherwise the
