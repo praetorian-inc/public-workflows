@@ -471,9 +471,9 @@ jobs:
 - `pull_request` with `action == 'opened'` or `'ready_for_review'` on a same-repo PR — reviews once per PR
 - `pull_request_review_comment` with body containing `@codex` — re-review on demand
 
-### `claude-md-drift.yml` — CLAUDE.md drift detection
+### `claude-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
-Detects when a PR's code changes may have made `CLAUDE.md` documentation stale. **Two-phase design:** a zero-cost shell pre-filter determines which `CLAUDE.md` files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no `CLAUDE.md` exists, the PR is docs/config-only, changed files have no `CLAUDE.md` ancestor in the directory tree, the PR already edits every relevant `CLAUDE.md`, or the author is a bot. Same-repo-only (fork PRs blocked); draft PRs skipped.
+Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, the PR already edits every relevant instruction file, or the author is a bot. Same-repo-only (fork PRs blocked); draft PRs skipped. (The workflow filename is kept for caller compatibility.)
 
 **Minimal caller** (drop this in `.github/workflows/claude-md-drift.yml` of a consumer repo):
 
