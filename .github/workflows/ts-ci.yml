@@ -268,12 +268,17 @@ jobs:
           fi
 
       - name: Cache node_modules for downstream jobs
+        # The github.run_id suffix keeps every run's save key unique. Cache
+        # reservation is key-global but cache visibility is branch-scoped: any
+        # stuck in-flight or foreign-scope reservation under a shared static
+        # key makes this save fail soft while the same run's restores find
+        # nothing (ENG-5671).
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-${{ github.run_id }}
 
   typecheck:
     name: Type check
@@ -303,18 +308,43 @@ jobs:
           node-version: ${{ inputs.node-version }}
 
       - name: Restore node_modules
+        # Primary key is run-unique, so it hits this run's own install save
+        # exactly. restore-keys falls back across runs on a prefix that pins the
+        # lockfile hash, so any entry it matches has equivalent content.
+        id: node-modules-cache
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-${{ github.run_id }}
+          restore-keys: |
+            node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-
+
+      - name: Install dependencies (cache-miss fallback)
+        # Fail-closed path: build tools must never run against an empty
+        # node_modules. cache-hit is 'true' only on an exact primary-key match,
+        # but a restore-keys hit also sets cache-matched-key — and because the
+        # prefix pins the lockfile hash, ANY matched key means node_modules is
+        # valid, so only a fully-empty match reinstalls. For enable-private-deps
+        # callers this fails loudly here on private git deps (no App token in
+        # typecheck/lint) rather than proceeding, which is intended.
+        if: steps.node-modules-cache.outputs.cache-matched-key == ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "::warning::node_modules cache miss — installing from lockfile (see ENG-5671)"
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
       - name: Type check
         working-directory: ${{ inputs.working-directory }}
         run: |
           if [ -f tsconfig.json ]; then
-            npx tsc --noEmit
+            # --no forbids npx-style registry fall-through (the squatted `tsc` package).
+            npm exec --no -- tsc --noEmit
           else
             echo "No tsconfig.json found — skipping type check"
           fi
@@ -347,12 +377,36 @@ jobs:
           node-version: ${{ inputs.node-version }}
 
       - name: Restore node_modules
+        # Primary key is run-unique, so it hits this run's own install save
+        # exactly. restore-keys falls back across runs on a prefix that pins the
+        # lockfile hash, so any entry it matches has equivalent content.
+        id: node-modules-cache
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-${{ github.run_id }}
+          restore-keys: |
+            node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-
+
+      - name: Install dependencies (cache-miss fallback)
+        # Fail-closed path: build tools must never run against an empty
+        # node_modules. cache-hit is 'true' only on an exact primary-key match,
+        # but a restore-keys hit also sets cache-matched-key — and because the
+        # prefix pins the lockfile hash, ANY matched key means node_modules is
+        # valid, so only a fully-empty match reinstalls. For enable-private-deps
+        # callers this fails loudly here on private git deps (no App token in
+        # typecheck/lint) rather than proceeding, which is intended.
+        if: steps.node-modules-cache.outputs.cache-matched-key == ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "::warning::node_modules cache miss — installing from lockfile (see ENG-5671)"
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
       - name: Lint
         working-directory: ${{ inputs.working-directory }}
@@ -428,12 +482,36 @@ jobs:
           node-version: ${{ inputs.node-version }}
 
       - name: Restore node_modules
+        # Primary key is run-unique, so it hits this run's own install save
+        # exactly. restore-keys falls back across runs on a prefix that pins the
+        # lockfile hash, so any entry it matches has equivalent content.
+        id: node-modules-cache
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-${{ github.run_id }}
+          restore-keys: |
+            node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory)) }}-
+
+      - name: Install dependencies (cache-miss fallback)
+        # Fail-closed path: build tools must never run against an empty
+        # node_modules. cache-hit is 'true' only on an exact primary-key match,
+        # but a restore-keys hit also sets cache-matched-key — and because the
+        # prefix pins the lockfile hash, ANY matched key means node_modules is
+        # valid, so only a fully-empty match reinstalls. For enable-private-deps
+        # callers the App-token git config above lets this npm ci resolve
+        # private git deps.
+        if: steps.node-modules-cache.outputs.cache-matched-key == ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          echo "::warning::node_modules cache miss — installing from lockfile (see ENG-5671)"
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-audit --no-fund
+          fi
 
       - name: Run tests
         working-directory: ${{ inputs.working-directory }}
