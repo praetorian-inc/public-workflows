@@ -280,7 +280,7 @@ jobs:
               for name in AGENTS.md CLAUDE.md; do
                 candidate="$dir/$name"
                 [ "$dir" = "." ] && candidate="$name"
-                if echo "$all_mds" | grep -qx "$candidate" 2>/dev/null; then
+                if echo "$all_mds" | grep -qxF -e "$candidate" 2>/dev/null; then
                   relevant="${relevant}${candidate}"$'\n'
                   found=true
                 fi
