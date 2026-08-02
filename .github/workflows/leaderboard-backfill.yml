@@ -1,0 +1,377 @@
+# Reusable workflow for leaderboard metrics BACKFILL (replay).
+#
+# The live pipeline (leaderboard-metrics.yml) can only ever emit on a real
+# `pull_request_target: closed` merge event, and it drops metrics permanently
+# when a run fails — see that file's header: "A blocked run fails LOUDLY and
+# that PR's metrics are lost (no retry)". This workflow is the replay path for
+# PRs whose metrics never landed, in two situations:
+#   * a repo onboarded to the leaderboard AFTER PRs had already merged, so no
+#     caller workflow existed at merge time (e.g. caeruleus #1-30);
+#   * a delivery outage — most commonly an untrusted `job_workflow_ref` after a
+#     pin bump, which denies AssumeRole (ENG-5687: 46 PRs lost in July 2026).
+#
+# ⚠ WHY THIS IS A REUSABLE AND NOT A `workflow_dispatch` WORKFLOW
+# A workflow triggered directly in THIS repo would present
+#   job_workflow_ref: .../leaderboard-backfill.yml@refs/heads/main
+# — a MUTABLE BRANCH REF. Trusting that in IAM is exactly the
+# `@refs/heads/main` entry deleted from guard's template.yml in PR #6664, and
+# it would let anyone who can land on main mint prod SQS writes. It would also
+# need a new cross-repo PAT, because this repo's GITHUB_TOKEN cannot read
+# another repo's PRs.
+# As a reusable invoked from a dispatch caller IN THE TARGET REPO instead:
+#   * job_workflow_ref is `...@<sha>` — SHA-pinned, same posture as the live
+#     path, one ADDITIVE entry in the trust list (no caller pin rolls);
+#   * `environment:` resolves in the CALLER repo, reusing the `leaderboard`
+#     environment every onboarded repo already has;
+#   * `github.token` reads the caller repo's own PRs — zero new secrets.
+#
+# ⚠ Callers pin this workflow to a FULL 40-char commit SHA, and that
+# job_workflow_ref value must be listed in the AWS IAM trust for the metrics
+# role (guard backend/template.yml, LeaderboardMetricsRole) or every run stops
+# at AssumeRole. Bumping the pin follows the SAME coordinated runbook as the
+# live path (ENG-4164):
+#   1. guard PR ADDS the new SHA's job_workflow_ref to the trust list
+#   2. prod deploy — verify both values live via `aws iam get-role`
+#   3. roll every caller's `uses:` pin to the new SHA
+#   4. follow-up guard PR REMOVES the old SHA's job_workflow_ref
+#
+# The caller-org boundary and the FORBIDDEN OIDC sub-claim customization are
+# documented in full in leaderboard-metrics.yml's header and apply identically
+# here — read that file before changing anything in this one.
+#
+# SAFETY: replay is idempotent. The consumer keys CodeCommit rows on
+# `#code_commit#<repo>#<pr_number>#<author>` — a keyed upsert — so replaying a
+# PR that already scored overwrites its own row rather than adding a second.
+# Over-inclusion in a replay set is safe; under-inclusion is not.
+#
+# FIDELITY: metadata comes from `gh api repos/{repo}/pulls/{n}`, which returns
+# the same `pull_request` object the webhook carries, so the composite receives
+# field-for-field what a live run would have received. Scoring cannot diverge.
+# `merged_at` is replayed verbatim and the consumer applies no date filter, so
+# historical PRs score into the season they belong to, not the current one.
+#
+# Caller template (drop in .github/workflows/leaderboard-backfill-caller.yml):
+#
+#   name: Leaderboard Backfill
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         pr_numbers:
+#           description: "PR numbers to replay (comma- or space-separated)"
+#           required: true
+#           type: string
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#     id-token: write
+#   jobs:
+#     backfill:
+#       uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-backfill.yml@<SHA> # <tag>
+#       with:
+#         pr_numbers: ${{ inputs.pr_numbers }}
+#         # MUST match the caller's live leaderboard-metrics.yml value, or
+#         # replayed capability attribution will differ from live runs.
+#         capability_map: '[]'
+#
+# Caller repo prerequisites: the same one-time setup the live path needs — a
+# "leaderboard" GitHub environment, and NOTHING else. Do NOT apply the Actions
+# OIDC sub-claim customization (see leaderboard-metrics.yml header).
+
+name: Leaderboard Backfill
+
+on:
+  workflow_call:
+    inputs:
+      pr_numbers:
+        description: >
+          PR numbers to replay, comma- or space-separated (e.g. "1,2,3" or
+          "1 2 3"). Each is replayed independently; non-merged PRs are skipped
+          with a notice rather than failing the run.
+        required: true
+        type: string
+      capability_map:
+        description: >
+          JSON array of capability path mappings — MUST match the value the
+          caller repo passes in its live leaderboard-metrics.yml, or replayed
+          capability attribution will not match live runs. See
+          leaderboard-metrics.yml's header for the format.
+        required: false
+        type: string
+        default: '[]'
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  # Parses the PR list into a matrix. Deliberately unprivileged: no id-token,
+  # no environment, no checkout, no network — a composite action cannot be
+  # invoked from a bash loop, so the fan-out has to be a matrix, and the
+  # parsing that builds it has no business holding credentials.
+  prepare:
+    if: github.repository_owner == 'praetorian-inc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      pr_numbers: ${{ steps.parse.outputs.pr_numbers }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          # No step in this job makes a network call, so the allowlist is
+          # deliberately EMPTY. Verified supported at this pin: with
+          # egress-policy block and allowed-endpoints empty, harden-runner's
+          # src/setup.ts emits core.warning("egress-policy is set to block
+          # (default) and allowed-endpoints is empty. No outbound traffic will
+          # be allowed for job steps.") and proceeds — it is a warning, not a
+          # setFailed. Expect that annotation on every run: it is the intended
+          # posture here, NOT a misconfiguration to "fix" by reverting to
+          # audit. Runner-infra endpoints (results-receiver, log upload) need
+          # no entry — the policy governs job steps, and changelog-scan.yml
+          # likewise runs in block mode without listing them.
+          egress-policy: block
+          disable-sudo-and-containers: true
+
+      - name: Parse PR numbers
+        id: parse
+        env:
+          PR_NUMBERS: ${{ inputs.pr_numbers }}
+        run: |
+          set -euo pipefail
+
+          # Split on commas and whitespace, drop empties, de-duplicate while
+          # preserving order. Replay is idempotent, but a duplicate would
+          # still burn a matrix slot for nothing.
+          mapfile -t parsed < <(printf '%s' "$PR_NUMBERS" | tr ',' '\n' | tr -s '[:space:]' '\n' | sed '/^$/d' | awk '!seen[$0]++')
+
+          if [ "${#parsed[@]}" -eq 0 ]; then
+            echo "::error::pr_numbers parsed to an empty list (input: '$PR_NUMBERS')"
+            exit 1
+          fi
+
+          # A non-numeric entry would be interpolated into a gh api path, so
+          # reject anything that is not a bare positive integer.
+          for pr in "${parsed[@]}"; do
+            case "$pr" in
+              ''|*[!0-9]*)
+                echo "::error::Not a valid PR number: '$pr'"
+                exit 1
+                ;;
+            esac
+          done
+
+          # GitHub caps a matrix at 256 jobs; fail loudly rather than have
+          # GitHub silently refuse to schedule the run.
+          if [ "${#parsed[@]}" -gt 256 ]; then
+            echo "::error::${#parsed[@]} PRs requested; the matrix cap is 256. Split into batches."
+            exit 1
+          fi
+
+          json=$(printf '%s\n' "${parsed[@]}" | jq -R . | jq -cs .)
+          echo "pr_numbers=$json" >> "$GITHUB_OUTPUT"
+          echo "Replaying ${#parsed[@]} PR(s): ${parsed[*]}"
+
+  submit-metrics:
+    needs: prepare
+    # repository_owner names the CALLER (see leaderboard-metrics.yml header): a
+    # non-praetorian org calling this PUBLIC reusable is skipped before any
+    # id-token / AWS step runs. Defense in depth — the IAM trust also anchors
+    # the caller org via repository_owner_id. Do not weaken or remove.
+    if: github.repository_owner == 'praetorian-inc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: leaderboard
+    strategy:
+      # One bad PR must not abort the rest of the replay set — a partial
+      # backfill that reports which entries failed is far more useful than an
+      # all-or-nothing run, and re-running the failures is free (idempotent).
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        pr: ${{ fromJSON(needs.prepare.outputs.pr_numbers) }}
+    # Request id-token only in the job that federates to AWS (min-scope).
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      # Same egress allowlist as the live path — see leaderboard-metrics.yml
+      # for the per-host rationale. If a run fails on a blocked endpoint, the
+      # harden-runner step summary names the host: add it there and here rather
+      # than reverting to audit.
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            sts.us-east-2.amazonaws.com:443
+            sqs.us-east-2.amazonaws.com:443
+          disable-sudo-and-containers: true
+
+      # Checks out the caller repo's default branch. PR head code is never
+      # executed; head is fetched below as diff DATA only, exactly as the live
+      # path does. Credentials persist because the fetch below needs them on
+      # internal/private caller repos.
+      - name: Checkout caller repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      # Emits ONE compact-JSON output rather than a field per value: a PR title
+      # or body is arbitrary attacker-influenced text, and a multi-line value
+      # written to $GITHUB_OUTPUT needs a heredoc delimiter that the body
+      # itself could contain. JSON-encoding collapses everything to a single
+      # line with no delimiter to break out of; the fields are read back below
+      # with fromJSON.
+      - name: Read PR metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.pr }}
+        run: |
+          set -euo pipefail
+
+          # Scratch files live in $RUNNER_TEMP, never the workspace: the
+          # workspace IS the caller repo's worktree, and a caller that tracks a
+          # pr.json / meta.json of its own would have it silently clobbered.
+          if ! gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json" 2> "$RUNNER_TEMP/gh-err.txt"; then
+            echo "::error::Could not read $REPO#$PR_NUMBER: $(cat "$RUNNER_TEMP/gh-err.txt")"
+            exit 1
+          fi
+
+          merged=$(jq -r '.merged' "$RUNNER_TEMP/pr.json")
+          if [ "$merged" != "true" ]; then
+            echo "::notice::$REPO#$PR_NUMBER is not merged — skipping (no metrics are owed for an unmerged PR)."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Field-for-field the subset of the webhook `pull_request` object the
+          # live path passes to the composite.
+          jq -c '{
+            author:    .user.login,
+            additions: .additions,
+            deletions: .deletions,
+            files:     .changed_files,
+            mergedAt:  .merged_at,
+            title:     .title,
+            body:      (.body // ""),
+            baseSha:   .base.sha,
+            headSha:   .head.sha
+          }' "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/meta.json"
+
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "pr=$(cat "$RUNNER_TEMP/meta.json")" >> "$GITHUB_OUTPUT"
+
+          echo "Replaying $REPO#$PR_NUMBER (merged $(jq -r '.merged_at' "$RUNNER_TEMP/pr.json"))"
+
+      # Fetches the head by its refs/pull/<n>/head ref rather than by bare SHA
+      # (the live path's `git fetch origin <head-sha>`). Both work today: tested
+      # against real GitHub on a merged PR whose head branch had been deleted, a
+      # bare `git fetch origin <sha>` still exits 0 — GitHub's upload-pack
+      # serves any SHA reachable from a ref, and refs/pull/<n>/head keeps the
+      # head reachable for the life of the PR. But that is server configuration,
+      # not a protocol guarantee (a SHA reachable from NO ref is refused:
+      # "upload-pack: not our ref", exit 128), so name the ref that provides the
+      # guarantee instead of depending on it implicitly. Without the head commit
+      # present, collect-metrics cannot resolve `git log base...head` and
+      # silently degrades to attributing the whole PR to the opener, losing
+      # co-author and capability attribution — and because replay is a keyed
+      # upsert, a degraded replay would overwrite a good row.
+      - name: Fetch PR head and base commits
+        if: steps.meta.outputs.merged == 'true'
+        # `|| '{}'` is load-bearing, not defensive noise. A step's `env:` block
+        # is evaluated BEFORE its `if:` — actions/runner's StepsRunner.cs calls
+        # EvaluateStepEnvironment and, on an expression error, marks the step
+        # FAILED without ever evaluating the condition (actions/runner#1722).
+        # `steps.meta.outputs.pr` is unset on the not-merged path above, and
+        # fromJSON('') throws (JToken.ReadFrom on empty input). Without the
+        # default, every non-merged PR in a replay set would FAIL its matrix job
+        # instead of being skipped with a notice — breaking the contract this
+        # workflow's own `pr_numbers` description promises. fromJSON('{}').x is
+        # null, which renders as an empty env value; the step is skipped anyway.
+        # The `with:` block on the collect step below needs no such default:
+        # step inputs are evaluated inside ActionRunner.RunAsync, i.e. only
+        # after the condition passed.
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
+          BASE_SHA: ${{ fromJSON(steps.meta.outputs.pr || '{}').baseSha }}
+          HEAD_SHA: ${{ fromJSON(steps.meta.outputs.pr || '{}').headSha }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin "refs/pull/$PR_NUMBER/head"
+
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Head commit $HEAD_SHA not present after fetching refs/pull/$PR_NUMBER/head."
+            exit 1
+          fi
+
+          # fetch-depth: 0 covers the default branch, but a base commit on a
+          # deleted or rewritten branch may still be missing. Not fatal —
+          # collect-metrics warns and degrades — so surface it and continue
+          # rather than dropping the PR's metrics entirely.
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch origin "$BASE_SHA" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::warning::Base commit $BASE_SHA is unreachable; attribution will fall back to the PR opener."
+          fi
+
+      # Pinned by SHA for the same reason the live path pins it: a floating
+      # @main composite would drift at runtime even though this reusable is
+      # reviewed. This pin and the live path's MUST stay on the same version,
+      # or replayed scores will not match live ones.
+      - name: Collect PR metrics
+        id: collect
+        if: steps.meta.outputs.merged == 'true'
+        uses: praetorian-inc/public-workflows/.github/actions/collect-metrics@5d40d2300abf493740f98b0a1f53620eb6921310 # v2.15.0
+        with:
+          github-token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ matrix.pr }}
+          pr-author: ${{ fromJSON(steps.meta.outputs.pr).author }}
+          pr-additions: ${{ fromJSON(steps.meta.outputs.pr).additions }}
+          pr-deletions: ${{ fromJSON(steps.meta.outputs.pr).deletions }}
+          pr-files: ${{ fromJSON(steps.meta.outputs.pr).files }}
+          pr-merged-at: ${{ fromJSON(steps.meta.outputs.pr).mergedAt }}
+          pr-title: ${{ fromJSON(steps.meta.outputs.pr).title }}
+          pr-body: ${{ fromJSON(steps.meta.outputs.pr).body }}
+          base-sha: ${{ fromJSON(steps.meta.outputs.pr).baseSha }}
+          head-sha: ${{ fromJSON(steps.meta.outputs.pr).headSha }}
+          email-map: ${{ vars.ENGINEER_EMAIL_MAP }}
+          capability-map: ${{ inputs.capability_map }}
+
+      - name: Configure AWS credentials
+        if: steps.collect.outputs.has-payload == 'true'
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.LEADERBOARD_METRICS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send metrics to SQS
+        if: steps.collect.outputs.has-payload == 'true'
+        env:
+          QUEUE_URL: ${{ vars.LEADERBOARD_METRICS_QUEUE_URL }}
+          PR_NUMBER: ${{ matrix.pr }}
+        # Runs under bash -e: an aws CLI failure aborts the step with its
+        # stderr in the job log. The jq guard below covers only the exit-0
+        # no-MessageId edge; file:// sidesteps ARG_MAX on huge payloads.
+        run: |
+          aws sqs send-message \
+            --queue-url "$QUEUE_URL" \
+            --message-body "file://$RUNNER_TEMP/payload.json" \
+            --output json > "$RUNNER_TEMP/sqs-response.json"
+
+          if ! message_id=$(jq -re '.MessageId' "$RUNNER_TEMP/sqs-response.json"); then
+            echo "::error::SQS response missing MessageId: $(cat "$RUNNER_TEMP/sqs-response.json")"
+            exit 1
+          fi
+          echo "Backfilled PR #${PR_NUMBER}: $message_id"
