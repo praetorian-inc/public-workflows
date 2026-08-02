@@ -258,6 +258,17 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      - name: Compute dependency hash (pre-install)
+        id: deps-hash
+        # hashFiles evaluates when the referencing step runs, so a save-key
+        # hash taken after `npm install` would include the lockfile install
+        # just generated in a lockfile-less project — one no downstream job's
+        # clean checkout can ever match. Capture the hash pre-install so save
+        # and restore hash the same tree state.
+        env:
+          DEPS_HASH: ${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/package.json', inputs.working-directory)) }}
+        run: echo "hash=$DEPS_HASH" >> "$GITHUB_OUTPUT"
+
       - name: Install dependencies
         working-directory: ${{ inputs.working-directory }}
         run: |
@@ -280,13 +291,18 @@ jobs:
         # lockfile. package.json joins the hash for the same reason: a
         # lockfile-less project hashes to the empty string, so the restore-keys
         # prefix would serve stale node_modules across branches while the
-        # prefix hit suppresses the fail-closed fallback install.
+        # prefix hit suppresses the fail-closed fallback install. The hash here
+        # comes from the pre-install deps-hash step, not inline hashFiles: in a
+        # lockfile-less project `npm install` generates package-lock.json, so
+        # a hash taken now would include a lockfile no downstream clean
+        # checkout has — the pre-install capture matches what downstream
+        # restores hash.
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           path: |
             ${{ inputs.working-directory }}/node_modules
             ~/.npm
-          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ inputs.working-directory }}-${{ hashFiles(format('{0}/package-lock.json', inputs.working-directory), format('{0}/package.json', inputs.working-directory)) }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ inputs.working-directory }}-${{ steps.deps-hash.outputs.hash }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   typecheck:
     name: Type check
