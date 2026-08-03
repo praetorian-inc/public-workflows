@@ -61,7 +61,10 @@
 # the same `pull_request` object the webhook carries, so the composite receives
 # field-for-field what a live run would have received. Scoring cannot diverge.
 # `merged_at` is replayed verbatim and the consumer applies no date filter, so
-# historical PRs score into the season they belong to, not the current one.
+# historical PRs score into the season they belong to, not the current one. The
+# capability map is read from the caller's DEFAULT branch (see `Checkout caller
+# repo`), which is the branch the live `pull_request_target` path evaluates its
+# workflow file from — NOT the branch this backfill was dispatched from.
 #
 # Caller template (drop in .github/workflows/leaderboard-backfill-caller.yml):
 #
@@ -85,10 +88,22 @@
 #         # capability_map is omitted DELIBERATELY: unset means "read the value
 #         # out of this repo's own live leaderboard-metrics.yml", so a replay
 #         # attributes capabilities exactly as live runs do and cannot silently
-#         # drift from them. Pass a value only to override that derivation —
-#         # '[]' to score a replay with no capability attribution at all, or a
-#         # narrower map to replay one subset. An override that disagrees with
-#         # the live value is allowed but WARNS.
+#         # drift from them.
+#         #
+#         # That derivation requires the live workflow to be at EXACTLY
+#         # .github/workflows/leaderboard-metrics.yml on the default branch —
+#         # the path is fixed, not searched (all 11 caller repos surveyed
+#         # 2026-08-02 use that name). A repo whose live workflow has a
+#         # DIFFERENT FILENAME has nothing to derive from, so it MUST pass
+#         # capability_map here explicitly; otherwise the replay warns and
+#         # lands with no capability attribution at all.
+#         #
+#         # Pass a value only to override the derivation — '[]' to score a
+#         # replay with no capability attribution at all, or a narrower map to
+#         # replay one subset. An override that disagrees with the live value is
+#         # allowed but WARNS. An override is also the escape hatch when the
+#         # live workflow EXISTS but cannot be read, which otherwise FAILS the
+#         # run rather than falling back to '[]'.
 #
 # Caller repo prerequisites: the same one-time setup the live path needs — a
 # "leaderboard" GitHub environment, and NOTHING else. Do NOT apply the Actions
@@ -110,12 +125,15 @@ on:
         description: >
           JSON array of capability path mappings, in the format documented in
           leaderboard-metrics.yml's header. EMPTY OR UNSET means "derive it
-          from the caller repo's live .github/workflows/leaderboard-metrics.yml"
-          — the default, so a replay attributes capabilities exactly as live
-          runs do. Pass an explicit '[]' to mean "no capability attribution",
-          which is correct only for a repo whose live path passes none either.
-          An explicit value always wins; one that disagrees with the live value
-          warns rather than failing.
+          from the caller repo's live .github/workflows/leaderboard-metrics.yml
+          on its default branch" — the default, so a replay attributes
+          capabilities exactly as live runs do. That exact path is required; a
+          repo using a different filename must pass a value here. Pass an
+          explicit '[]' to mean "no capability attribution", which is correct
+          only for a repo whose live path passes none either. An explicit value
+          always wins; one that disagrees with the live value warns rather than
+          failing, and it also overrides a live workflow that exists but cannot
+          be read — which, unset, FAILS the run instead of falling back.
         required: false
         type: string
         default: ''
@@ -240,13 +258,30 @@ jobs:
             sqs.us-east-2.amazonaws.com:443
           disable-sudo-and-containers: true
 
-      # Checks out the caller repo's default branch. PR head code is never
-      # executed; head is fetched below as diff DATA only, exactly as the live
-      # path does. Credentials persist because the fetch below needs them on
-      # internal/private caller repos.
+      # `ref:` is PINNED to the caller's default branch rather than left to
+      # checkout's default of github.ref. In a workflow_call the github context
+      # is the CALLER's, so github.ref is the branch the backfill was DISPATCHED
+      # from; the derivation below would then read that branch's capability_map,
+      # while the live path (pull_request_target) evaluates the caller workflow
+      # from the default branch. Unpinned, a backfill dispatched from a feature
+      # branch derives a value live runs never used and diverges silently —
+      # breaking this header's FIDELITY claim.
+      #
+      # Verified against actions/checkout at the SHA pinned here: fetch-depth: 0
+      # takes the getRefSpecForAllHistory path, whose refspec is
+      # `+refs/heads/*:refs/remotes/origin/*` plus tags — ALL branches, whichever
+      # ref is checked out. So pinning changes the working tree only, not the
+      # objects available to `Fetch PR head and base commits` below (which fetch
+      # by explicit SHA/refspec) or to collect-metrics' `git log base...head`
+      # (which addresses both ends by SHA).
+      #
+      # PR head code is never executed; head is fetched below as diff DATA only,
+      # exactly as the live path does. Credentials persist because the fetch
+      # below needs them on internal/private caller repos.
       - name: Checkout caller repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
       # Derives the capability map from the caller repo's OWN live workflow when
@@ -262,15 +297,37 @@ jobs:
       # only ever Inserts — the listener issues no delete — so a replay would
       # leave any CapabilityCommit rows the PR already had untouched, add none,
       # and go GREEN. Losing metrics quietly is the exact failure this workflow
-      # exists to repair, so the no-map case below WARNS rather than proceeding
-      # in silence, and a disagreeing explicit input warns too (a human may
-      # intend a narrower replay, so neither case fails the run).
+      # exists to repair, so the three outcomes are deliberately NOT alike:
       #
-      # Reads the file from the checkout above — the caller repo at its default
-      # branch, the same source of truth the live path runs from — so this step
-      # makes NO network call and needs no allowlist entry. yq parses it rather
-      # than a regex because the value is a YAML scalar callers write
-      # single-quoted, and yq specifically because the ubuntu-24.04 image ships
+      #   1. A live workflow that EXISTS but cannot be READ — yq absent, yq
+      #      failing, a non-string capability_map, a value that is not a JSON
+      #      array, or a default branch this run could not determine — is an
+      #      ERROR and FAILS the run. It must not fall through to '[]': that
+      #      made the unreadable case and the genuinely-absent case produce the
+      #      same green run with no capability attribution, i.e. exactly the
+      #      silent under-delivery described above. Distinguishable log lines
+      #      are not enough when both paths exit 0 with the same value.
+      #   2. A map that is genuinely ABSENT — no live workflow file, no job
+      #      calling the live reusable, or such a job passing no capability_map
+      #      (as palatine does) — WARNS and continues with '[]'. Nothing was
+      #      lost: that repo's live path attributes nothing either.
+      #   3. An explicit input that DISAGREES with the live value WARNS. A
+      #      human may intend a narrower replay, so it does not fail.
+      #
+      # An explicit input is the documented override, so it also suppresses
+      # case 1's failure: the input wins outright and the unreadable live value
+      # is then only relevant to case 3's comparison, which is skipped.
+      #
+      # Reads the file from the checkout above, whose ref is PINNED to the caller
+      # repo's default branch — the same source of truth the live path runs from
+      # — so this step makes NO network call and needs no allowlist entry. The
+      # path read is FIXED at .github/workflows/leaderboard-metrics.yml, not
+      # searched for: a caller whose live workflow has a different filename has
+      # no derivable map (case 2) and must pass capability_map explicitly.
+      #
+      # yq parses it rather than a regex because the value is a YAML scalar
+      # callers write single-quoted, and yq specifically because the
+      # ubuntu-24.04 image ships
       # it (Ubuntu2404-Readme.md lists `yq 4.53.3` and `jq 1.7`; it lists no
       # PyYAML, which is why this is not Python). A missing yq is still reported
       # rather than read as "no map": the allowlist above has no package-index
@@ -284,6 +341,12 @@ jobs:
           CAPABILITY_MAP_INPUT: ${{ inputs.capability_map }}
           LIVE_WORKFLOW: ${{ github.workspace }}/.github/workflows/leaderboard-metrics.yml
           LIVE_REUSABLE: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml
+          # The SAME expression the checkout above pins `ref:` to. Read here so
+          # the derivation can tell that the pin took effect: checkout treats an
+          # empty `ref:` as unset and silently falls back to github.ref, which
+          # would leave the workspace on the dispatch branch — a file this step
+          # must not trust. Kept in step-scope env so the two stay adjacent.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
 
@@ -332,6 +395,14 @@ jobs:
             LIVE_VALUE=''
             LIVE_ERROR=''
 
+            # Checked before the file is even looked at: without the default
+            # branch name the checkout's `ref:` pin was empty, so whatever sits
+            # at $LIVE_WORKFLOW came from the dispatch branch and may differ
+            # from what live runs read. Unreadable, not absent.
+            if [ -z "${DEFAULT_BRANCH:-}" ]; then
+              LIVE_ERROR='the caller repo default branch is unknown, so the checkout is not pinned to the branch live runs read'
+              return
+            fi
             if ! command -v yq >/dev/null; then
               LIVE_ERROR='yq is not on PATH'
               return
@@ -377,17 +448,39 @@ jobs:
             LIVE_VALUE=$ONE_LINE
           }
 
-          read_live_map
-          if [ -n "$LIVE_ERROR" ]; then
-            # A live workflow we could not read is NOT a repo without a map.
-            # Reported separately so the fallback below is never mistaken for
-            # agreement between the two paths.
-            log warning "Could not read the live capability map: $LIVE_ERROR"
-          fi
-
           # Only blank-vs-set picks the branch; the value itself is never
           # edited, so a whitespace-only input derives instead of failing.
+          # Resolved once, because the unreadable-live-map handling below turns
+          # on the same distinction and the two must never disagree.
+          input_set=''
           if [ -n "$(printf '%s' "$CAPABILITY_MAP_INPUT" | tr -d '[:space:]')" ]; then
+            input_set=yes
+          fi
+
+          read_live_map
+          if [ -n "$LIVE_ERROR" ] && [ -z "$input_set" ]; then
+            # FAILS rather than warning: a live workflow we could not read is
+            # NOT a repo without a map, and falling through to the '[]' branch
+            # below would make the two indistinguishable — same exit 0, same
+            # missing capability attribution. Exiting before $GITHUB_OUTPUT is
+            # written also leaves steps.capmap.outputs.value unset, so no
+            # downstream step can replay on a guessed map.
+            log error "Could not read the live capability map: $LIVE_ERROR." \
+              "Refusing to replay with no capability attribution. Fix the live" \
+              "$live_name, or pass an explicit capability_map input to override" \
+              "the derivation (an explicit value always wins)."
+            exit 1
+          fi
+          if [ -n "$LIVE_ERROR" ]; then
+            # An explicit input is the documented override, so this only warns.
+            # LIVE_VALUE is empty here, which also suppresses the disagreement
+            # comparison below — there is no live value to disagree with.
+            log warning "Could not read the live capability map: $LIVE_ERROR." \
+              "Using the explicit capability_map input instead; it CANNOT be" \
+              "checked against the live value."
+          fi
+
+          if [ -n "$input_set" ]; then
             one_line "$CAPABILITY_MAP_INPUT"
             if [ -n "$WHY" ]; then
               # Rejected here rather than passed on: a value that is not a JSON
