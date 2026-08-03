@@ -1,0 +1,866 @@
+# Reusable workflow for leaderboard metrics BACKFILL (replay).
+#
+# The live pipeline (leaderboard-metrics.yml) can only ever emit on a real
+# `pull_request_target: closed` merge event, and it drops metrics permanently
+# when a run fails — see that file's header: "A blocked run fails LOUDLY and
+# that PR's metrics are lost (no retry)". This workflow is the replay path for
+# PRs whose metrics never landed, in two situations:
+#   * a repo onboarded to the leaderboard AFTER PRs had already merged, so no
+#     caller workflow existed at merge time (e.g. caeruleus #1-30);
+#   * a delivery outage — most commonly an untrusted `job_workflow_ref` after a
+#     pin bump, which denies AssumeRole (ENG-5687: 46 PRs lost in July 2026).
+#
+# ⚠ WHY THIS IS A REUSABLE AND NOT A `workflow_dispatch` WORKFLOW
+# A workflow triggered directly in THIS repo would present
+#   job_workflow_ref: .../leaderboard-backfill.yml@refs/heads/main
+# — a MUTABLE BRANCH REF. Trusting that in IAM is exactly the
+# `@refs/heads/main` entry deleted from guard's template.yml in PR #6664, and
+# it would let anyone who can land on main mint prod SQS writes. It would also
+# need a new cross-repo PAT, because this repo's GITHUB_TOKEN cannot read
+# another repo's PRs.
+# As a reusable invoked from a dispatch caller IN THE TARGET REPO instead:
+#   * job_workflow_ref is `...@<sha>` — SHA-pinned, same posture as the live
+#     path, one ADDITIVE entry in the trust list (no caller pin rolls);
+#   * `environment:` resolves in the CALLER repo, reusing the `leaderboard`
+#     environment every onboarded repo already has;
+#   * `github.token` reads the caller repo's own PRs — zero new secrets.
+#
+# ⚠ Callers pin this workflow to a FULL 40-char commit SHA, and that
+# job_workflow_ref value must be listed in the AWS IAM trust for the metrics
+# role (guard backend/template.yml, LeaderboardMetricsRole) or every run stops
+# at AssumeRole. Bumping the pin follows the SAME coordinated runbook as the
+# live path (ENG-4164):
+#   1. guard PR ADDS the new SHA's job_workflow_ref to the trust list
+#   2. prod deploy — verify both values live via `aws iam get-role`
+#   3. roll every caller's `uses:` pin to the new SHA
+#   4. follow-up guard PR REMOVES the old SHA's job_workflow_ref
+#
+# The caller-org boundary and the FORBIDDEN OIDC sub-claim customization are
+# documented in full in leaderboard-metrics.yml's header and apply identically
+# here — read that file before changing anything in this one.
+#
+# SAFETY: replay is idempotent ONLY while author resolution is unchanged. The
+# consumer keys CodeCommit rows on `#code_commit#<repo>#<pr_number>#<author>`,
+# so replaying a PR overwrites its own row rather than adding a second — but
+# the author EMAIL is part of that key. If ENGINEER_EMAIL_MAP resolves the
+# author differently than it did on the original delivery, the replay lands a
+# SECOND row under the new key, and leaderboard aggregation
+# (backend/pkg/services/leaderboard/metrics.go, computeCodeCommits and
+# computeCodeActivity) sums every row with NO (repository, prNumber) dedup, so
+# the PR counts twice. This is a pre-existing property of the ingest path — an
+# SQS DLQ redrive or a re-run of the live `pull_request_target: closed` job
+# does the same thing — that replay makes reachable deliberately. The durable
+# fix is a (repo, PR)-scoped replace on ingest: ENG-5693.
+#
+# So: over-inclusion is safe for a PR that never delivered (no row exists to
+# duplicate), which is the case for every PR in the gaps this workflow was
+# built to repair. Re-replaying a PR that ALREADY scored is safe only if the
+# email map has not changed since. Under-inclusion is never safe.
+#
+# FIDELITY: metadata comes from `gh api repos/{repo}/pulls/{n}`, which returns
+# the same `pull_request` object the webhook carries — with ONE bounded
+# exception, and it is NOT field-for-field. `title` and `body` come back in
+# their CURRENT state, so a PR edited after it merged replays the edited text
+# rather than the text the merge-time webhook carried. That is not cosmetic:
+# collect_leaderboard_metrics.py:303 passes both to
+# extract_tickets(PR_TITLE, PR_BODY) and the result becomes the payload's
+# `tickets` field, which the consumer stores as CodeCommit.LinkedTickets (guard
+# backend/cmd/listeners/github-metrics/main.go:75-76) — so a replay's
+# LinkedTickets can differ from what the live run would have recorded. No
+# GitHub API returns a PR's historical title or body, so this is NOT fixable
+# here; it is a known, bounded limitation, not a defect to chase.
+#
+# Bounded because it cannot move a SCORE. CodeCommit.Score is
+# log2(1 + additions + deletions) (guard
+# backend/pkg/tabularium/model/code_commit.go:24), and both addends are
+# replayed verbatim. The FP-impact BonusScore is gated on the PR's
+# CAPABILITIES, not its tickets — backend/pkg/services/leaderboard/service.go
+# :827-856 does `caps := capsByPR[prKey]; if len(caps) == 0 { continue }`.
+# LinkedTickets feeds neither, so the divergence is confined to attribution
+# metadata. The capability map is what that gate reads, which is why deriving
+# it is not cosmetic either: see `Derive capability map` for what an empty or
+# wrong map costs.
+#
+# `merged_at` is replayed verbatim and the consumer applies no date filter, so
+# historical PRs score into the season they belong to, not the current one. The
+# capability map is read from the caller's DEFAULT branch (see `Checkout caller
+# repo`), which is the branch the live `pull_request_target` path evaluates its
+# workflow file from — NOT the branch this backfill was dispatched from.
+#
+# LOG SAFETY: the runner parses any log LINE that begins with `::` as a
+# workflow command. So every `::` line this file emits carrying text the file
+# did not itself construct — a caller input, a parser's message, a gh or aws
+# response — is collapsed to ONE line first, via that step's `log()` helper.
+# Two distinct things go wrong without the collapse: the annotation is
+# truncated at the first newline, losing exactly the diagnostic the message
+# exists to carry, and every line after it is offered to the runner as a
+# command of its own. The rule is per-EMISSION, not per-step: a step's own
+# literals, and values this file has already constrained to a single
+# whitespace-free token (a validated integer, a 40-char SHA, a repo slug),
+# cannot introduce a newline and are marked as such where they occur. Each
+# `run:` is its own shell, so the helper is defined identically — deliberately,
+# not by oversight — in every step that needs it.
+#
+# Caller template (drop in .github/workflows/leaderboard-backfill-caller.yml):
+#
+#   name: Leaderboard Backfill
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         pr_numbers:
+#           description: "PR numbers to replay (comma- or space-separated)"
+#           required: true
+#           type: string
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#     id-token: write
+#   jobs:
+#     backfill:
+#       uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-backfill.yml@<SHA> # <tag>
+#       with:
+#         pr_numbers: ${{ inputs.pr_numbers }}
+#         # capability_map is omitted DELIBERATELY: unset means "read the value
+#         # out of this repo's own live leaderboard-metrics.yml", so a replay
+#         # attributes capabilities exactly as live runs do and cannot silently
+#         # drift from them.
+#         #
+#         # That derivation requires the live workflow to be at EXACTLY
+#         # .github/workflows/leaderboard-metrics.yml on the default branch —
+#         # the path is fixed, not searched. Population established WITHOUT
+#         # assuming that name, so the claim is not circular: searching
+#         # praetorian-inc for this reusable's `uses:` REFERENCE finds 36
+#         # callers (measured 2026-08-02), 35 of them at exactly that path.
+#         # The one exception is public-workflows' OWN caller, necessarily
+#         # named leaderboard-metrics-caller.yml because in that repo the
+#         # plain name belongs to the reusable. Currently HARMLESS: it passes
+#         # no capability_map, and the fixed path there resolves to the
+#         # reusable, which holds no job calling the reusable — so the
+#         # derivation answers GENUINELY ABSENT and '[]', which is what its
+#         # live runs attribute anyway. A latent trap, not a present defect:
+#         # what WOULD silently lose attribution is a differently-named
+#         # caller that DOES pass a map — which is why a repo whose live
+#         # workflow has a DIFFERENT FILENAME MUST pass capability_map here
+#         # explicitly; otherwise the replay warns and lands with no
+#         # capability attribution at all.
+#         #
+#         # Pass a value only to override the derivation — '[]' to score a
+#         # replay with no capability attribution at all, or a narrower map to
+#         # replay one subset. An override that disagrees with the live value is
+#         # allowed but WARNS. An override is also the escape hatch when the
+#         # live workflow EXISTS but cannot be read, which otherwise FAILS the
+#         # run rather than falling back to '[]'.
+#         #
+#         # And it is the escape hatch for MERGE-TIME drift: the derivation
+#         # reads the default branch as it stands TODAY, so a caller that
+#         # changed its capability_map after the replayed PRs merged attributes
+#         # them to today's mapping — and since capabilities gate the FP bonus
+#         # (see FIDELITY above), that can move a score. Two measured facts
+#         # bound it. No caller has ever CHANGED capability_map from one real
+#         # value to another, across the WHOLE population of 36 callers
+#         # (measured 2026-08-02): the 91 commits that ever touched the 36
+#         # files named leaderboard-metrics.yml — 35 callers plus the
+#         # reusable's own copy — plus the 6 commits touching
+#         # public-workflows' differently-named caller, every one of which
+#         # leaves it with no `with:` block at all. Seven of those histories
+#         # DO hold two distinct values (augustus, brutus, constantine,
+#         # guard, nerva, titus, umber), so finding two is not a
+#         # counter-example: in every
+#         # one the transition is "no job calling the reusable yet" ->
+#         # "<map>", i.e. the map's INTRODUCTION alongside the caller job,
+#         # never a revision of an existing map. And reading each PR's
+#         # `base.sha` instead would not be more faithful —
+#         # `pull_request_target: closed` evaluates the caller's workflow from
+#         # the base branch TIP AT CLOSE TIME, which can be newer than that
+#         # PR's base.sha. So the mitigation is this input: if a caller's map
+#         # HAS changed since the PRs being replayed merged, pass the
+#         # historical value explicitly.
+#
+# Caller repo prerequisites: the same one-time setup the live path needs — a
+# "leaderboard" GitHub environment, and NOTHING else. Do NOT apply the Actions
+# OIDC sub-claim customization (see leaderboard-metrics.yml header).
+
+name: Leaderboard Backfill
+
+on:
+  workflow_call:
+    inputs:
+      pr_numbers:
+        description: >
+          PR numbers to replay, comma- or space-separated (e.g. "1,2,3" or
+          "1 2 3"). Each is replayed independently; non-merged PRs are skipped
+          with a notice rather than failing the run.
+        required: true
+        type: string
+      capability_map:
+        description: >
+          JSON array of capability path mappings, in the format documented in
+          leaderboard-metrics.yml's header. EMPTY OR UNSET means "derive it
+          from the caller repo's live .github/workflows/leaderboard-metrics.yml
+          on its default branch" — the default, so a replay attributes
+          capabilities exactly as live runs do. That exact path is required; a
+          repo using a different filename must pass a value here. Pass an
+          explicit '[]' to mean "no capability attribution", which is correct
+          only for a repo whose live path passes none either. An explicit value
+          always wins; one that disagrees with the live value warns rather than
+          failing, and it also overrides a live workflow that exists but cannot
+          be read — which, unset, FAILS the run instead of falling back.
+        required: false
+        type: string
+        default: ''
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  # Parses the PR list into a matrix. Deliberately unprivileged: no id-token,
+  # no environment, no checkout, no network — a composite action cannot be
+  # invoked from a bash loop, so the fan-out has to be a matrix, and the
+  # parsing that builds it has no business holding credentials.
+  prepare:
+    if: github.repository_owner == 'praetorian-inc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      pr_numbers: ${{ steps.parse.outputs.pr_numbers }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          # No step in this job makes a network call, so the allowlist is
+          # deliberately EMPTY. Verified supported at this pin: with
+          # egress-policy block and allowed-endpoints empty, harden-runner's
+          # src/setup.ts emits core.warning("egress-policy is set to block
+          # (default) and allowed-endpoints is empty. No outbound traffic will
+          # be allowed for job steps.") and proceeds — it is a warning, not a
+          # setFailed. Expect that annotation on every run: it is the intended
+          # posture here, NOT a misconfiguration to "fix" by reverting to
+          # audit. Runner-infra endpoints (results-receiver, log upload) need
+          # no entry — the policy governs job steps, and changelog-scan.yml
+          # likewise runs in block mode without listing them.
+          egress-policy: block
+          disable-sudo-and-containers: true
+
+      - name: Parse PR numbers
+        id: parse
+        env:
+          PR_NUMBERS: ${{ inputs.pr_numbers }}
+        run: |
+          set -euo pipefail
+
+          # See LOG SAFETY in this file's header. Identical to the helper in
+          # `Derive capability map`; each `run:` is its own shell.
+          log() {
+            local kind=$1
+            shift
+            printf '::%s::%s\n' "$kind" "$(printf '%s' "$*" | tr '\r\n\t\v\f' '     ' | tr -s ' ')"
+          }
+
+          # Split on commas and whitespace, drop empties, de-duplicate while
+          # preserving order. Within one run a duplicate resolves the same
+          # author key, so the second delivery overwrites the first rather than
+          # double-counting — but it burns a matrix slot for nothing.
+          mapfile -t parsed < <(printf '%s' "$PR_NUMBERS" | tr ',' '\n' | tr -s '[:space:]' '\n' | sed '/^$/d' | awk '!seen[$0]++')
+
+          if [ "${#parsed[@]}" -eq 0 ]; then
+            # The one site here that echoes back RAW caller input. Reaching this
+            # branch means the input held nothing but commas and whitespace —
+            # any other character survives the split and lands on the numeric
+            # check below instead — so it cannot smuggle a `::` line. It can
+            # still hold NEWLINES, which would truncate this annotation to
+            # `(input: '` and hide the very value being complained about, so it
+            # goes through log() like every other unconstructed text.
+            log error "pr_numbers parsed to an empty list (input: '$PR_NUMBERS')"
+            exit 1
+          fi
+
+          # A non-numeric entry would be interpolated into a gh api path, so
+          # reject anything that is not a bare positive integer.
+          for pr in "${parsed[@]}"; do
+            case "$pr" in
+              ''|*[!0-9]*)
+                # No log() needed: the split above consumed every comma and
+                # whitespace character, so $pr is one whitespace-free token and
+                # cannot introduce a newline — hostile content lands here, on
+                # ONE line, quoted.
+                echo "::error::Not a valid PR number: '$pr'"
+                exit 1
+                ;;
+            esac
+          done
+
+          # GitHub caps a matrix at 256 jobs; fail loudly rather than have
+          # GitHub silently refuse to schedule the run.
+          if [ "${#parsed[@]}" -gt 256 ]; then
+            # No log() needed: an integer.
+            echo "::error::${#parsed[@]} PRs requested; the matrix cap is 256. Split into batches."
+            exit 1
+          fi
+
+          json=$(printf '%s\n' "${parsed[@]}" | jq -R . | jq -cs .)
+          echo "pr_numbers=$json" >> "$GITHUB_OUTPUT"
+          echo "Replaying ${#parsed[@]} PR(s): ${parsed[*]}"
+
+  submit-metrics:
+    needs: prepare
+    # repository_owner names the CALLER (see leaderboard-metrics.yml header): a
+    # non-praetorian org calling this PUBLIC reusable is skipped before any
+    # id-token / AWS step runs. Defense in depth — the IAM trust also anchors
+    # the caller org via repository_owner_id. Do not weaken or remove.
+    if: github.repository_owner == 'praetorian-inc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: leaderboard
+    strategy:
+      # One bad PR must not abort the rest of the replay set — a partial
+      # backfill that reports which entries failed is far more useful than an
+      # all-or-nothing run, and re-running just the failed entries is normally
+      # free: a job that failed before its SQS send — the last step — never
+      # delivered, so it has no row to duplicate. A failure at or after that
+      # send may already have delivered, which is the SAFETY case at the top of
+      # this file, not a free re-run.
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        pr: ${{ fromJSON(needs.prepare.outputs.pr_numbers) }}
+    # Request id-token only in the job that federates to AWS (min-scope).
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      # Same egress allowlist as the live path — see leaderboard-metrics.yml
+      # for the per-host rationale. If a run fails on a blocked endpoint, the
+      # harden-runner step summary names the host: add it there and here rather
+      # than reverting to audit.
+      - name: Harden runner
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+            codeload.github.com:443
+            objects.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            *.actions.githubusercontent.com:443
+            sts.us-east-2.amazonaws.com:443
+            sqs.us-east-2.amazonaws.com:443
+          disable-sudo-and-containers: true
+
+      # `ref:` is PINNED to the caller's default branch rather than left to
+      # checkout's default of github.ref. In a workflow_call the github context
+      # is the CALLER's, so github.ref is the branch the backfill was DISPATCHED
+      # from; the derivation below would then read that branch's capability_map,
+      # while the live path (pull_request_target) evaluates the caller workflow
+      # from the default branch. Unpinned, a backfill dispatched from a feature
+      # branch derives a value live runs never used and diverges silently —
+      # breaking this header's FIDELITY claim.
+      #
+      # Verified against actions/checkout at the SHA pinned here: fetch-depth: 0
+      # takes the getRefSpecForAllHistory path, whose refspec is
+      # `+refs/heads/*:refs/remotes/origin/*` plus tags — ALL branches, whichever
+      # ref is checked out. So pinning changes the working tree only, not the
+      # objects available to `Fetch PR head and base commits` below (which fetch
+      # by explicit SHA/refspec) or to collect-metrics' `git log base...head`
+      # (which addresses both ends by SHA).
+      #
+      # PR head code is never executed; head is fetched below as diff DATA only,
+      # exactly as the live path does. Credentials persist because the fetch
+      # below needs them on internal/private caller repos.
+      - name: Checkout caller repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      # Derives the capability map from the caller repo's OWN live workflow when
+      # the input is empty, because for a caller that DOES pass one an empty map
+      # is silent UNDER-DELIVERY here, not a neutral default. Measured 2026-08-02
+      # over the WHOLE population of 36 callers, not a sample: 18 of them pass a
+      # non-empty capability_map in their live caller workflow (17
+      # `[{"path": ".", "name": "<repo>"}]`, guard a depth map) and the other 18
+      # pass none at all. For those 18 the derivation correctly resolves to
+      # GENUINELY ABSENT and the replay proceeds with '[]' — a deliberate no-op,
+      # not a failure, since their live path attributes nothing either. The
+      # derivation's value is therefore concentrated in the 18 that DO pass a map
+      # — caeruleus among them, the first repo this workflow backfills — which is
+      # why deriving beats defaulting to '[]' for the very run it was built for.
+      # With an empty map, collect_leaderboard_metrics.py's collect_capabilities
+      # returns [] and the payload's `capabilities` field is null, so the
+      # consumer's `for _, cap := range event.Caps` loop (guard
+      # backend/cmd/listeners/github-metrics/main.go) never iterates. That loop
+      # only ever Inserts — the listener issues no delete — so a replay would
+      # leave any CapabilityCommit rows the PR already had untouched, add none,
+      # and go GREEN.
+      #
+      # And the cost is not just thinner attribution. The leaderboard's
+      # FP-impact BonusScore is gated on that same emptiness:
+      # backend/pkg/services/leaderboard/service.go:827-856 does
+      # `caps := capsByPR[prKey]; if len(caps) == 0 { continue }`. So a replay
+      # that lands an empty or wrong capability map FORFEITS that PR's
+      # BonusScore outright — real score loss, silently, on a green run.
+      #
+      # Losing metrics quietly is the exact failure this workflow
+      # exists to repair, so the three outcomes are deliberately NOT alike:
+      #
+      #   1. A live workflow that EXISTS but cannot be READ — yq absent, yq
+      #      failing, a non-string capability_map, a value that is not a JSON
+      #      array, or a default branch this run could not determine — is an
+      #      ERROR and FAILS the run. It must not fall through to '[]': that
+      #      made the unreadable case and the genuinely-absent case produce the
+      #      same green run with no capability attribution, i.e. exactly the
+      #      silent under-delivery described above. Distinguishable log lines
+      #      are not enough when both paths exit 0 with the same value.
+      #   2. A map that is genuinely ABSENT — no live workflow file, no job
+      #      calling the live reusable, or such a job passing no capability_map
+      #      (as many callers do, palatine among them — see the measured split
+      #      above) — WARNS and continues with '[]'. Nothing was lost: that
+      #      repo's live path attributes nothing either.
+      #   3. An explicit input that DISAGREES with the live value WARNS. A
+      #      human may intend a narrower replay, so it does not fail.
+      #
+      # An explicit input is the documented override, so it also suppresses
+      # case 1's failure: the input wins outright and the unreadable live value
+      # is then only relevant to case 3's comparison, which is skipped.
+      #
+      # Reads the file from the checkout above, whose ref is PINNED to the caller
+      # repo's default branch — the same source of truth the live path runs from
+      # — so this step makes NO network call and needs no allowlist entry. The
+      # path read is FIXED at .github/workflows/leaderboard-metrics.yml, not
+      # searched for: a caller whose live workflow has a different filename has
+      # no derivable map (case 2) and must pass capability_map explicitly.
+      #
+      # yq parses it rather than a regex because the value is a YAML scalar
+      # callers write single-quoted, and yq specifically because the
+      # ubuntu-24.04 image ships
+      # it (Ubuntu2404-Readme.md lists `yq 4.53.3` and `jq 1.7`; it lists no
+      # PyYAML, which is why this is not Python). A missing yq is still reported
+      # rather than read as "no map": the allowlist above has no package-index
+      # or release host, so no parser could be installed here anyway.
+      - name: Derive capability map
+        id: capmap
+        env:
+          # Passed as env, never interpolated into the script body: an input is
+          # caller-controlled text and `${{ }}` inside the script would splice
+          # it into the source.
+          CAPABILITY_MAP_INPUT: ${{ inputs.capability_map }}
+          LIVE_WORKFLOW: ${{ github.workspace }}/.github/workflows/leaderboard-metrics.yml
+          LIVE_REUSABLE: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml
+          # The SAME expression the checkout above pins `ref:` to. Read here so
+          # the derivation can tell that the pin took effect: checkout treats an
+          # empty `ref:` as unset and silently falls back to github.ref, which
+          # would leave the workspace on the dispatch branch — a file this step
+          # must not trust. Kept in step-scope env so the two stay adjacent.
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          live_name=${LIVE_WORKFLOW##*/}
+
+          # Collapses whitespace: the runner treats any log LINE that begins
+          # with `::` as a command, so a newline inside a caller-supplied value
+          # or a parser's message must never reach the log intact. See LOG
+          # SAFETY in this file's header for the rule this helper implements;
+          # every step that emits unconstructed text defines it identically.
+          log() {
+            local kind=$1
+            shift
+            printf '::%s::%s\n' "$kind" "$(printf '%s' "$*" | tr '\r\n\t\v\f' '     ' | tr -s ' ')"
+          }
+
+          # Sets ONE_LINE to the compact form of a JSON array, or WHY to the
+          # reason the text is not one. `jq -Rs fromjson` is the whole
+          # single-line guarantee: it accepts exactly ONE JSON value — trailing
+          # text such as a forged `::error::` line is a parse failure, not a
+          # second output line — and re-emits it with every control character
+          # escaped. So the value appended to $GITHUB_OUTPUT at the end is one
+          # line by construction, with no delimiter to break out of.
+          ONE_LINE=''
+          WHY=''
+          one_line() {
+            ONE_LINE=''
+            WHY=''
+            local out
+            if ! out=$(printf '%s' "$1" | jq -Rs -c 'fromjson' 2>&1); then
+              WHY="not valid JSON ($out)"
+              return
+            fi
+            if ! printf '%s' "$out" | jq -e 'type == "array"' >/dev/null; then
+              WHY='not a JSON array'
+              return
+            fi
+            ONE_LINE=$out
+          }
+
+          # Sets LIVE_VALUE to the caller's live map, or LIVE_ERROR when a live
+          # workflow exists but could not be read. Both empty means "this repo
+          # passes no map" — absence (no file, no matching job, no key) has to
+          # stay distinguishable from a parse failure, which is never silent.
+          LIVE_VALUE=''
+          LIVE_ERROR=''
+          read_live_map() {
+            LIVE_VALUE=''
+            LIVE_ERROR=''
+
+            # Checked before the file is even looked at: without the default
+            # branch name the checkout's `ref:` pin was empty, so whatever sits
+            # at $LIVE_WORKFLOW came from the dispatch branch and may differ
+            # from what live runs read. Unreadable, not absent.
+            if [ -z "${DEFAULT_BRANCH:-}" ]; then
+              LIVE_ERROR='the caller repo default branch is unknown, so the checkout is not pinned to the branch live runs read'
+              return
+            fi
+            if ! command -v yq >/dev/null; then
+              LIVE_ERROR='yq is not on PATH'
+              return
+            fi
+            if [ ! -f "$LIVE_WORKFLOW" ]; then
+              return
+            fi
+
+            local errors nodes node job raw
+            # $RUNNER_TEMP, never $GITHUB_WORKSPACE: that holds the checkout.
+            errors="$RUNNER_TEMP/capmap-yq.err"
+            # Selects jobs by their `uses:` target, not their name: nothing
+            # obliges a caller to name the job that calls the live reusable
+            # "metrics". The target is matched EXACTLY on its path portion —
+            # `split("@") | .[0]` strips the `@<ref>` pin, leaving an equality
+            # test. A substring test would also match any LONGER path that
+            # merely HAS this one as a prefix, e.g. a
+            # `…/leaderboard-metrics.yml.disabled@<sha>` left behind during an
+            # onboarding, and would then derive that impostor's map. An
+            # unpinned `uses:` has no `@` to strip and still matches, which is
+            # correct — it is the same reusable. Emitting {"job":…,"map":…}
+            # keeps each value's YAML type visible — a string stays quoted, a
+            # mistyped sequence does not — and -I=0 keeps the array on one line.
+            if ! nodes=$(yq -o=json -I=0 '[.jobs // {} | to_entries | .[]
+              | select((.value.uses // "" | split("@") | .[0] // "") == strenv(LIVE_REUSABLE))
+              | {"job": .key, "map": (.value.with.capability_map // null)}]' "$LIVE_WORKFLOW" 2>"$errors"); then
+              LIVE_ERROR="$live_name could not be parsed ($(cat "$errors"))"
+              return
+            fi
+
+            # No job in the live workflow calls the live reusable.
+            if [ "$(printf '%s' "$nodes" | jq 'length')" -eq 0 ]; then
+              return
+            fi
+            # Two or more jobs call it. Taking the first would be a GUESS, and a
+            # guess here is precisely the silent-wrong-value failure this step
+            # exists to prevent — so maps that DISAGREE are unreadable, not a
+            # coin flip. Agreement is not ambiguity: there is one live value and
+            # every calling job passes it. Note a job passing NO map disagrees
+            # with one that passes a map — one attributes and the other does
+            # not, which is the ambiguity, not a detail. Compared as raw
+            # scalars, so a formatting-only difference also fails closed; that
+            # is the safe bias, and an explicit capability_map input overrides
+            # it either way.
+            if [ "$(printf '%s' "$nodes" | jq '[.[].map] | unique | length')" -gt 1 ]; then
+              LIVE_ERROR="jobs [$(printf '%s' "$nodes" | jq -r '[.[].job] | join(", ")')] call the live reusable with DIFFERENT capability_map values, so which one live runs use is ambiguous"
+              return
+            fi
+            node=$(printf '%s' "$nodes" | jq -c '.[0]')
+            job=$(printf '%s' "$node" | jq -r '.job')
+            # The job calls it but passes no capability_map (as palatine does).
+            if printf '%s' "$node" | jq -e '.map == null' >/dev/null; then
+              return
+            fi
+            if ! printf '%s' "$node" | jq -e '.map | type == "string"' >/dev/null; then
+              LIVE_ERROR="job '$job' passes a non-string capability_map"
+              return
+            fi
+            raw=$(printf '%s' "$node" | jq -r '.map')
+            one_line "$raw"
+            if [ -n "$WHY" ]; then
+              LIVE_ERROR="job '$job' capability_map is $WHY"
+              return
+            fi
+            LIVE_VALUE=$ONE_LINE
+          }
+
+          # Only blank-vs-set picks the branch; the value itself is never
+          # edited, so a whitespace-only input derives instead of failing.
+          # Resolved once, because the unreadable-live-map handling below turns
+          # on the same distinction and the two must never disagree.
+          input_set=''
+          if [ -n "$(printf '%s' "$CAPABILITY_MAP_INPUT" | tr -d '[:space:]')" ]; then
+            input_set=yes
+          fi
+
+          read_live_map
+          if [ -n "$LIVE_ERROR" ] && [ -z "$input_set" ]; then
+            # FAILS rather than warning: a live workflow we could not read is
+            # NOT a repo without a map, and falling through to the '[]' branch
+            # below would make the two indistinguishable — same exit 0, same
+            # missing capability attribution. Exiting before $GITHUB_OUTPUT is
+            # written also leaves steps.capmap.outputs.value unset, so no
+            # downstream step can replay on a guessed map.
+            log error "Could not read the live capability map: $LIVE_ERROR." \
+              "Refusing to replay with no capability attribution. Fix the live" \
+              "$live_name, or pass an explicit capability_map input to override" \
+              "the derivation (an explicit value always wins)."
+            exit 1
+          fi
+          if [ -n "$LIVE_ERROR" ]; then
+            # An explicit input is the documented override, so this only warns.
+            # LIVE_VALUE is empty here, which also suppresses the disagreement
+            # comparison below — there is no live value to disagree with.
+            log warning "Could not read the live capability map: $LIVE_ERROR." \
+              "Using the explicit capability_map input instead; it CANNOT be" \
+              "checked against the live value."
+          fi
+
+          if [ -n "$input_set" ]; then
+            one_line "$CAPABILITY_MAP_INPUT"
+            if [ -n "$WHY" ]; then
+              # Rejected here rather than passed on: a value that is not a JSON
+              # array cannot reach the composite on one $GITHUB_OUTPUT line, and
+              # collect_leaderboard_metrics.py json.loads() it unguarded a step
+              # later anyway — so fail where the message can say which input was
+              # wrong. jq's message quotes the offending text.
+              log error "capability_map input is $WHY"
+              exit 1
+            fi
+            value=$ONE_LINE
+            # Key order is not semantic, so compare key-sorted forms: a caller
+            # who copied the live value must not be warned about formatting.
+            if [ -n "$LIVE_VALUE" ] &&
+              [ "$(printf '%s' "$value" | jq -Sc .)" != "$(printf '%s' "$LIVE_VALUE" | jq -Sc .)" ]; then
+              log warning "capability_map input $value differs from the live" \
+                "$live_name value $LIVE_VALUE — replayed capability attribution" \
+                "will NOT match live runs for these PRs."
+            fi
+          elif [ -n "$LIVE_VALUE" ]; then
+            value=$LIVE_VALUE
+            log notice "Derived capability_map from $live_name: $value"
+          else
+            value='[]'
+            log warning "No capability_map input and none derivable from" \
+              "$LIVE_WORKFLOW — capability attribution will be OMITTED for" \
+              "every PR replayed in this run (CodeCommit rows still land;" \
+              "CapabilityCommit rows do not). A repo whose live path DOES pass" \
+              "a map must pass that same value here."
+          fi
+
+          printf 'value=%s\n' "$value" >> "$GITHUB_OUTPUT"
+
+      # Emits ONE compact-JSON output rather than a field per value: a PR title
+      # or body is arbitrary attacker-influenced text, and a multi-line value
+      # written to $GITHUB_OUTPUT needs a heredoc delimiter that the body
+      # itself could contain. JSON-encoding collapses everything to a single
+      # line with no delimiter to break out of; the fields are read back below
+      # with fromJSON.
+      - name: Read PR metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.pr }}
+        run: |
+          set -euo pipefail
+
+          # See LOG SAFETY in this file's header. Identical to the helper in
+          # `Derive capability map`; each `run:` is its own shell.
+          log() {
+            local kind=$1
+            shift
+            printf '::%s::%s\n' "$kind" "$(printf '%s' "$*" | tr '\r\n\t\v\f' '     ' | tr -s ' ')"
+          }
+
+          # Scratch files live in $RUNNER_TEMP, never the workspace: the
+          # workspace IS the caller repo's worktree, and a caller that tracks a
+          # pr.json / meta.json of its own would have it silently clobbered.
+          if ! gh api "repos/$REPO/pulls/$PR_NUMBER" > "$RUNNER_TEMP/pr.json" 2> "$RUNNER_TEMP/gh-err.txt"; then
+            # gh's stderr is multi-line on most failures (an HTTP status, then
+            # the API's message, then a hint), so uncollapsed this annotation
+            # showed the status and dropped the reason — the one part worth
+            # reading. log() keeps the whole thing on the one line the runner
+            # will render.
+            log error "Could not read $REPO#$PR_NUMBER: $(cat "$RUNNER_TEMP/gh-err.txt")"
+            exit 1
+          fi
+
+          merged=$(jq -r '.merged' "$RUNNER_TEMP/pr.json")
+          if [ "$merged" != "true" ]; then
+            log notice "$REPO#$PR_NUMBER is not merged — skipping (no metrics are owed for an unmerged PR)."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Field-for-field the subset of the webhook `pull_request` object the
+          # live path passes to the composite.
+          jq -c '{
+            author:    .user.login,
+            additions: .additions,
+            deletions: .deletions,
+            files:     .changed_files,
+            mergedAt:  .merged_at,
+            title:     .title,
+            body:      (.body // ""),
+            baseSha:   .base.sha,
+            headSha:   .head.sha
+          }' "$RUNNER_TEMP/pr.json" > "$RUNNER_TEMP/meta.json"
+
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "pr=$(cat "$RUNNER_TEMP/meta.json")" >> "$GITHUB_OUTPUT"
+
+          echo "Replaying $REPO#$PR_NUMBER (merged $(jq -r '.merged_at' "$RUNNER_TEMP/pr.json"))"
+
+      # Fetches the head by its refs/pull/<n>/head ref rather than by bare SHA
+      # (the live path's `git fetch origin <head-sha>`). Both work today: tested
+      # against real GitHub on a merged PR whose head branch had been deleted, a
+      # bare `git fetch origin <sha>` still exits 0 — GitHub's upload-pack
+      # serves any SHA reachable from a ref, and refs/pull/<n>/head keeps the
+      # head reachable for the life of the PR. But that is server configuration,
+      # not a protocol guarantee (a SHA reachable from NO ref is refused:
+      # "upload-pack: not our ref", exit 128), so name the ref that provides the
+      # guarantee instead of depending on it implicitly. Without the head commit
+      # present, collect-metrics cannot resolve `git log base...head` and
+      # silently degrades: the whole PR is attributed to the opener, and NO
+      # CapabilityCommit rows are written at all — the consumer reaches those
+      # only inside `for _, cap := range event.Caps`, whose body is pure
+      # `table.Insert`, so an empty `capabilities` writes nothing and deletes
+      # nothing. The degraded CodeCommit row overwrites the correct one only
+      # when the author key is unchanged; either way, co-author and capability
+      # attribution are lost.
+      - name: Fetch PR head and base commits
+        if: steps.meta.outputs.merged == 'true'
+        # `|| '{}'` is load-bearing, not defensive noise. A step's `env:` block
+        # is evaluated BEFORE its `if:` — actions/runner's StepsRunner.cs calls
+        # EvaluateStepEnvironment and, on an expression error, marks the step
+        # FAILED without ever evaluating the condition (actions/runner#1722).
+        # `steps.meta.outputs.pr` is unset on the not-merged path above, and
+        # fromJSON('') throws (JToken.ReadFrom on empty input). Without the
+        # default, every non-merged PR in a replay set would FAIL its matrix job
+        # instead of being skipped with a notice — breaking the contract this
+        # workflow's own `pr_numbers` description promises. fromJSON('{}').x is
+        # null, which renders as an empty env value; the step is skipped anyway.
+        # The `with:` block on the collect step below needs no such default:
+        # step inputs are evaluated inside ActionRunner.RunAsync, i.e. only
+        # after the condition passed.
+        env:
+          PR_NUMBER: ${{ matrix.pr }}
+          BASE_SHA: ${{ fromJSON(steps.meta.outputs.pr || '{}').baseSha }}
+          HEAD_SHA: ${{ fromJSON(steps.meta.outputs.pr || '{}').headSha }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin "refs/pull/$PR_NUMBER/head"
+
+          # Neither `::` emission in this step needs log(): both interpolate
+          # only a 40-char hex SHA from the GitHub API, which cannot hold a
+          # newline. See LOG SAFETY in this file's header.
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            echo "::error::Head commit $HEAD_SHA not present after fetching refs/pull/$PR_NUMBER/head."
+            exit 1
+          fi
+
+          # fetch-depth: 0 covers the default branch, but a base commit on a
+          # deleted or rewritten branch may still be missing. Not fatal —
+          # collect-metrics warns and degrades — so surface it and continue
+          # rather than dropping the PR's metrics entirely.
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch origin "$BASE_SHA" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "::warning::Base commit $BASE_SHA is unreachable; attribution will fall back to the PR opener."
+          fi
+
+      # Pinned by SHA for the same reason the live path pins it: a floating
+      # @main composite would drift at runtime even though this reusable is
+      # reviewed. This pin and the live path's MUST stay on the same version,
+      # or replayed scores will not match live ones.
+      - name: Collect PR metrics
+        id: collect
+        if: steps.meta.outputs.merged == 'true'
+        uses: praetorian-inc/public-workflows/.github/actions/collect-metrics@5d40d2300abf493740f98b0a1f53620eb6921310 # v2.15.0
+        with:
+          github-token: ${{ github.token }}
+          repo: ${{ github.repository }}
+          pr-number: ${{ matrix.pr }}
+          pr-author: ${{ fromJSON(steps.meta.outputs.pr).author }}
+          pr-additions: ${{ fromJSON(steps.meta.outputs.pr).additions }}
+          pr-deletions: ${{ fromJSON(steps.meta.outputs.pr).deletions }}
+          pr-files: ${{ fromJSON(steps.meta.outputs.pr).files }}
+          pr-merged-at: ${{ fromJSON(steps.meta.outputs.pr).mergedAt }}
+          pr-title: ${{ fromJSON(steps.meta.outputs.pr).title }}
+          pr-body: ${{ fromJSON(steps.meta.outputs.pr).body }}
+          base-sha: ${{ fromJSON(steps.meta.outputs.pr).baseSha }}
+          head-sha: ${{ fromJSON(steps.meta.outputs.pr).headSha }}
+          email-map: ${{ vars.ENGINEER_EMAIL_MAP }}
+          capability-map: ${{ steps.capmap.outputs.value }}
+
+      - name: Configure AWS credentials
+        if: steps.collect.outputs.has-payload == 'true'
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ vars.LEADERBOARD_METRICS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Send metrics to SQS
+        if: steps.collect.outputs.has-payload == 'true'
+        env:
+          QUEUE_URL: ${{ vars.LEADERBOARD_METRICS_QUEUE_URL }}
+          PR_NUMBER: ${{ matrix.pr }}
+        # Runs under bash -e: an aws CLI failure aborts the step with its
+        # stderr in the job log. The jq guard below covers only the exit-0
+        # no-MessageId edge; file:// sidesteps ARG_MAX on huge payloads.
+        run: |
+          # See LOG SAFETY in this file's header. Identical to the helper in
+          # `Derive capability map`; each `run:` is its own shell.
+          log() {
+            local kind=$1
+            shift
+            printf '::%s::%s\n' "$kind" "$(printf '%s' "$*" | tr '\r\n\t\v\f' '     ' | tr -s ' ')"
+          }
+
+          aws sqs send-message \
+            --queue-url "$QUEUE_URL" \
+            --message-body "file://$RUNNER_TEMP/payload.json" \
+            --output json > "$RUNNER_TEMP/sqs-response.json"
+
+          if ! message_id=$(jq -re '.MessageId' "$RUNNER_TEMP/sqs-response.json"); then
+            # `aws --output json` PRETTY-PRINTS, so this response is multi-line
+            # and uncollapsed the annotation read `SQS response missing
+            # MessageId: {` — it dropped the response, which is the entire
+            # content of the message. Nothing here is attacker-controlled, so
+            # the security stake is nil; the diagnostic is the whole point.
+            log error "SQS response missing MessageId: $(cat "$RUNNER_TEMP/sqs-response.json")"
+            exit 1
+          fi
+          echo "Backfilled PR #${PR_NUMBER}: $message_id"
+
+      # A merged PR that yielded no payload skips both steps above and the
+      # matrix job still reports SUCCESS — in the run list that is
+      # indistinguishable from a backfill that actually landed. For a replay the
+      # operator NAMED these PRs, so a green job that delivered nothing is the
+      # same silent under-delivery this workflow exists to repair; it needs to
+      # say so. The usual cause is an author absent from ENGINEER_EMAIL_MAP,
+      # which makes collect_leaderboard_metrics.py return None and leaves
+      # has-payload false.
+      #
+      # Deliberately NOT a failure: an unmapped author is a known, documented
+      # skip, and failing here would red every run over a data-entry gap the
+      # replay cannot fix. The `merged == 'true'` term keeps it off the
+      # not-merged path, which emits its own notice in `Read PR metadata`. No
+      # `always()`/`failure()` term either, so the implicit success() still
+      # applies and a FAILED collect step reports its own error rather than
+      # being re-labelled a mapping gap.
+      - name: Report undelivered PR
+        if: steps.meta.outputs.merged == 'true' && steps.collect.outputs.has-payload != 'true'
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ matrix.pr }}
+        run: |
+          # No log() needed: a repo slug and an integer already validated as
+          # bare digits by `Parse PR numbers` — neither can hold a newline. The
+          # continuations are echo arguments, which it joins with single spaces
+          # onto the one line the runner renders. See LOG SAFETY in the header.
+          echo "::notice::$REPO#$PR_NUMBER: NOTHING WAS DELIVERED." \
+            "collect-metrics produced no payload, so no CodeCommit and no" \
+            "CapabilityCommit row was written for this PR — this replay did" \
+            "not repair it. The usual cause is the PR author being absent from" \
+            "the ENGINEER_EMAIL_MAP repo variable; add them and re-run this PR." \
+            "This job is green because an unmapped author is a known," \
+            "documented skip rather than a delivery failure."
