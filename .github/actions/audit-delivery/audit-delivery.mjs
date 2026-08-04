@@ -168,6 +168,12 @@ export function classify(prs, byHead, onboardedTs, now = Date.now()) {
     skipped_anomaly: [],
     never_fired: [],
     pre_onboarding: [],
+    // A run that CONCLUDED SUCCESS having enqueued nothing. See verifyPayloads:
+    // `delivered` starts as "a successful run exists" and the payload probe
+    // demotes the ones that sent no message. Initialised here, not in the
+    // probe, so every consumer of `classes` sees the same shape whether or not
+    // verification ran — an absent key would read as zero.
+    payload_missing: [],
     // The verdict is not knowable YET. Two ways that happens, and both must be
     // here or the other one becomes a false gap:
     //   1. a run exists but has not concluded (`conclusion === null`);
@@ -283,9 +289,74 @@ export function chunk(xs, n) {
 }
 
 export function replayList(classes) {
+  // payload_missing is a REAL gap and is deliberately absent here. Replay runs
+  // the same collect-metrics against the same unresolvable author and produces
+  // the same empty payload — the backfill says so itself ("add them to the
+  // ENGINEER_EMAIL_MAP repo variable and re-run this PR"). Listing it would hand
+  // over a paste that writes to the prod queue and still delivers nothing. The
+  // repair is a map edit first, replay second, and the report says that instead.
   return [...classes.failed, ...classes.never_fired, ...classes.skipped_anomaly]
     .map((p) => p.number)
     .sort((a, b) => a - b);
+}
+
+// The step, inside the reusable, that actually enqueues the message. Exported so
+// the test names it once rather than restating the literal.
+export const SQS_STEP = 'Send metrics to SQS';
+
+// `conclusion === 'success'` does NOT prove a delivery, and this is the gap that
+// mattered most: collect-metrics exits 0 with `has_payload=false` when no commit
+// author or PR opener resolves through ENGINEER_EMAIL_MAP, and the reusable gates
+// BOTH AWS steps on `has-payload == 'true'`. The run then concludes success
+// having enqueued nothing, no CodeCommit row is written, and an audit that reads
+// only the run conclusion files that PR as delivered — a false negative in
+// exactly the missing-score class the detector exists to catch.
+//
+// This is not hypothetical. guard run 28112331529 (2026-06-24, "chore(deps):
+// bump aurelian to v1.0.4", author `xoverride`) concluded SUCCESS with steps
+// "Configure AWS credentials" and "Send metrics to SQS" both `skipped` and the
+// annotation "No payload produced (author email not mapped)". Before this probe
+// the audit called it delivered.
+//
+// Cost: one call per successful run, which makes this the audit's dominant API
+// cost on a wide window (guard has ~1054 in 90 days). It is unconditional
+// anyway — an opt-in flag would leave the default answer wrong, and the default
+// is what CI runs. `api_calls` in the report shows the real number.
+export async function verifyPayloads(client, cfg, repo, recs) {
+  const verdicts = new Map();
+  for (const rec of recs) {
+    const jobs = await client.gh(`/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/jobs`);
+    const steps = (jobs && !jobs.__missing ? jobs.jobs || [] : []).flatMap((j) => j.steps || []);
+    const step = steps.find((s) => s.name === SQS_STEP);
+    if (!step) {
+      // Absence is NOT treated as delivered. A name probe that silently answers
+      // "fine" when it finds nothing is the same fail-open shape as the bug it
+      // is fixing, so this stops the audit at exit 2 UNKNOWN instead. The name
+      // held for all 1000 successful runs in guard's auditable window, so this
+      // fires on a future rename of the reusable's step — a real change that a
+      // human must reflect here, not a per-run oddity to shrug off.
+      throw new Error(
+        `${repo}: run ${rec.run_id} concluded success but has no step named "${SQS_STEP}" — ` +
+          'the reusable\'s step names have changed and delivery can no longer be verified. ' +
+          'Update SQS_STEP rather than trusting the run conclusion.',
+      );
+    }
+    verdicts.set(rec.run_id, step.conclusion === 'success' ? 'sent' : 'not_sent');
+  }
+  return verdicts;
+}
+
+// Pure, so the demotion is testable without a network.
+export function applyPayloadVerdicts(classes, verdicts) {
+  const kept = [];
+  for (const rec of classes.delivered) {
+    if (verdicts.get(rec.run_id) === 'not_sent') {
+      rec.payload = 'missing';
+      classes.payload_missing.push(rec);
+    } else kept.push(rec);
+  }
+  classes.delivered = kept;
+  return classes;
 }
 
 // ── Networking ───────────────────────────────────────────────────────────────
@@ -525,6 +596,29 @@ async function hasCaller(client, cfg, repo) {
   return b64(f.content).includes(cfg.reusable);
 }
 
+// A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no commits
+// touching that path — which is why `gh` and `ghPaged` deliberately treat one as
+// "absent" and carry on. A 404 on the REPOSITORY is not data: it means the audit
+// read nothing at all, and every downstream "absent" is then an artifact of that
+// rather than a finding. Unchecked, the two are indistinguishable — and the
+// indistinguishable outcome is the dangerous one: zero merged PRs, zero gaps,
+// exit 0 CLEAN. A typo'd --repo, a renamed repo, or a token that cannot see a
+// private one would all report the fleet as healthy, which is precisely the
+// silent-success failure class this detector exists to catch.
+//
+// Fleet mode is already covered incidentally, since `hasCaller` cannot return
+// true for a repo the token cannot read. The check runs in both modes anyway so
+// the two cannot drift apart, and one call per repo is not worth optimising away.
+export async function assertReadable(client, cfg, repo) {
+  const meta = await client.gh(`/repos/${cfg.owner}/${repo}`);
+  if (!meta || meta.__missing) {
+    throw new Error(
+      `${cfg.owner}/${repo}: repository not found, or not readable by this token — refusing to audit it. Every "absent" result would be an artifact of that, not a finding.`,
+    );
+  }
+  return meta;
+}
+
 async function resolveFleet(client, cfg) {
   let names = cfg.repos;
   if (!names) {
@@ -538,6 +632,25 @@ async function resolveFleet(client, cfg) {
 
 // When did this repo get its caller? Used only to separate pre_onboarding from
 // never_fired.
+//
+// This is the earliest commit touching the caller PATH, deliberately NOT the
+// earliest revision whose content references `cfg.reusable`. The content-based
+// definition looks stricter and is actively wrong here: guard's caller pointed at
+// `praetorian-inc/.github/.github/workflows/leaderboard-metrics.yml` from
+// 2026-05-20 until it migrated to public-workflows on 2026-07-07. Keying the
+// boundary on the CURRENT reusable would therefore date guard's onboarding to
+// July and file every merged PR from 05-20 to 07-07 as pre_onboarding — "not a
+// gap" — which is exactly the window holding the three-week outage this audit's
+// first run found (~178 PRs, ENG-5775). The stricter-looking definition blinds
+// the detector to its own headline finding.
+//
+// The boundary being asked for is "when did delivery become EXPECTED", and that
+// is when the repo opted into the metrics program at all, not when it last
+// changed which copy of the reusable it calls. `hasCaller` still does a content
+// probe, because there the question is a different one: is this repo a subject
+// today. The residual risk of the path definition is a repo that carried an
+// unrelated workflow at this exact path before onboarding, which would date it
+// too early; no repo in the fleet does, and the file name makes it implausible.
 async function onboardedAt(client, cfg, repo) {
   const commits = await client.ghPaged(
     `/repos/${cfg.owner}/${repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=100`,
@@ -568,6 +681,9 @@ async function auditRepo(client, cfg, repo) {
   const runs = await runsInRange(client, cfg, repo);
   const onboarded = await onboardedAt(client, cfg, repo);
   const classes = classify(prs, dedupeByHead(runs), onboarded ? Date.parse(onboarded) : null);
+  // Only the successful runs need the payload probe: every other class already
+  // knows it did not deliver, so there is nothing to demote.
+  applyPayloadVerdicts(classes, await verifyPayloads(client, cfg, repo, classes.delivered));
   const caller = await hasCaller(client, cfg, repo);
 
   return { repo, onboarded, has_caller: caller, merged_prs: prs.length, classes };
@@ -580,7 +696,8 @@ export function renderMarkdown(report, cfg) {
   L.push(
     `Window \`${report.since}\` → now. ` +
       `Merged PRs examined: **${report.totals.merged_prs}**. ` +
-      `Delivered: **${report.totals.delivered}**.`,
+      `Delivered: **${report.totals.delivered}** — each one verified to have actually ` +
+      'enqueued a payload, not merely to have a successful run.',
   );
   L.push('');
   if (!report.repos_with_gaps.length) {
@@ -621,6 +738,9 @@ export function renderMarkdown(report, cfg) {
     L.push(`| failed | ${g.failed} |`);
     L.push(`| never fired | ${g.never_fired} |`);
     L.push(`| skipped anomaly | ${g.skipped_anomaly} |`);
+    if (g.payload_missing) {
+      L.push(`| ran but sent no payload (author unmapped) | ${g.payload_missing} |`);
+    }
     if (g.pre_onboarding) {
       L.push(`| pre-onboarding (not a gap) | ${g.pre_onboarding} |`);
     }
@@ -628,6 +748,28 @@ export function renderMarkdown(report, cfg) {
       L.push(`| not yet decided (not a gap, not replayed) | ${g.in_flight} |`);
     }
     L.push('');
+    if (g.payload_missing) {
+      // Split out from the replay list on purpose. These PRs ran, succeeded, and
+      // enqueued nothing because the author did not resolve, so the repair is a
+      // map edit — replaying first writes to the prod queue and still delivers
+      // nothing. Naming the fix beats naming the count.
+      L.push(
+        `**${g.payload_missing} PR(s) ran successfully but sent no payload** — no commit ` +
+          'author or PR opener resolved through the `ENGINEER_EMAIL_MAP` repo variable, so ' +
+          'collect-metrics produced nothing and both AWS steps were skipped while the run ' +
+          'still concluded `success`. Replay will not fix these: add the missing logins to ' +
+          '`ENGINEER_EMAIL_MAP` FIRST, then replay them.',
+      );
+      L.push('');
+      L.push(`Unmapped-author PRs (${g.payload_missing}): ${g.payload_missing_prs.map((n) => `#${n}`).join(', ')}`);
+      L.push('');
+    }
+    if (!g.replay.length) {
+      // Every gap in this repo is a payload_missing one. Emitting the replay
+      // preamble and a `-f pr_numbers=''` command here would hand over a paste
+      // that dispatches a backfill over nothing.
+      continue;
+    }
     L.push(`Affected PRs (${g.replay.length}): ${g.replay.map((n) => `#${n}`).join(', ')}`);
     L.push('');
     // The backfill workflow fans out one matrix job per PR, and GitHub caps a
@@ -675,9 +817,17 @@ export function buildReport(results, cfg, apiCalls) {
   // in_flight is deliberately NOT a gap condition: an unconcluded run is an
   // unknown, and raising on it would make the audit's verdict depend on how
   // close it ran to a merge.
+  //
+  // payload_missing IS a gap condition even though it is not replayable: the
+  // author is missing score for that PR, which is the thing this audit measures.
+  // Gating the gap verdict on replayability instead would make a repo whose only
+  // defect is unfixable-by-replay report as clean.
   const gaps = results.filter(
     (r) =>
-      r.classes.failed.length || r.classes.never_fired.length || r.classes.skipped_anomaly.length,
+      r.classes.failed.length ||
+      r.classes.never_fired.length ||
+      r.classes.skipped_anomaly.length ||
+      r.classes.payload_missing.length,
   );
   return {
     since: cfg.since,
@@ -692,6 +842,7 @@ export function buildReport(results, cfg, apiCalls) {
       skipped_anomaly: sum((r) => r.classes.skipped_anomaly.length),
       pre_onboarding: sum((r) => r.classes.pre_onboarding.length),
       in_flight: sum((r) => r.classes.in_flight.length),
+      payload_missing: sum((r) => r.classes.payload_missing.length),
     },
     repos_with_gaps: gaps.map((r) => ({
       repo: r.repo,
@@ -700,6 +851,10 @@ export function buildReport(results, cfg, apiCalls) {
       skipped_anomaly: r.classes.skipped_anomaly.length,
       pre_onboarding: r.classes.pre_onboarding.length,
       in_flight: r.classes.in_flight.length,
+      payload_missing: r.classes.payload_missing.length,
+      // Carried as numbers, not folded into `replay`: this list is what a human
+      // must fix in ENGINEER_EMAIL_MAP before any replay of them is productive.
+      payload_missing_prs: r.classes.payload_missing.map((p) => p.number).sort((a, b) => a - b),
       replay: replayList(r.classes),
     })),
     repos: results,
@@ -731,6 +886,11 @@ async function main() {
     process.exit(2);
   }
 
+  // Prove every subject is readable BEFORE auditing any of it, so an unreadable
+  // repo fails as UNKNOWN instead of producing a clean report over a repo whose
+  // every endpoint answered 404.
+  for (const repo of fleet) await assertReadable(client, cfg, repo);
+
   const results = [];
   for (const repo of fleet) results.push(await auditRepo(client, cfg, repo));
   const report = buildReport(results, cfg, client.state.calls);
@@ -743,12 +903,14 @@ async function main() {
   console.log(
     `mode=${report.mode} repos=${fleet.length} merged=${t.merged_prs} delivered=${t.delivered} ` +
       `FAILED=${t.failed} NEVER_FIRED=${t.never_fired} skipped_anomaly=${t.skipped_anomaly} ` +
+      `payload_missing=${t.payload_missing} ` +
       `pre_onboarding=${t.pre_onboarding} in_flight=${t.in_flight} api_calls=${report.api_calls}`,
   );
   for (const g of report.repos_with_gaps) {
     console.log(
       `  GAP ${g.repo}: failed=${g.failed} never_fired=${g.never_fired} ` +
-        `skipped_anomaly=${g.skipped_anomaly} replay=${g.replay.length} PRs`,
+        `skipped_anomaly=${g.skipped_anomaly} payload_missing=${g.payload_missing} ` +
+        `replay=${g.replay.length} PRs`,
     );
   }
 

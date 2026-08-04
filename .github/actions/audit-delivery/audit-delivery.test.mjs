@@ -31,6 +31,10 @@ import {
   buildReport,
   retryDelayMs,
   runsInRange,
+  assertReadable,
+  verifyPayloads,
+  applyPayloadVerdicts,
+  SQS_STEP,
   chunk,
   REPLAY_BATCH,
   FAILED,
@@ -72,6 +76,7 @@ const repoResult = (repo, { merged = 0, ...counts } = {}) => ({
     never_fired: counts.never_fired ?? [],
     pre_onboarding: counts.pre_onboarding ?? [],
     in_flight: counts.in_flight ?? [],
+    payload_missing: counts.payload_missing ?? [],
   },
 });
 
@@ -1133,37 +1138,41 @@ test('buildReport: totals sum every class across repos', () => {
     // Each repo's per-class counts add up to its merged count, so a class the
     // sum forgets shows up as a total that does not reconcile.
     repoResult('guard', {
-      merged: 11,
+      merged: 12,
       delivered: [rec(1), rec(2), rec(3)],
       failed: [rec(4)],
       never_fired: [rec(5), rec(6)],
       skipped_anomaly: [rec(7)],
       pre_onboarding: [rec(8), rec(9), rec(10)],
       in_flight: [rec(11)],
+      payload_missing: [rec(12)],
     }),
     repoResult('palatine', {
-      merged: 6,
+      merged: 8,
       delivered: [rec(20)],
       failed: [rec(21), rec(22)],
       never_fired: [],
       skipped_anomaly: [],
       pre_onboarding: [rec(23)],
       in_flight: [rec(24), rec(25)],
+      payload_missing: [rec(26), rec(27)],
     }),
   ];
 
   const report = buildReport(results, { since: '2026-07-05', selfAudit: false }, 137);
 
-  // Hand-summed: 11+6, 3+1, 1+2, 2+0, 1+0, 3+1, 1+2. deepEqual rather than
-  // per-key: an added class that nothing sums is exactly the drift to catch.
+  // Hand-summed: 12+8, 3+1, 1+2, 2+0, 1+0, 3+1, 1+2, 1+2. deepEqual rather than
+  // per-key: an added class that nothing sums is exactly the drift to catch —
+  // and it caught payload_missing when that class was added.
   assert.deepEqual(report.totals, {
-    merged_prs: 17,
+    merged_prs: 20,
     delivered: 4,
     failed: 3,
     never_fired: 2,
     skipped_anomaly: 1,
     pre_onboarding: 4,
     in_flight: 3,
+    payload_missing: 3,
   });
   // Cross-check: every merged PR is accounted for by exactly one class.
   const { merged_prs: m, ...classes } = report.totals;
@@ -1249,6 +1258,7 @@ test('buildReport: a gap entry carries the per-class counts and the numeric repl
         skipped_anomaly: [rec(10)],
         pre_onboarding: [rec(1)],
         in_flight: [rec(2)],
+        payload_missing: [rec(50)],
       }),
     ],
     { since: '2026-07-05', selfAudit: true },
@@ -1263,9 +1273,14 @@ test('buildReport: a gap entry carries the per-class counts and the numeric repl
       skipped_anomaly: 1,
       pre_onboarding: 1,
       in_flight: 1,
+      payload_missing: 1,
+      payload_missing_prs: [50],
       replay: [9, 10, 100],
     },
   ]);
+  // Reported on the entry, absent from the replay list: #50 ran and succeeded,
+  // but enqueued nothing, and replaying it re-delivers nothing.
+  assert.equal(report.repos_with_gaps[0].replay.includes(50), false);
   // Reported on the entry, absent from the replay list: #2 is running, not lost.
   assert.equal(report.repos_with_gaps[0].replay.includes(2), false);
 });
@@ -1316,4 +1331,195 @@ test('buildReport output feeds renderMarkdown without shape drift', () => {
   assert.match(md, /has no `leaderboard-metrics\.yml` caller/);
   assert.match(md, /-f pr_numbers='9,10'/);
   assert.match(md, /Merged PRs examined: \*\*3\*\*/);
+});
+
+// ── assertReadable: a 404 on the REPO must not read as a clean audit ──────────
+
+test('assertReadable: an unreadable repo THROWS instead of yielding a clean report', () => {
+  // The dangerous shape, and the reason this is not merely defensive: gh() maps
+  // 404 -> {__missing:true} and ghPaged() returns [] on 404, both deliberately,
+  // because an absent caller file and an absent commit history are real answers.
+  // With no repo-level check, a typo'd --repo makes EVERY endpoint answer 404:
+  // zero merged PRs, zero gaps, exit 0 CLEAN.
+  const client = { gh: async () => ({ __missing: true }) };
+  return assert.rejects(
+    () => assertReadable(client, { owner: 'praetorian-inc' }, 'guardd'),
+    /praetorian-inc\/guardd: repository not found, or not readable by this token/,
+  );
+});
+
+test('assertReadable: a readable repo passes and does not disturb the audit', async () => {
+  const client = { gh: async () => ({ name: 'guard', archived: false }) };
+  const meta = await assertReadable(client, { owner: 'praetorian-inc' }, 'guard');
+  assert.equal(meta.name, 'guard');
+});
+
+test('assertReadable: a null body is treated as unreadable, not as readable', () => {
+  // Distinct from __missing: a 200 with an empty body would sail past a check
+  // written as `if (meta.__missing)` and then throw on property access later,
+  // far from the cause.
+  const client = { gh: async () => null };
+  return assert.rejects(
+    () => assertReadable(client, { owner: 'praetorian-inc' }, 'guard'),
+    /refusing to audit it/,
+  );
+});
+
+// ── verifyPayloads: a `success` run that enqueued nothing ─────────────────────
+
+// Modelled on guard run 28112331529 (2026-06-24, author `xoverride`): the run
+// concluded SUCCESS with "Configure AWS credentials" and "Send metrics to SQS"
+// both `skipped`, because no author resolved through ENGINEER_EMAIL_MAP.
+const jobsWith = (sqsConclusion) => ({
+  jobs: [
+    {
+      steps: [
+        { name: 'Set up job', conclusion: 'success' },
+        { name: 'Collect PR metrics', conclusion: 'success' },
+        { name: 'Configure AWS credentials', conclusion: sqsConclusion },
+        { name: SQS_STEP, conclusion: sqsConclusion },
+      ],
+    },
+  ],
+});
+
+const jobsClient = (byRun) => ({
+  gh: async (url) => byRun[url.match(/runs\/(\d+)\/jobs/)[1]],
+});
+
+test('verifyPayloads: a skipped SQS step is NOT a delivery', async () => {
+  const client = jobsClient({ 111: jobsWith('skipped'), 222: jobsWith('success') });
+  const v = await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [
+    { number: 1, run_id: 111 },
+    { number: 2, run_id: 222 },
+  ]);
+  assert.equal(v.get(111), 'not_sent');
+  assert.equal(v.get(222), 'sent');
+});
+
+test('verifyPayloads: a MISSING step name throws rather than defaulting to delivered', () => {
+  // The fail-open this fix exists to close, one layer up: a name probe that
+  // answers "fine" when it finds nothing has the same shape as the bug. A
+  // rename of the reusable's step must stop the audit (exit 2 UNKNOWN), not
+  // silently restore "every success is a delivery".
+  const client = jobsClient({ 333: { jobs: [{ steps: [{ name: 'Send to SQS', conclusion: 'success' }] }] } });
+  return assert.rejects(
+    () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 3, run_id: 333 }]),
+    /has no step named "Send metrics to SQS"/,
+  );
+});
+
+test('verifyPayloads: a 404 on the jobs endpoint throws, it does not pass the run', () => {
+  // Same reason as above. __missing means the steps could not be read at all,
+  // which is not evidence of a delivery.
+  const client = jobsClient({ 444: { __missing: true } });
+  return assert.rejects(
+    () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 4, run_id: 444 }]),
+    /has no step named/,
+  );
+});
+
+test('applyPayloadVerdicts: demotes only the unsent runs and leaves the rest delivered', () => {
+  const classes = {
+    delivered: [
+      { number: 1, run_id: 111 },
+      { number: 2, run_id: 222 },
+      { number: 3, run_id: 333 },
+    ],
+    payload_missing: [],
+  };
+  applyPayloadVerdicts(
+    classes,
+    new Map([
+      [111, 'not_sent'],
+      [222, 'sent'],
+      [333, 'not_sent'],
+    ]),
+  );
+  assert.deepEqual(
+    classes.delivered.map((r) => r.number),
+    [2],
+  );
+  assert.deepEqual(
+    classes.payload_missing.map((r) => r.number),
+    [1, 3],
+  );
+  // The record says WHY, so the JSON artifact explains the demotion on its own.
+  assert.equal(classes.payload_missing[0].payload, 'missing');
+});
+
+test('applyPayloadVerdicts: an empty verdict map leaves every delivery intact', () => {
+  // Guards the direction that would be catastrophic: a probe that returned
+  // nothing must not demote the whole fleet into a 1000-PR phantom gap.
+  const classes = { delivered: [{ number: 1, run_id: 111 }], payload_missing: [] };
+  applyPayloadVerdicts(classes, new Map());
+  assert.equal(classes.delivered.length, 1);
+  assert.equal(classes.payload_missing.length, 0);
+});
+
+test('replayList: payload_missing is EXCLUDED — replay cannot fix an unmapped author', () => {
+  // Replaying re-runs collect-metrics against the same unresolvable author and
+  // enqueues nothing again, while still writing to the prod queue for the other
+  // PRs in the batch. The backfill says as much itself. The repair is a map edit.
+  const list = replayList({
+    failed: [rec(4)],
+    never_fired: [rec(5)],
+    skipped_anomaly: [],
+    payload_missing: [rec(99)],
+  });
+  assert.deepEqual(list, [4, 5]);
+});
+
+test('buildReport: payload_missing alone makes a repo a GAP repo', () => {
+  // The class is unreplayable, so keying the gap verdict off the replay list
+  // would report a repo whose every defect is unfixable-by-replay as clean.
+  const report = buildReport(
+    [repoResult('guard', { merged: 2, delivered: [rec(1)], payload_missing: [rec(2)] })],
+    { since: '2026-07-01', selfAudit: true, backfillCaller: 'leaderboard-backfill.yml' },
+    10,
+  );
+  assert.equal(report.repos_with_gaps.length, 1);
+  assert.equal(report.totals.payload_missing, 1);
+  assert.deepEqual(report.repos_with_gaps[0].payload_missing_prs, [2]);
+  assert.deepEqual(report.repos_with_gaps[0].replay, [], 'not replayable');
+});
+
+test('renderMarkdown: names the map fix and emits NO replay command when that is the only gap', () => {
+  const report = buildReport(
+    [repoResult('guard', { merged: 2, delivered: [rec(1)], payload_missing: [rec(2)] })],
+    { since: '2026-07-01', selfAudit: true, backfillCaller: 'leaderboard-backfill.yml' },
+    10,
+  );
+  const md = renderMarkdown(report, { owner: 'praetorian-inc', backfillCaller: 'leaderboard-backfill.yml' });
+  assert.match(md, /ran successfully but sent no payload/);
+  assert.match(md, /ENGINEER_EMAIL_MAP/);
+  assert.match(md, /Unmapped-author PRs \(1\): #2/);
+  // The load-bearing absence: a `-f pr_numbers=''` paste would dispatch a
+  // backfill over nothing, and telling someone to replay these is wrong advice.
+  assert.doesNotMatch(md, /pr_numbers=/);
+  assert.doesNotMatch(md, /Affected PRs \(0\)/);
+});
+
+test('renderMarkdown: both a replayable gap and an unmapped-author gap are reported separately', () => {
+  const report = buildReport(
+    [repoResult('guard', { merged: 3, never_fired: [rec(7)], payload_missing: [rec(8)] })],
+    { since: '2026-07-01', selfAudit: true, backfillCaller: 'leaderboard-backfill.yml' },
+    10,
+  );
+  const md = renderMarkdown(report, { owner: 'praetorian-inc', backfillCaller: 'leaderboard-backfill.yml' });
+  assert.match(md, /Unmapped-author PRs \(1\): #8/);
+  assert.match(md, /Affected PRs \(1\): #7/);
+  // #8 must NOT reach the replay command even when a command is emitted for #7.
+  assert.match(md, /-f pr_numbers='7'/);
+  assert.doesNotMatch(md, /pr_numbers='7,8'/);
+});
+
+test('renderMarkdown: the header does not claim a delivery it only inferred from a conclusion', () => {
+  const report = buildReport(
+    [repoResult('guard', { merged: 1, delivered: [rec(1)] })],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  const md = renderMarkdown(report, { owner: 'praetorian-inc' });
+  assert.match(md, /verified to have actually\s+enqueued a payload/);
 });

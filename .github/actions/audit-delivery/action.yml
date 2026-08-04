@@ -149,8 +149,20 @@ runs:
             if ! gap_count=$(node -e '
               const fs = require("node:fs");
               const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-              const n = r.repos_with_gaps.reduce((a, g) => a + g.replay.length, 0);
+              // replay.length ALONE under-counts: payload_missing PRs are
+              // affected (their author is missing score) but are deliberately
+              // kept off the replay list, because replaying an unmapped author
+              // re-delivers nothing. A repo whose only defect is that class
+              // would report has_gaps=true with gap_count=0.
+              const n = r.repos_with_gaps.reduce(
+                (a, g) => a + g.replay.length + (g.payload_missing || 0),
+                0,
+              );
               if (!Number.isInteger(n)) throw new Error("non-integer gap count");
+              // Reached only on exit 1, which means some gap class was non-empty,
+              // so a zero here is an accounting bug in this reducer — not a clean
+              // repo. Fail rather than emit the reassuring number.
+              if (n === 0) throw new Error("gaps reported but counted 0 affected PRs");
               process.stdout.write(String(n));
             ' "$json"); then
               echo "::error::could not read a gap count out of $json"
