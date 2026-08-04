@@ -142,6 +142,35 @@ export function parseArgs(argv, now = Date.now()) {
     }
   }
 
+  // The SAME class two flags further on. The `--repo` fix and then the `--repos`
+  // fix above each closed the cited instance and left the class open; these are
+  // the two remaining members. Every date check below is gated on
+  // `if (out.since)` / `if (out.until)`, and both are false for '' — so a flag
+  // passed empty skips the format, calendar-roll-over, future and ordering
+  // checks in their entirety and reads as ABSENT rather than as invalid.
+  // Measured with `now` pinned to 2026-08-04T12:00:00Z:
+  //   --since 2026-01-01 --until ''  ->  until=(none)      upper bound GONE
+  //   --since ''                     ->  since=2026-07-05  the --days default
+  //
+  // `--until` is the dangerous direction, and it is dangerous on the exact path
+  // this tool tells operators to walk: mergeRenames prints a two-step
+  // remediation whose own text warns "Do NOT re-run (1) without --until",
+  // because an unbounded first step re-reads every post-rename PR as
+  // NEVER_FIRED and manufactures a replay list against the prod queue. A shell
+  // variable that expands to nothing turns following that instruction into the
+  // failure the instruction exists to prevent — silently, since '' currently
+  // means "no upper bound" rather than "bad flag".
+  if (out.since === '') {
+    throw new Error(
+      '--since was passed with an empty value — refusing to silently fall back to the --days default',
+    );
+  }
+  if (out.until === '') {
+    throw new Error(
+      '--until was passed with an empty value — refusing to silently drop the upper bound',
+    );
+  }
+
   if (out.since) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(out.since)) {
       throw new Error(`--since must be YYYY-MM-DD, got ${out.since}`);
@@ -1784,6 +1813,30 @@ export function unverifiableReasons(recs) {
   return [...new Set(recs.map((r) => r.unverifiable_reason).filter(Boolean))].sort();
 }
 
+// The audit's evidence ceiling, stated in the REPORT and not only in this file's
+// header. The deepest probe is step-level: probeSqsStep reads the `Send metrics
+// to SQS` step's conclusion, so `delivered` means "enqueued to the metrics
+// queue", never "scored". Nothing here reads DynamoDB.
+//
+// That makes the two directions asymmetric, and only one of them was stated. The
+// GAPS direction is sound — a payload never enqueued cannot produce a
+// `CodeCommit` row. The CLEAN direction was not: a payload that enqueued and was
+// then dropped consumer-side classifies `delivered`, and the report told the
+// operator "Every merged PR in the window has a successful metrics delivery",
+// i.e. everyone got their score. ENG-5775 is a MEASURED instance of exactly that
+// — Leaderboard V2 shipped dark while producer runs stayed green — so this is
+// the live failure mode, not a theoretical one. A false clean is also the one
+// direction this whole detector exists to eliminate, which is why it may not be
+// left implicit here.
+//
+// ENG-5689 requires the fix to state what its chosen signal does not cover.
+// undecidedCaveats covers the classes the audit cannot DECIDE; this covers the
+// boundary past which it cannot SEE.
+const COVERAGE_CEILING =
+  '_Coverage: this audit verifies delivery **to the metrics queue** only. A payload that ' +
+  'enqueued successfully and was then lost between the queue and the `CodeCommit` table is ' +
+  'invisible here; that population needs the consumer-side reconciliation (ENG-5688)._';
+
 export function renderMarkdown(report, cfg) {
   const L = [];
   L.push('## Leaderboard delivery audit');
@@ -1821,8 +1874,13 @@ export function renderMarkdown(report, cfg) {
           'delivered successfully.',
       );
     } else {
-      L.push('No gaps. Every merged PR in the window has a successful metrics delivery.');
+      L.push('No gaps. Every merged PR in the window enqueued a successful metrics delivery.');
     }
+    // On the clean branch too, and via an early return that skips the footer —
+    // so the ceiling has to be pushed here as well as there. This is the branch
+    // that needs it MOST: it is the one that says "nothing to do".
+    L.push('');
+    L.push(COVERAGE_CEILING);
     return L.join('\n');
   }
   L.push(
@@ -1993,6 +2051,8 @@ export function renderMarkdown(report, cfg) {
       "If this is a false positive, the classifier's inputs are in the run's " +
       '`audit.json` artifact.',
   );
+  L.push('');
+  L.push(COVERAGE_CEILING);
   return L.join('\n');
 }
 

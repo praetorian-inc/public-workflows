@@ -1,12 +1,20 @@
 name: Test audit-delivery
 # Unit tests for the audit-delivery composite action's detector script.
 # Node built-in test runner only — no npm install, no network beyond the
-# checkout. Guards the pure logic (flag parsing, the five-way delivery
+# checkout. Guards the pure logic (flag parsing, the eight-way delivery
 # classification, head_sha dedupe, replay ordering, report rendering) against
 # regression. The networking layer is not covered here: it was validated
 # against the live API, and mocking fetch would only test the mock.
 
 on:
+  # The escape hatch. Both real triggers below are `paths:`-filtered, and this
+  # workflow is the detector's ONLY test coverage — so with no manual trigger
+  # there is no way at all to run it when a filter legitimately does not match
+  # (a change reaching the detector from outside these two paths, a re-run
+  # wanted after a runner-side flake, or verifying the job on a branch before
+  # touching the filtered paths). No inputs: there is nothing to parameterise,
+  # the job enumerates and runs every *.test.mjs it finds.
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/actions/audit-delivery/**"

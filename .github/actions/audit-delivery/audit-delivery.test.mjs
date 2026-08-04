@@ -1301,7 +1301,7 @@ test('renderMarkdown: a clean report says No gaps and offers no replay command',
 
   const md = renderMarkdown(clean, CFG);
 
-  assert.match(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.match(md, /No gaps\. Every merged PR in the window enqueued a successful metrics delivery\./);
   assert.doesNotMatch(md, /gh workflow run/);
   assert.doesNotMatch(md, /pr_numbers/);
   assert.doesNotMatch(md, /delivery gap was detected/);
@@ -1334,7 +1334,7 @@ test('renderMarkdown: a clean report with a run still in flight does NOT claim e
   assert.match(md, /still running/);
   assert.match(md, /merged too recently for\s+its run to exist yet/);
   // The unqualified claim must be absent — this is the assertion the bug fails.
-  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window enqueued a successful metrics delivery\./);
   // Still no replay is offered: an in-flight delivery is not replayable.
   assert.doesNotMatch(md, /gh workflow run/);
 });
@@ -1356,7 +1356,7 @@ test('renderMarkdown: a clean report with pre-onboarding PRs does NOT claim ever
   const md = renderMarkdown(cleanButPreOnboarding, CFG);
 
   // The unqualified claim must be absent — this is the assertion the bug fails.
-  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window enqueued a successful metrics delivery\./);
   assert.match(md, /No gaps among the PRs this audit can decide/);
   assert.match(md, /Of \*\*31\*\* merged PR\(s\), \*\*29\*\* merged before this repo had a caller/);
   // Both halves of the pre-onboarding truth, because either alone misleads:
@@ -1385,7 +1385,7 @@ test('renderMarkdown: in_flight and pre_onboarding caveats COMBINE rather than o
   assert.match(md, /\*\*3\*\* are not yet decided/);
   assert.match(md, /\*\*7\*\* merged before this repo had a caller/);
   assert.match(md, /Of \*\*40\*\* merged PR\(s\)/);
-  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window enqueued a successful metrics delivery\./);
 });
 
 test('renderMarkdown: with NOTHING undecided the unqualified clean sentence is still used', () => {
@@ -1402,7 +1402,7 @@ test('renderMarkdown: with NOTHING undecided the unqualified clean sentence is s
 
   const md = renderMarkdown(fullyClean, CFG);
 
-  assert.match(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.match(md, /No gaps\. Every merged PR in the window enqueued a successful metrics delivery\./);
   assert.doesNotMatch(md, /No gaps among the PRs this audit can decide/);
   assert.doesNotMatch(md, /merged before this repo had a caller/);
 });
@@ -4142,4 +4142,331 @@ test('buildReport: fleet-wide unverifiable reasons UNION across repos', () => {
   );
   assert.equal('unverifiable_reasons' in report.totals, false);
   for (const v of Object.values(report.totals)) assert.equal(typeof v, 'number');
+});
+
+// --- Round 10: the empty-value class, remaining two members -----------------
+//
+// The `--repo` fix (round 4) and the `--repos` fix each closed the cited
+// instance and left the class open. `--since` and `--until` were the last two
+// members: their entire validation body is gated on `if (out.since)` /
+// `if (out.until)`, both false for '', so an empty flag read as ABSENT rather
+// than as invalid. Four tests: one per flag, each asserting the MESSAGE and not
+// merely that something threw, plus a control per flag proving a real value
+// still parses — a guard that rejects '' by rejecting everything would pass a
+// bare assert.throws.
+
+test('parseArgs: --since= with an empty value is rejected, not silently defaulted', () => {
+  assert.throws(
+    () => parseArgs(['--repo=praetorian-inc/guard', '--since=']),
+    // The message is asserted because the failure mode being prevented is a
+    // WRONG CAUSE, not merely a missing throw: if some later format check ever
+    // catches '' first, it would report "must be YYYY-MM-DD" for a flag the
+    // caller never meant to set, and the operator would go looking at their
+    // date format instead of at their unset shell variable.
+    /--since was passed with an empty value/,
+  );
+});
+
+test('parseArgs: --until= with an empty value is rejected, not silently unbounded', () => {
+  assert.throws(
+    () => parseArgs(['--repo=praetorian-inc/guard', '--since=2026-01-01', '--until=']),
+    /--until was passed with an empty value/,
+  );
+});
+
+test('parseArgs: CONTROL — real --since/--until values still parse after the empty guards', () => {
+  // Without this, both tests above stay green against a guard that rejects
+  // every value of either flag, which would break the rename remediation the
+  // tool itself prints.
+  const out = parseArgs([
+    '--repo=praetorian-inc/guard',
+    '--since=2026-01-01',
+    '--until=2026-02-01',
+  ]);
+  assert.equal(out.since, '2026-01-01');
+  assert.equal(out.until, '2026-02-01');
+});
+
+test('parseArgs: CONTROL — an OMITTED --until is still absent, not an error', () => {
+  // '' and unset must stay distinguishable: `null` means "up to now" and is the
+  // default the action relies on when its `until` input is not supplied.
+  const out = parseArgs(['--repo=praetorian-inc/guard', '--since=2026-01-01']);
+  assert.equal(out.since, '2026-01-01');
+  assert.equal(out.until, null);
+});
+
+// --- Round 10: the report states its evidence ceiling -----------------------
+//
+// The audit's deepest probe is step-level (probeSqsStep reads the SQS step's
+// conclusion), so `delivered` means "enqueued", never "scored". The GAPS
+// direction was sound; the CLEAN direction claimed more than the evidence
+// supports. ENG-5775 is a measured instance of a consumer shipping dark while
+// producers stayed green, so the unstated boundary was the live failure mode.
+// ENG-5689 requires the fix to state what its signal does not cover.
+
+test('renderMarkdown: the CLEAN report states the queue-only coverage ceiling', () => {
+  const clean = {
+    since: '2026-07-05',
+    totals: { merged_prs: 12, delivered: 12, in_flight: 0, pre_onboarding: 0 },
+    repos_with_gaps: [],
+    repos: [{ repo: 'guard', has_caller: true }],
+  };
+
+  const md = renderMarkdown(clean, CFG);
+
+  // This branch returns EARLY, before the footer, so the ceiling has to be
+  // emitted on the branch itself — a footer-only fix would leave the one report
+  // that says "nothing to do" as the only one that overclaims.
+  assert.match(md, /verifies delivery \*\*to the metrics queue\*\* only/);
+  assert.match(md, /invisible here/);
+  assert.match(md, /ENG-5688/);
+});
+
+test('renderMarkdown: the GAPS report states the same ceiling', () => {
+  const md = renderMarkdown(gapReport(), CFG);
+  assert.match(md, /verifies delivery \*\*to the metrics queue\*\* only/);
+  assert.match(md, /ENG-5688/);
+});
+
+test('renderMarkdown: the CAVEATED clean report states the ceiling too', () => {
+  // The third of the three exits out of renderMarkdown. undecidedCaveats covers
+  // classes the audit cannot DECIDE; the ceiling covers the boundary past which
+  // it cannot SEE. They are different claims and this branch needs both.
+  const caveated = {
+    since: '2026-07-05',
+    totals: { merged_prs: 40, delivered: 30, in_flight: 3, pre_onboarding: 7 },
+    repos_with_gaps: [],
+    repos: [{ repo: 'guard', has_caller: true }],
+  };
+
+  const md = renderMarkdown(caveated, CFG);
+
+  assert.match(md, /No gaps among the PRs this audit can decide/);
+  assert.match(md, /verifies delivery \*\*to the metrics queue\*\* only/);
+});
+
+test('renderMarkdown: CONTROL — the clean sentence no longer claims delivery was SCORED', () => {
+  // The wording fix is the other half of the ceiling: the old sentence, "has a
+  // successful metrics delivery", reads as "this PR was scored". Asserting the
+  // absence of the old string would go vacuous the moment the wording changes
+  // again, so assert the positive property instead — the sentence describes an
+  // ENQUEUE.
+  const clean = {
+    since: '2026-07-05',
+    totals: { merged_prs: 12, delivered: 12, in_flight: 0, pre_onboarding: 0 },
+    repos_with_gaps: [],
+    repos: [{ repo: 'guard', has_caller: true }],
+  };
+
+  const md = renderMarkdown(clean, CFG);
+
+  assert.match(md, /enqueued a successful metrics delivery/);
+  assert.doesNotMatch(md, /CodeCommit` row for every/);
+});
+
+// --- Round 11: the `status` output contract, EXECUTED rather than asserted ---
+//
+// `status` was added this round because `has-gaps` cannot express "could not
+// run": nothing sets it on the unknown path, it resolves to '', and
+// `has-gaps != 'true'` is TRUE for '' — so a caller branching that way reads a
+// failed audit as CLEAN. That is the same false-clean class this whole action
+// exists to detect, which is why the contract needs tests that can FAIL rather
+// than a description promising it.
+//
+// A grep for `status=` in action.yml would pin nothing: it stays green if the
+// write lands after the exit, on the wrong arm, or with the wrong value. These
+// tests execute the SHIPPED bash from action.yml against a stubbed detector and
+// read the real $GITHUB_OUTPUT, so all three `case "$rc"` arms and all three
+// pre-detector guards are covered by their observable effect.
+import { mkdirSync, chmodSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+
+const RUN_BODY = (() => {
+  const lines = readFileSync(join(HERE, 'action.yml'), 'utf8').split('\n');
+  const i = lines.findIndex((l) => /^ {6}run: \|\s*$/.test(l));
+  if (i === -1) {
+    throw new Error(
+      'could not locate the composite `run: |` body in action.yml — if the step ' +
+        'was reformatted, update this extractor; do NOT delete these tests, or the ' +
+        'status contract goes unexercised',
+    );
+  }
+  const body = [];
+  for (const l of lines.slice(i + 1)) {
+    if (l.trim() === '') {
+      body.push('');
+      continue;
+    }
+    if (!l.startsWith(' '.repeat(8))) break;
+    body.push(l.slice(8));
+  }
+  const src = body.join('\n');
+  // Same INVALID-MUTANT discipline the mutation harness uses: an extractor that
+  // silently grabbed the wrong region would make every test below vacuously
+  // green. Assert the region is the one intended, loudly.
+  //
+  // STRUCTURAL markers only. This list originally also named `status=clean` /
+  // `status=gaps` / `status=unknown`, which was a mistake worth recording: the
+  // sentinel then asserted the very thing the tests below assert, so deleting a
+  // status write threw HERE, at module load, taking all nine tests down with a
+  // confusing "extractor drifted" instead of producing one clean red. A sentinel
+  // must establish only that the right REGION was found; what the region must
+  // contain is the tests' job. Verified by mutants L and M, which were invalid
+  // under the old list and kill cleanly under this one.
+  for (const needle of ['set -euo pipefail', 'case "$rc"', '$GITHUB_OUTPUT', 'audit-delivery.mjs']) {
+    if (!src.includes(needle)) {
+      throw new Error(`extracted run body is missing \`${needle}\` — the extractor drifted`);
+    }
+  }
+  return src;
+})();
+
+// Stubs the detector so each `case "$rc"` arm is reachable without a network.
+// The real script's contract is: write --json / --markdown, exit 0 clean, 1 gaps,
+// 2 could-not-run.
+// The stub is written to `audit-delivery.mjs`, so it is ESM and `require` is not
+// defined there — a stub using it dies with exit 1, which the run body reads as
+// arm 1 and reports as `status=gaps`. That fails LOUDLY as a wrong status value
+// rather than quietly, but it is worth naming: a broken stub impersonates the
+// exact arm these tests are trying to distinguish.
+const detectorStub = (exitCode, report) => `
+import { writeFileSync } from 'node:fs';
+const args = process.argv.slice(1);
+const val = (f) => { const a = args.find((x) => x.startsWith(f + '=')); return a ? a.slice(f.length + 1) : null; };
+const report = ${JSON.stringify(report)};
+if (report !== null) {
+  const j = val('--json'); if (j) writeFileSync(j, JSON.stringify(report));
+  const m = val('--markdown'); if (m) writeFileSync(m, '# report\\n');
+}
+process.exit(${exitCode});
+`;
+
+let actRun = 0;
+const runAction = ({ repo = 'guard', token = 'tok', exitCode = 0, report = { repos_with_gaps: [] }, preexistingReport = false, lockTemp = false } = {}) => {
+  const dir = mkdtempSync(join(tmpdir(), `audit-act-${actRun++}-`));
+  const actionPath = join(dir, 'action');
+  const runnerTemp = join(dir, 'rt');
+  mkdirSync(actionPath);
+  mkdirSync(runnerTemp);
+  if (preexistingReport) writeFileSync(join(runnerTemp, 'audit-delivery.json'), '{"stale":true}');
+  writeFileSync(join(actionPath, 'audit-delivery.mjs'), detectorStub(exitCode, report));
+  if (lockTemp) chmodSync(runnerTemp, 0o500);
+  const ghOutput = join(dir, 'gh-output');
+  writeFileSync(ghOutput, '');
+  const res = spawnSync('bash', ['-c', RUN_BODY], {
+    encoding: 'utf8',
+    env: {
+      PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}`,
+      GITHUB_TOKEN: token,
+      REPO: repo,
+      DAYS: '30',
+      SINCE: '',
+      UNTIL: '',
+      CALLER_PATH: '.github/workflows/leaderboard.yml',
+      BACKFILL_CALLER: 'leaderboard-backfill-caller.yml',
+      ACTION_PATH: actionPath,
+      RUNNER_TEMP: runnerTemp,
+      GITHUB_OUTPUT: ghOutput,
+    },
+  });
+  if (lockTemp) chmodSync(runnerTemp, 0o700); // so mkdtemp cleanup is possible
+  const raw = readFileSync(ghOutput, 'utf8');
+  const outputs = Object.fromEntries(
+    raw
+      .split('\n')
+      .filter((l) => l.includes('='))
+      .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+  );
+  // stdout as well as stderr: `::error::` workflow commands go to STDOUT, so a
+  // test asserting a guard's message against stderr fails while the guard works.
+  return { code: res.status, stdout: res.stdout, stderr: res.stderr, outputs, raw };
+};
+
+test('action contract: a clean run reports status=clean with has_gaps false', () => {
+  const r = runAction({ exitCode: 0 });
+  assert.equal(r.code, 0);
+  assert.equal(r.outputs.status, 'clean');
+  assert.equal(r.outputs.has_gaps, 'false');
+  assert.equal(r.outputs.gap_count, '0');
+});
+
+test('action contract: a gaps run reports status=gaps and counts the affected PRs', () => {
+  // 2 replay + 1 payload_missing, plus 1 replay = 4. Same hand-derived literal
+  // shape as the gap-counter tests: counting either field alone gives a
+  // different answer, so a half-right counter cannot pass.
+  const r = runAction({
+    exitCode: 1,
+    report: {
+      repos_with_gaps: [
+        { repo: 'guard', replay: [1, 2], payload_missing: 1 },
+        { repo: 'palatine', replay: [3], payload_missing: 0 },
+      ],
+    },
+  });
+  assert.equal(r.outputs.status, 'gaps');
+  assert.equal(r.outputs.has_gaps, 'true');
+  assert.equal(r.outputs.gap_count, '4');
+});
+
+test('action contract: an exit-2 could-not-run reports status=unknown, not a missing output', () => {
+  // The reason `status` exists. The step fails (exit 1) so a caller must set
+  // continue-on-error to read it, but `unknown` is WRITTEN — the caller can tell
+  // "audit says clean" from "audit could not tell", which `has-gaps` alone cannot.
+  const r = runAction({ exitCode: 2, report: null });
+  assert.equal(r.code, 1);
+  assert.equal(r.outputs.status, 'unknown');
+  assert.equal(r.outputs.has_gaps, undefined);
+});
+
+test('action contract: an exit-2 that still left a JSON report does NOT read as a completed run', () => {
+  // Reproduced this round: buildReport returns before EITHER write, so an
+  // exit-2 raised inside the markdown write leaves a complete, valid JSON on
+  // disk and publishes its path. A caller inferring "a report exists, so the
+  // audit ran" gets a false clean. status must still say unknown.
+  const r = runAction({ exitCode: 2, report: { repos_with_gaps: [] } });
+  assert.equal(r.outputs.status, 'unknown');
+  assert.match(r.outputs.report_json ?? '', /audit-delivery\.json$/);
+  assert.equal(r.outputs.has_gaps, undefined);
+});
+
+test('action contract: the empty-repo guard writes status=unknown before exiting', () => {
+  const r = runAction({ repo: '' });
+  assert.equal(r.code, 1);
+  assert.equal(r.outputs.status, 'unknown');
+});
+
+test('action contract: the empty-token guard writes status=unknown before exiting', () => {
+  const r = runAction({ token: '' });
+  assert.equal(r.code, 1);
+  assert.equal(r.outputs.status, 'unknown');
+});
+
+test('action contract: an undeletable prior report writes status=unknown before exiting', (t) => {
+  // The third status-less path, found by grepping every exit and then noticing
+  // this one is not an `exit` statement at all — a bare `set -e` abort on
+  // `rm -f`, which ignores a MISSING file but still fails on an undeletable one.
+  // Skipped when the check cannot hold: root ignores mode bits, so the rm would
+  // succeed and the test would assert nothing.
+  if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    t.skip('running as root — mode 500 does not prevent deletion, so this case is unreachable');
+    return;
+  }
+  const r = runAction({ preexistingReport: true, lockTemp: true });
+  assert.equal(r.code, 1);
+  assert.equal(r.outputs.status, 'unknown');
+  // Asserted on the MESSAGE, not just on exit-1-plus-unknown: the repo and token
+  // guards produce that identical pair, so a bare status check here would stay
+  // green if the rm guard vanished and some earlier guard fired instead.
+  assert.match(r.stdout, /refusing to run/);
+});
+
+test('action contract: CONTROL — every status value the action can emit is one of three', () => {
+  // Guards the vocabulary itself. A fourth value, or a typo'd `clean ` with a
+  // trailing space, breaks every caller's `if` without breaking any test above.
+  const seen = [
+    runAction({ exitCode: 0 }).outputs.status,
+    runAction({ exitCode: 1, report: { repos_with_gaps: [{ repo: 'g', replay: [1], payload_missing: 0 }] } }).outputs.status,
+    runAction({ exitCode: 2, report: null }).outputs.status,
+  ];
+  assert.deepEqual(seen, ['clean', 'gaps', 'unknown']);
 });

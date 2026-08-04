@@ -16,6 +16,9 @@ description: >-
   (missing token, bad flag, rate limit, truncated run list), because a detector
   that reports "0 gaps" after failing to read anything is the exact failure
   class it exists to catch. On that failure the outputs are not meaningful.
+  Call this action at most ONCE per job: both report paths are fixed under
+  $RUNNER_TEMP, so a second invocation's pre-run `rm -f` destroys the first's
+  report and both steps' `report-json` then name the one surviving file.
 
 inputs:
   github-token:
@@ -64,17 +67,58 @@ inputs:
     default: leaderboard-backfill-caller.yml
 
 outputs:
+  status:
+    description: >-
+      Tri-state audit result: `clean` | `gaps` | `unknown`. ALWAYS written, on
+      every exit path — including the three pre-detector guards, which exit
+      before the `case "$rc"` block is ever reached and so must, and do, write it
+      themselves. Branch on THIS, not on `has-gaps`. On an unknown path
+      nothing sets `has_gaps`, so it resolves to the empty string, and
+      `has-gaps != 'true'` is TRUE for '' — a caller branching that way reads a
+      could-not-run as CLEAN, the exact false-clean class this action exists to
+      detect. Reading it requires `continue-on-error: true` on the step, because
+      the action deliberately fails the step when the result is unknown; a
+      fan-out over many repos wants per-repo results rather than an abort, so
+      that is the shape it takes.
+    value: ${{ steps.audit.outputs.status }}
   has-gaps:
-    description: '"true" when at least one merged PR has no successful delivery, else "false"'
+    description: >-
+      THREE-valued, not two: `"true"` when at least one merged PR has no
+      successful delivery, `"false"` when none does, and THE EMPTY STRING on
+      every path that never reached the detector's verdict. Those paths are
+      exactly the ones that report `status=unknown` — no path writes one without
+      the other — so it is unwritten if and only if `status` is `unknown`. A
+      caller must therefore not treat this as a boolean and must not read a
+      negative as clean: `has-gaps != 'true'` is TRUE for '', so a could-not-run
+      is indistinguishable from a clean audit through this output alone. Gate on
+      `status` first; consult `has-gaps` only once `status` is `gaps` or `clean`.
     value: ${{ steps.audit.outputs.has_gaps }}
   gap-count:
     description: Number of affected PRs across all audited repos (0 when has-gaps is false)
     value: ${{ steps.audit.outputs.gap_count }}
   report-markdown:
-    description: Path to the rendered markdown report (unset if the audit did not produce one)
+    description: >-
+      Path to the rendered markdown report. Set if and only if that file exists
+      on disk when the step ends. A published path therefore means A FILE IS
+      PRESENT — it does NOT mean the audit completed, and it is not a success
+      signal: both report writes precede the exit status, so a run that ends
+      UNKNOWN can still publish a path. Absence is equally uninformative about
+      the outcome — an exit-2 raised inside this very write leaves this output
+      unset while `report-json` is published complete. A caller must not infer
+      the audit's result from the presence or absence of a report path; gate on
+      `status`.
     value: ${{ steps.audit.outputs.report_markdown }}
   report-json:
-    description: Path to the JSON report (unset if the audit did not produce one)
+    description: >-
+      Path to the JSON report. Set if and only if that file exists on disk when
+      the step ends. A published path means A FILE IS PRESENT — it does NOT mean
+      the audit completed. An exit-2 raised inside the markdown write publishes
+      this report COMPLETE and valid, because buildReport returns before either
+      write (reproduced with an unwritable `--markdown` path: exit 2, and a
+      774-byte, 9-key, fully valid JSON report on disk). Complete is not the same
+      as trustworthy: what marks a run's outputs unreliable is `status=unknown`,
+      never a missing report path. A caller must not read this output's presence
+      as "the audit ran"; gate on `status`.
     value: ${{ steps.audit.outputs.report_json }}
 
 runs:
@@ -111,7 +155,34 @@ runs:
         # parseArgs now rejects '' too — belt and braces, since the script is
         # also runnable by hand.
         if [ -z "$REPO" ]; then
+          # status FIRST, then the diagnostic, then the exit — and the same at
+          # the token guard below. Both guards run BEFORE the detector, so
+          # neither the `case "$rc"` block nor its status=unknown arm is ever
+          # reached: the step used to fail here with `status` never written at
+          # all. Reading `status` requires `continue-on-error: true` (an unknown
+          # result deliberately fails the step), and such a caller then reads
+          # `has-gaps != 'true'` as TRUE for the empty string and concludes
+          # CLEAN — the exact false-clean class this action exists to detect,
+          # reachable from nothing worse than a typo in the caller's `repo`.
+          # Whatever the reason the audit could not run, it is unknown, not
+          # clean; the `status` output documents itself as written on EVERY exit
+          # path, and these two are the paths that made that false.
+          echo "status=unknown" >> "$GITHUB_OUTPUT"
           echo "::error::repo input is empty — refusing to run. An empty value would audit the whole org instead of one repo."
+          exit 1
+        fi
+
+        # Same class, different consequence. The script reads
+        # `process.env.GITHUB_TOKEN || process.env.GH_TOKEN`, and '' is falsy, so
+        # an empty token does not fail — it FALLS THROUGH to whatever GH_TOKEN is
+        # ambient. Measured: empty GITHUB_TOKEN with GH_TOKEN set completed
+        # normally (api_calls=8, exit 0), auditing under a credential the caller
+        # never passed and probably broader than this action advertises. With
+        # BOTH empty the script does refuse, so the fall-through is the whole hole.
+        if [ -z "$GITHUB_TOKEN" ]; then
+          # See the repo guard above for why status is written before the exit.
+          echo "status=unknown" >> "$GITHUB_OUTPUT"
+          echo "::error::github-token input is empty — refusing to run. An empty value falls through to an ambient GH_TOKEN, auditing under a credential the caller never passed."
           exit 1
         fi
 
@@ -126,7 +197,23 @@ runs:
         # documented contract is that outputs are meaningless after a failure.
         # RUNNER_TEMP also survives across steps, and is not guaranteed clean on
         # self-hosted runners.
-        rm -f "$json" "$md"
+        #
+        # Failure handled explicitly rather than left to `set -e`. `rm -f`
+        # ignores a MISSING file but still fails on an undeletable one, and a
+        # bare `set -e` abort here is the third status-less exit path in this
+        # step: reproduced with a pre-existing report under a mode-500
+        # RUNNER_TEMP (a self-hosted runner whose temp dir a previous job left
+        # root-owned), which exits 1 having written ZERO bytes to
+        # $GITHUB_OUTPUT — so `status` is unset and a caller on
+        # `continue-on-error: true` reads `has-gaps != 'true'` as CLEAN, the same
+        # false-clean the two input guards above were just fixed for. Aborting is
+        # still the right call: proceeding would let the `[ -f ]` checks below
+        # publish the previous invocation's stale report as this run's.
+        rm -f "$json" "$md" || {
+          echo "status=unknown" >> "$GITHUB_OUTPUT"
+          echo "::error::could not clear the previous report at $json / $md — refusing to run, because a stale report would be published as if it described this run."
+          exit 1
+        }
 
         # Built as an array so every value stays one argv element no matter what
         # it contains — a flat string would word-split on spaces.
@@ -160,9 +247,16 @@ runs:
         rc=0
         node "$ACTION_PATH/audit-delivery.mjs" "${args[@]}" || rc=$?
 
-        # Advertise the reports only if they exist. Nothing is written on the
-        # exit-2 paths, and a path output pointing at a missing file would send
-        # a caller off to upload or comment an artifact that is not there.
+        # Advertise the reports only if they exist: a path output pointing at a
+        # missing file would send a caller off to upload or comment an artifact
+        # that is not there. Existence does NOT track the exit status — both
+        # writes precede it, and renderMarkdown is evaluated INSIDE the markdown
+        # write, so a throw there reaches exitCode 2 with the JSON already on
+        # disk (reproduced with an unwritable --markdown path: EXIT=2, JSON
+        # present). That JSON is COMPLETE, not a partial artifact — buildReport
+        # returns before either write — so publishing it is right. What makes a
+        # failed run's outputs untrustworthy is status=unknown, not a missing
+        # report path.
         if [ -f "$json" ]; then
           echo "report_json=$json" >> "$GITHUB_OUTPUT"
         fi
@@ -172,10 +266,17 @@ runs:
 
         case "$rc" in
           0)
+            echo "status=clean" >> "$GITHUB_OUTPUT"
             echo "has_gaps=false" >> "$GITHUB_OUTPUT"
             echo "gap_count=0" >> "$GITHUB_OUTPUT"
             ;;
           1)
+            # First line of the arm, BEFORE both exits below: an exit 1 whose
+            # report cannot be read otherwise presents as step-failed with no
+            # status at all, which a caller reasonably reads as "the detector
+            # broke" — downgrading a CONFIRMED gap set to an infrastructure
+            # complaint, so the replay it earned never gets dispatched.
+            echo "status=gaps" >> "$GITHUB_OUTPUT"
             echo "has_gaps=true" >> "$GITHUB_OUTPUT"
             # Count the affected PRs from the report the script just wrote. A
             # count that cannot be produced is reported as an error rather than
@@ -218,6 +319,7 @@ runs:
             echo "::warning::Leaderboard delivery gaps detected for ${REPO}: ${gap_count} affected PR(s). See the report for the replay command."
             ;;
           *)
+            echo "status=unknown" >> "$GITHUB_OUTPUT"
             echo "::error::audit-delivery could not complete (exit ${rc}) — treat this as an UNKNOWN result, not a clean one. Common causes: token is missing one of contents:read / actions:read / pull-requests:read, API rate limit, truncated run list."
             exit 1
             ;;
