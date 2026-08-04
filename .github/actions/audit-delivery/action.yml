@@ -36,6 +36,19 @@ inputs:
       Explicit window start as YYYY-MM-DD. Overrides `days` when non-empty.
     required: false
     default: ""
+  until:
+    description: >-
+      Explicit window end as YYYY-MM-DD, EXCLUSIVE at midnight UTC. Empty (the
+      default) audits up to now, which is what a scheduled run wants. Exposed
+      because the caller-renamed error tells the operator to audit the two
+      filename periods separately, and without an upper bound the first of those
+      two commands cannot be expressed — every PR merged after the rename would
+      come back never-fired against the old filename and land on the replay
+      list. Exclusive-at-midnight is what makes `--since A --until B` then
+      `--since B` partition the population exactly, with no PR counted twice and
+      none dropped.
+    required: false
+    default: ""
   caller-path:
     description: >-
       Path of the metrics caller workflow in the audited repo. Its basename is
@@ -79,6 +92,7 @@ runs:
         REPO: ${{ inputs.repo }}
         DAYS: ${{ inputs.days }}
         SINCE: ${{ inputs.since }}
+        UNTIL: ${{ inputs.until }}
         CALLER_PATH: ${{ inputs.caller-path }}
         BACKFILL_CALLER: ${{ inputs.backfill-caller }}
         ACTION_PATH: ${{ github.action_path }}
@@ -127,6 +141,14 @@ runs:
           args+=("--since=$SINCE")
         else
           args+=("--days=$DAYS")
+        fi
+        # Appended OUTSIDE the branch above, not inside the --since arm: the
+        # script resolves --days into a concrete `since` before validating
+        # --until against it, so an upper bound composes with either window form.
+        # Passing it only alongside --since would silently drop it for a caller
+        # that used `days`.
+        if [ -n "$UNTIL" ]; then
+          args+=("--until=$UNTIL")
         fi
 
         # The script's three-way exit status is load-bearing: 0 clean, 1 gaps

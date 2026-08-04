@@ -42,6 +42,13 @@ import {
   REPLAY_BATCH,
   FAILED,
   GRACE_MS,
+  RUN_HISTORY_DAYS,
+  successRunIdsByHead,
+  recoverHiddenDeliveries,
+  probeSqsStep,
+  needsPayloadProbe,
+  assertActionsReadable,
+  undecidedCaveats,
   RETRY_STATUS,
   API_CAP,
   SLICE_MAX,
@@ -68,21 +75,24 @@ const run = (id, headSha, conclusion, createdAt) => ({
 
 // A repo result in the shape auditRepo() returns, which is what buildReport
 // consumes.
-const repoResult = (repo, { merged = 0, ...counts } = {}) => ({
-  repo,
-  onboarded: null,
-  has_caller: true,
-  merged_prs: merged,
-  classes: {
-    delivered: counts.delivered ?? [],
-    failed: counts.failed ?? [],
-    skipped_anomaly: counts.skipped_anomaly ?? [],
-    never_fired: counts.never_fired ?? [],
-    pre_onboarding: counts.pre_onboarding ?? [],
-    in_flight: counts.in_flight ?? [],
-    payload_missing: counts.payload_missing ?? [],
-  },
-});
+// The class set, taken from classify() itself rather than restated. A hand-listed
+// fixture is how a newly added class goes untested: it is absent from every
+// fixture, so buildReport sums `undefined` and the report surfaces are never
+// exercised for it at all. Deriving means adding a class to classify() makes it
+// appear here with an empty list, and only the ASSERTIONS then need updating —
+// which is the part that should fail loudly.
+const CLASS_KEYS = Object.keys(classify([], new Map(), null));
+
+const repoResult = (repo, { merged = 0, ...counts } = {}) => {
+  // A misspelled fixture key would otherwise contribute silently nothing while
+  // the test still reads as if it covered that class.
+  for (const k of Object.keys(counts)) {
+    if (!CLASS_KEYS.includes(k)) throw new Error(`repoResult: unknown class "${k}"`);
+  }
+  const classes = {};
+  for (const k of CLASS_KEYS) classes[k] = counts[k] ?? [];
+  return { repo, onboarded: null, has_caller: true, merged_prs: merged, classes };
+};
 
 const rec = (n) => ({ number: n });
 
@@ -370,7 +380,7 @@ test('classify: a successful run for the PR head is delivered', () => {
   const prs = [pr(1, '2026-07-01T00:00:00Z', 'aaaaaaaabbbbbbbb')];
   const byHead = new Map([['aaaaaaaabbbbbbbb', run(555, 'aaaaaaaabbbbbbbb', 'success', '2026-07-01T01:00:00Z')]]);
 
-  const c = classify(prs, byHead, null);
+  const c = classify(prs, byHead, null, NOW);
 
   assert.deepEqual(c.delivered.map((r) => r.number), [1]);
   assert.deepEqual(c.failed, []);
@@ -401,7 +411,7 @@ test('classify: every FAILED conclusion lands in failed', () => {
     conclusions.map((concl, i) => [`sha${i}`, run(i, `sha${i}`, concl, '2026-07-01T01:00:00Z')]),
   );
 
-  const c = classify(prs, byHead, null);
+  const c = classify(prs, byHead, null, NOW);
 
   assert.equal(c.failed.length, conclusions.length);
   assert.deepEqual(
@@ -416,7 +426,7 @@ test('classify: a skipped run on a MERGED pr is a skipped_anomaly, not a benign 
   const prs = [pr(7, '2026-07-01T00:00:00Z', 'deadbeefcafe')];
   const byHead = new Map([['deadbeefcafe', run(9, 'deadbeefcafe', 'skipped', '2026-07-01T01:00:00Z')]]);
 
-  const c = classify(prs, byHead, null);
+  const c = classify(prs, byHead, null, NOW);
 
   assert.deepEqual(c.skipped_anomaly.map((r) => r.number), [7]);
   assert.deepEqual(c.delivered, []);
@@ -435,7 +445,7 @@ test('classify: an UNCONCLUDED run is in_flight — never never_fired, never del
   const prs = [pr(11, '2026-07-01T00:00:00Z', 'sha-null')];
   const byHead = new Map([['sha-null', run(1, 'sha-null', null, '2026-07-01T01:00:00Z')]]);
 
-  const c = classify(prs, byHead, null);
+  const c = classify(prs, byHead, null, NOW);
 
   assert.deepEqual(c.in_flight.map((r) => r.number), [11]);
   assert.deepEqual(c.never_fired, []);
@@ -465,7 +475,7 @@ test('classify: an unrecognized TERMINAL conclusion is failed, not in_flight', (
     ['sha-future', run(3, 'sha-future', 'some_conclusion_invented_later', '2026-07-01T01:00:00Z')],
   ]);
 
-  const c = classify(prs, byHead, null);
+  const c = classify(prs, byHead, null, NOW);
 
   assert.deepEqual(c.failed.map((r) => r.number), [21, 22, 23]);
   assert.deepEqual(c.in_flight, []);
@@ -497,7 +507,7 @@ test('classify: every pr lands in exactly one class, and none are dropped', () =
     ['weird', run(5, 'weird', 'neutral', '2026-07-20T01:00:00Z')],
   ]);
 
-  const c = classify(prs, byHead, Date.parse('2026-07-10T00:00:00Z'));
+  const c = classify(prs, byHead, Date.parse('2026-07-10T00:00:00Z'), NOW);
 
   const placed = Object.values(c).flat().map((r) => r.number).sort((a, b) => a - b);
   assert.deepEqual(placed, [1, 2, 3, 4, 5, 6, 7]);
@@ -508,7 +518,7 @@ test('classify: every pr lands in exactly one class, and none are dropped', () =
 test('classify: a merged pr with no run and no onboarding timestamp is never_fired', () => {
   const prs = [pr(42, '2026-07-01T00:00:00Z', 'orphansha')];
 
-  const c = classify(prs, new Map(), null);
+  const c = classify(prs, new Map(), null, NOW);
 
   assert.deepEqual(c.never_fired.map((r) => r.number), [42]);
   assert.deepEqual(c.pre_onboarding, []);
@@ -597,12 +607,12 @@ test('classify: the onboarding boundary splits pre_onboarding from never_fired',
   const prs = [pr(77, merged, 'boundarysha')];
 
   // onboarded AFTER the merge → the caller did not exist yet → pre_onboarding.
-  const before = classify(prs, new Map(), Date.parse('2026-07-11T00:00:00Z'));
+  const before = classify(prs, new Map(), Date.parse('2026-07-11T00:00:00Z'), NOW);
   assert.deepEqual(before.pre_onboarding.map((r) => r.number), [77]);
   assert.deepEqual(before.never_fired, []);
 
   // onboarded BEFORE the merge → a delivery path existed and produced nothing.
-  const after = classify(prs, new Map(), Date.parse('2026-07-09T00:00:00Z'));
+  const after = classify(prs, new Map(), Date.parse('2026-07-09T00:00:00Z'), NOW);
   assert.deepEqual(after.never_fired.map((r) => r.number), [77]);
   assert.deepEqual(after.pre_onboarding, []);
 
@@ -619,7 +629,7 @@ test('classify: onboardedTs does not reclassify a pr that HAS a run', () => {
   const prs = [pr(5, '2026-07-01T00:00:00Z', 'hasrun')];
   const byHead = new Map([['hasrun', run(1, 'hasrun', 'failure', '2026-07-01T01:00:00Z')]]);
 
-  const c = classify(prs, byHead, Date.parse('2026-12-31T00:00:00Z'));
+  const c = classify(prs, byHead, Date.parse('2026-12-31T00:00:00Z'), NOW);
 
   assert.deepEqual(c.failed.map((r) => r.number), [5]);
   assert.deepEqual(c.pre_onboarding, []);
@@ -639,7 +649,7 @@ test('classify: all five classes populate from one mixed batch', () => {
     ['skip', run(3, 'skip', 'skipped', '2026-07-20T01:00:00Z')],
   ]);
 
-  const c = classify(prs, byHead, Date.parse('2026-07-10T00:00:00Z'));
+  const c = classify(prs, byHead, Date.parse('2026-07-10T00:00:00Z'), NOW);
 
   assert.deepEqual(c.delivered.map((r) => r.number), [1]);
   assert.deepEqual(c.failed.map((r) => r.number), [2]);
@@ -1292,7 +1302,7 @@ test('buildReport: totals sum every class across repos', () => {
     // Each repo's per-class counts add up to its merged count, so a class the
     // sum forgets shows up as a total that does not reconcile.
     repoResult('guard', {
-      merged: 12,
+      merged: 13,
       delivered: [rec(1), rec(2), rec(3)],
       failed: [rec(4)],
       never_fired: [rec(5), rec(6)],
@@ -1300,9 +1310,10 @@ test('buildReport: totals sum every class across repos', () => {
       pre_onboarding: [rec(8), rec(9), rec(10)],
       in_flight: [rec(11)],
       payload_missing: [rec(12)],
+      unverifiable: [rec(13)],
     }),
     repoResult('palatine', {
-      merged: 8,
+      merged: 9,
       delivered: [rec(20)],
       failed: [rec(21), rec(22)],
       never_fired: [],
@@ -1310,16 +1321,17 @@ test('buildReport: totals sum every class across repos', () => {
       pre_onboarding: [rec(23)],
       in_flight: [rec(24), rec(25)],
       payload_missing: [rec(26), rec(27)],
+      unverifiable: [rec(28)],
     }),
   ];
 
   const report = buildReport(results, { since: '2026-07-05', selfAudit: false }, 137);
 
-  // Hand-summed: 12+8, 3+1, 1+2, 2+0, 1+0, 3+1, 1+2, 1+2. deepEqual rather than
-  // per-key: an added class that nothing sums is exactly the drift to catch —
-  // and it caught payload_missing when that class was added.
+  // Hand-summed: 13+9, 3+1, 1+2, 2+0, 1+0, 3+1, 1+2, 1+2, 1+1. deepEqual rather
+  // than per-key: an added class that nothing sums is exactly the drift to catch
+  // — and it caught payload_missing when that class was added.
   assert.deepEqual(report.totals, {
-    merged_prs: 20,
+    merged_prs: 22,
     delivered: 4,
     failed: 3,
     never_fired: 2,
@@ -1327,7 +1339,13 @@ test('buildReport: totals sum every class across repos', () => {
     pre_onboarding: 4,
     in_flight: 3,
     payload_missing: 3,
+    unverifiable: 2,
   });
+  // The class list this suite derives its fixtures from must match the one
+  // buildReport actually sums. Without this, a class added to classify() but not
+  // to totals would leave every fixture carrying it and every assertion silently
+  // agreeing that it does not exist.
+  assert.deepEqual(Object.keys(report.totals).slice(1).sort(), [...CLASS_KEYS].sort());
   // Cross-check: every merged PR is accounted for by exactly one class.
   const { merged_prs: m, ...classes } = report.totals;
   assert.equal(Object.values(classes).reduce((a, b) => a + b, 0), m);
@@ -1406,13 +1424,14 @@ test('buildReport: a gap entry carries the per-class counts and the numeric repl
   const report = buildReport(
     [
       repoResult('guard', {
-        merged: 6,
+        merged: 7,
         failed: [rec(100)],
         never_fired: [rec(9)],
         skipped_anomaly: [rec(10)],
         pre_onboarding: [rec(1)],
         in_flight: [rec(2)],
         payload_missing: [rec(50)],
+        unverifiable: [rec(77)],
       }),
     ],
     { since: '2026-07-05', selfAudit: true },
@@ -1428,10 +1447,15 @@ test('buildReport: a gap entry carries the per-class counts and the numeric repl
       pre_onboarding: 1,
       in_flight: 1,
       payload_missing: 1,
+      unverifiable: 1,
       payload_missing_prs: [50],
+      unverifiable_prs: [77],
       replay: [9, 10, 100],
     },
   ]);
+  // Reported on the entry, absent from the replay list: #77's run record aged
+  // out, so replaying it would re-deliver a PR that may well have delivered.
+  assert.equal(report.repos_with_gaps[0].replay.includes(77), false);
   // Reported on the entry, absent from the replay list: #50 ran and succeeded,
   // but enqueued nothing, and replaying it re-delivers nothing.
   assert.equal(report.repos_with_gaps[0].replay.includes(50), false);
@@ -2000,8 +2024,8 @@ test('classify: two merged PRs on the SAME head_sha refuse to be joined', () => 
   const byHead = dedupeByHead([
     run(1, '8e27899b22b4091667b39ea3487c51dbb3855e35', 'success', '2026-07-01T00:00:10Z'),
   ]);
-  assert.throws(() => classify(prs, byHead, null), /share head_sha 8e27899b/);
-  assert.throws(() => classify(prs, byHead, null), /#2938, #2939/);
+  assert.throws(() => classify(prs, byHead, null, NOW), /share head_sha 8e27899b/);
+  assert.throws(() => classify(prs, byHead, null, NOW), /#2938, #2939/);
 });
 
 test('classify: the collision guard names the CONSEQUENCE, not just the collision', () => {
@@ -2010,7 +2034,7 @@ test('classify: the collision guard names the CONSEQUENCE, not just the collisio
   // sees only "share head_sha" has no reason to think the report is unsafe.
   const prs = [pr(1, '2026-07-01T00:00:00Z', 'dupsha'), pr(2, '2026-07-01T00:00:00Z', 'dupsha')];
   const byHead = dedupeByHead([run(1, 'dupsha', 'success', '2026-07-01T00:00:10Z')]);
-  assert.throws(() => classify(prs, byHead, null), /would read as delivered/);
+  assert.throws(() => classify(prs, byHead, null, NOW), /would read as delivered/);
 });
 
 test('classify: a collision with NO run on the shared SHA does not refuse the audit', () => {
@@ -2023,7 +2047,7 @@ test('classify: a collision with NO run on the shared SHA does not refuse the au
     pr(2938, '2025-08-25T21:26:59Z', '8e27899b22b4091667b39ea3487c51dbb3855e35'),
     pr(2939, '2025-08-21T16:52:50Z', '8e27899b22b4091667b39ea3487c51dbb3855e35'),
   ];
-  const out = classify(prs, new Map(), Date.parse('2026-01-01T00:00:00Z'));
+  const out = classify(prs, new Map(), Date.parse('2026-01-01T00:00:00Z'), NOW);
   assert.equal(out.pre_onboarding.length, 2);
   assert.equal(out.never_fired.length, 0);
 });
@@ -2042,19 +2066,19 @@ test('classify: onboarding does NOT make a collision safe', () => {
   ];
   const byHead = dedupeByHead([run(9, 'sharedsha', 'success', '2026-06-01T00:00:10Z')]);
   assert.throws(
-    () => classify(prs, byHead, Date.parse('2026-01-01T00:00:00Z')),
+    () => classify(prs, byHead, Date.parse('2026-01-01T00:00:00Z'), NOW),
     /share head_sha sharedsh/,
   );
   // And the pre-onboarding PR is named in the refusal, since it is the one whose
   // verdict was about to be wrong.
-  assert.throws(() => classify(prs, byHead, Date.parse('2026-01-01T00:00:00Z')), /#1, #2/);
+  assert.throws(() => classify(prs, byHead, Date.parse('2026-01-01T00:00:00Z'), NOW), /#1, #2/);
 });
 
 test('classify: two merged PRs on DIFFERENT head_shas are not a collision', () => {
   // The control. Without it the guard could throw on every multi-PR input and
   // every test above would still pass, since they would all be throwing too.
   const prs = [pr(1, '2026-07-01T00:00:00Z', 'shaone'), pr(2, '2026-07-01T00:00:00Z', 'shatwo')];
-  const out = classify(prs, new Map(), Date.parse('2026-01-01T00:00:00Z'));
+  const out = classify(prs, new Map(), Date.parse('2026-01-01T00:00:00Z'), NOW);
   assert.equal(out.never_fired.length, 2);
 });
 
@@ -2062,7 +2086,7 @@ test('classify: the SAME sha appearing once is not a collision', () => {
   // The other control: a single PR must not trip a count-based guard.
   const prs = [pr(1, '2026-07-01T00:00:00Z', 'lonesha')];
   const byHead = dedupeByHead([run(1, 'lonesha', 'success', '2026-07-01T00:00:10Z')]);
-  const out = classify(prs, byHead, null);
+  const out = classify(prs, byHead, null, NOW);
   assert.deepEqual(
     out.delivered.map((r) => r.number),
     [1],
@@ -2236,4 +2260,715 @@ test('onboardedAt: a page-1-only reader would have passed this fixture', async (
     bigsha: [page1, page2],
   });
   assert.equal(await onboardedAt(client, ONBOARD_CFG, 'somerepo'), '2026-07-07T00:00:00Z');
+});
+
+// ── the run-history horizon (unverifiable) ────────────────────────────────────
+
+test('classify: a merged PR with no run PAST the run-history horizon is unverifiable, not never_fired', () => {
+  // The direction is the whole point. never_fired is on the replay list, so a PR
+  // whose run RECORD was reaped — indistinguishable from one that never ran —
+  // would be re-delivered to the prod queue, and consumer-side idempotency is not
+  // established (ENG-5789).
+  const merged = '2025-01-01T00:00:00Z';
+  const prs = [pr(7, merged, 'reapedsha')];
+  const mergedTs = Date.parse(merged);
+
+  const past = classify(prs, new Map(), null, mergedTs + (RUN_HISTORY_DAYS + 1) * 86400000);
+  assert.deepEqual(past.unverifiable.map((r) => r.number), [7]);
+  assert.deepEqual(past.never_fired, []);
+
+  // The control, one day inside: the SAME fixture must still be never_fired, or
+  // the assertion above would hold for a classifier that simply never emits
+  // never_fired at all.
+  const inside = classify(prs, new Map(), null, mergedTs + (RUN_HISTORY_DAYS - 1) * 86400000);
+  assert.deepEqual(inside.never_fired.map((r) => r.number), [7]);
+  assert.deepEqual(inside.unverifiable, []);
+});
+
+test('classify: the horizon is EXCLUSIVE at exactly RUN_HISTORY_DAYS', () => {
+  // Pins which side of the boundary the equality case falls on, so the branch
+  // cannot be flipped from > to >= without a failure.
+  const merged = '2025-01-01T00:00:00Z';
+  const prs = [pr(7, merged, 'edgesha')];
+  const at = classify(prs, new Map(), null, Date.parse(merged) + RUN_HISTORY_DAYS * 86400000);
+  assert.deepEqual(at.never_fired.map((r) => r.number), [7]);
+  assert.deepEqual(at.unverifiable, []);
+});
+
+test('classify: pre_onboarding OUTRANKS the horizon', () => {
+  // Both branches apply to an ancient PR with no run. pre_onboarding is decided
+  // by GIT history, which does not expire, so it stays the sound verdict out
+  // there — and it is the more useful one, because it says a backfill is owed
+  // rather than "someone go look this up by hand".
+  const merged = '2025-01-01T00:00:00Z';
+  const prs = [pr(7, merged, 'ancientsha')];
+  const c = classify(
+    prs,
+    new Map(),
+    Date.parse('2025-06-01T00:00:00Z'),
+    Date.parse(merged) + (RUN_HISTORY_DAYS + 1) * 86400000,
+  );
+  assert.deepEqual(c.pre_onboarding.map((r) => r.number), [7]);
+  assert.deepEqual(c.unverifiable, []);
+});
+
+test('classify: a PR past the horizon WITH a run row is classified from the run, not withheld', () => {
+  // The horizon only governs the absence of a row. A row that still exists is
+  // evidence regardless of age, and treating age as authoritative would discard
+  // the wide historical audit ENG-5775 needs.
+  const merged = '2025-01-01T00:00:00Z';
+  const prs = [pr(7, merged, 'oldsha')];
+  const byHead = new Map([['oldsha', run(1, 'oldsha', 'failure', '2025-01-01T01:00:00Z')]]);
+  const c = classify(prs, byHead, null, Date.parse(merged) + (RUN_HISTORY_DAYS + 5) * 86400000);
+  assert.deepEqual(c.failed.map((r) => r.number), [7]);
+  assert.deepEqual(c.unverifiable, []);
+});
+
+test('replayList: unverifiable is NOT replayable', () => {
+  // Asserting the exclusion directly rather than trusting the classes object's
+  // shape: replayList spreads three named lists, and adding a fourth is a
+  // one-word edit that would silently start writing to the prod queue.
+  const classes = {
+    failed: [{ number: 1 }],
+    never_fired: [{ number: 2 }],
+    skipped_anomaly: [{ number: 3 }],
+    payload_missing: [{ number: 4 }],
+    in_flight: [{ number: 5 }],
+    unverifiable: [{ number: 6 }],
+    pre_onboarding: [{ number: 7 }],
+  };
+  assert.deepEqual(replayList(classes), [1, 2, 3]);
+});
+
+test('renderMarkdown: unverifiable is named on the CLEAN branch', () => {
+  const md = renderMarkdown(
+    {
+      since: '2025-01-01',
+      totals: { merged_prs: 10, delivered: 8, unverifiable: 2 },
+      repos_with_gaps: [],
+      repos: [{ repo: 'guard', has_caller: true }],
+    },
+    CFG,
+  );
+  assert.match(md, /No gaps among the PRs this audit can decide/);
+  assert.match(md, /\*\*2\*\* merged more than 400 days ago/);
+  assert.match(md, /NOT replayable/);
+  // The unqualified sentence must NOT appear: it is the false-clean this class
+  // exists to prevent.
+  assert.doesNotMatch(md, /No gaps\. Every merged PR/);
+});
+
+test('renderMarkdown: undecided classes are named on the GAPS branch too', () => {
+  // The round-6 fix built the clean sentence from the totals but left the gaps
+  // branch hand-written, so a fleet where ONE repo has a gap printed that repo's
+  // table and said nothing at all about another repo's 29 pre_onboarding or any
+  // unverifiable PRs — the same omission, on the other branch.
+  const md = renderMarkdown(
+    {
+      since: '2025-01-01',
+      totals: { merged_prs: 40, delivered: 8, pre_onboarding: 29, in_flight: 1, unverifiable: 2 },
+      repos_with_gaps: [
+        { repo: 'guard', failed: 1, never_fired: 0, skipped_anomaly: 0, replay: [5] },
+      ],
+      repos: [{ repo: 'guard', has_caller: true }],
+    },
+    CFG,
+  );
+  assert.match(md, /Fleet-wide, and separate from the gaps below/);
+  assert.match(md, /\*\*29\*\* merged before this repo had a caller/);
+  assert.match(md, /\*\*2\*\* merged more than 400 days ago/);
+  assert.match(md, /\*\*1\*\* are not yet decided/);
+});
+
+test('undecidedCaveats: the two report branches share one source', () => {
+  // Both branches call this, so a class added to one is added to both. Asserting
+  // the shared function rather than two rendered strings is what makes that
+  // structural instead of a coincidence of two greps.
+  const totals = { pre_onboarding: 3, in_flight: 2, unverifiable: 1 };
+  assert.equal(undecidedCaveats(totals).length, 3);
+  assert.deepEqual(undecidedCaveats({}), []);
+  // Zero counts are omitted, not printed as "0 are not yet decided".
+  assert.deepEqual(undecidedCaveats({ in_flight: 0, pre_onboarding: 0, unverifiable: 0 }), []);
+});
+
+test('renderMarkdown: a gap repo lists its undecidable PR numbers and no replay for them', () => {
+  const md = renderMarkdown(
+    {
+      since: '2025-01-01',
+      totals: { merged_prs: 40, delivered: 8, unverifiable: 2 },
+      repos_with_gaps: [
+        {
+          repo: 'guard',
+          failed: 1,
+          never_fired: 0,
+          skipped_anomaly: 0,
+          unverifiable: 2,
+          unverifiable_prs: [77, 78],
+          replay: [5],
+        },
+      ],
+      repos: [{ repo: 'guard', has_caller: true }],
+    },
+    CFG,
+  );
+  assert.match(md, /undecidable, run record reaped \(not a gap, not replayed\) \| 2 \|/);
+  assert.match(md, /Undecidable PRs \(2\): #77, #78/);
+  // The replay command covers the real gap only.
+  assert.match(md, /pr_numbers='5'/);
+});
+
+// ── prior run attempts ───────────────────────────────────────────────────────
+
+// A client stub whose gh() answers from a path -> body map, recording what was
+// asked. Anything unmapped answers __missing, so an unexpected call is visible as
+// a behaviour change rather than as a silent undefined.
+const attemptClient = (map) => {
+  const asked = [];
+  return {
+    asked,
+    gh: async (p) => {
+      asked.push(p);
+      return map[p] ?? { __missing: true };
+    },
+  };
+};
+
+const jobsWithStep = (conclusion) => ({
+  total_count: 1,
+  jobs: [{ steps: [{ name: SQS_STEP, conclusion }] }],
+});
+
+// The shape of a run that died BEFORE the send: jobs readable, no SQS step at
+// all. This is the ordinary failed run, not the rename signal — 8 of 25 sampled
+// guard failures look exactly like this.
+const jobsDiedEarly = () => ({
+  total_count: 1,
+  jobs: [{ steps: [{ name: 'Set up job', conclusion: 'failure' }] }],
+});
+
+const ACFG = { owner: 'praetorian-inc' };
+
+// recoverHiddenDeliveries probes the CURRENT run before walking attempts, so
+// every fixture below has to answer that call. Answering `skipped` keeps these
+// tests about the attempt walk: the current run did not send, so the walk runs.
+const CURRENT = (runId, body = jobsWithStep('skipped')) => ({
+  [`/repos/praetorian-inc/guard/actions/runs/${runId}/jobs?per_page=100`]: body,
+});
+
+test('recoverHiddenDeliveries: a SUCCESSFUL earlier attempt that sent moves the PR to delivered', () => {
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 2 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(900),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1/jobs?per_page=100': jobsWithStep('success'),
+  });
+
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.failed, []);
+    assert.deepEqual(classes.delivered.map((r) => r.number), [5]);
+    assert.equal(classes.delivered[0].recovered_attempt, 1);
+    // And therefore off the replay list, which is the consequence that matters.
+    assert.equal(replayList({ ...classes, never_fired: [], skipped_anomaly: [] }).includes(5), false);
+  });
+});
+
+test('recoverHiddenDeliveries: a successful earlier attempt that sent NOTHING becomes payload_missing', () => {
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 2 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(900),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1/jobs?per_page=100': jobsWithStep('skipped'),
+  });
+
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.delivered, []);
+    assert.deepEqual(classes.payload_missing.map((r) => r.number), [5]);
+    assert.equal(classes.payload_missing[0].payload, 'missing');
+  });
+});
+
+test('recoverHiddenDeliveries: attempt 1 is not probed at all', () => {
+  // Cost control AND a correctness pin: there is no attempt 0, so a loop that
+  // probed it would 404 on every ordinary failed run in the fleet.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 1 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient(CURRENT(900));
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    // The current run's own jobs, and NOTHING else: no /attempts/ path at all.
+    assert.deepEqual(client.asked, ['/repos/praetorian-inc/guard/actions/runs/900/jobs?per_page=100']);
+    assert.deepEqual(classes.failed.map((r) => r.number), [5]);
+  });
+});
+
+test('recoverHiddenDeliveries: no earlier attempt succeeded, so the PR stays failed', () => {
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 3 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(900),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2': { conclusion: 'failure' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1': { conclusion: 'startup_failure' },
+  });
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.failed.map((r) => r.number), [5]);
+    assert.deepEqual(classes.delivered, []);
+    // Current run FIRST, then walked DOWNWARD from run_attempt - 1, stopping at 1.
+    assert.deepEqual(client.asked, [
+      '/repos/praetorian-inc/guard/actions/runs/900/jobs?per_page=100',
+      '/repos/praetorian-inc/guard/actions/runs/900/attempts/2',
+      '/repos/praetorian-inc/guard/actions/runs/900/attempts/1',
+    ]);
+  });
+});
+
+test('recoverHiddenDeliveries: an unreadable attempt leaves the PR failed rather than throwing', () => {
+  // Deliberately unlike verifyPayloads, which throws on an unreadable CURRENT
+  // run. Here the audit already has a verdict from the row it read, so skipping
+  // over-reports; throwing would abort the whole repo at exit 2 because a
+  // year-old attempt aged out.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 2 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient(CURRENT(900));
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.failed.map((r) => r.number), [5]);
+  });
+});
+
+test('recoverHiddenDeliveries: skipped_anomaly is recovered too, since it is also replayed', () => {
+  const classes = {
+    delivered: [],
+    failed: [],
+    skipped_anomaly: [{ number: 8, run_id: 901, conclusion: 'skipped', run_attempt: 2 }],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(901),
+    '/repos/praetorian-inc/guard/actions/runs/901/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/901/attempts/1/jobs?per_page=100': jobsWithStep('success'),
+  });
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.skipped_anomaly, []);
+    assert.deepEqual(classes.delivered.map((r) => r.number), [8]);
+  });
+});
+
+// ── the CURRENT run's own send, behind a non-success conclusion ───────────────
+
+test("recoverHiddenDeliveries: the current run's OWN successful send moves the PR to delivered", () => {
+  // The third member of the hidden-delivery class. The SQS step is the last
+  // AUTHORED step, but harden-runner, configure-aws-credentials and checkout all
+  // register post-job cleanup that runs after it — and a cancellation lands the
+  // same way. So a run can send and still conclude failure/cancelled.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 1 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient(CURRENT(900, jobsWithStep('success')));
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.failed, []);
+    assert.deepEqual(classes.delivered.map((r) => r.number), [5]);
+    // The conclusion is RECORDED, not erased: the report has to be able to say
+    // why a delivered PR carries a failed run.
+    assert.equal(classes.delivered[0].sent_despite_conclusion, 'failure');
+    // Off the replay list — the consequence that matters, since replaying is the
+    // only direction that writes to the prod queue.
+    assert.equal(replayList({ ...classes, never_fired: [], skipped_anomaly: [] }).includes(5), false);
+  });
+});
+
+test('recoverHiddenDeliveries: a rescued current run costs NO attempt probes', () => {
+  // Not just cost: probing attempts after the current run already delivered
+  // could demote the record back on an older attempt's verdict.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'cancelled', run_attempt: 4 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient(CURRENT(900, jobsWithStep('success')));
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(client.asked, ['/repos/praetorian-inc/guard/actions/runs/900/jobs?per_page=100']);
+    assert.deepEqual(classes.delivered.map((r) => r.number), [5]);
+    assert.equal(classes.delivered[0].sent_despite_conclusion, 'cancelled');
+  });
+});
+
+test('recoverHiddenDeliveries: a run that died BEFORE the send stays failed instead of aborting the audit', () => {
+  // The regression this option exists for. probeSqsStep treats an absent SQS
+  // step as a RENAME and throws — correct for a successful run, fatal nonsense
+  // for a failed one: 8 of 25 sampled guard failures die at `Set up job` with no
+  // SQS step at all, so without requireStep:false every wide audit would exit 2.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 1 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient(CURRENT(900, jobsDiedEarly()));
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.failed.map((r) => r.number), [5]);
+    assert.deepEqual(classes.delivered, []);
+  });
+});
+
+test('probeSqsStep: an absent step is STILL fatal on the success path, so the rename detector survives', () => {
+  // The other half of the pair above. requireStep defaults to true, so the
+  // caller that verifies a SUCCESSFUL run keeps throwing — a rename makes every
+  // one of ~1054 successes in a 90-day guard window throw, against 181 failures,
+  // so the audit exits 2 long before any replay list is published.
+  const client = attemptClient({ '/x/jobs?per_page=100': jobsDiedEarly() });
+  return assert.rejects(
+    () => probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900'),
+    /renamed|no .* step/i,
+  );
+});
+
+test('recoverHiddenDeliveries: UNREADABLE current jobs throws rather than assuming nothing was sent', () => {
+  // The asymmetry with an unreadable ATTEMPT is deliberate. "Cannot read the run
+  // that concluded failure" must not silently become "it sent nothing, go replay
+  // it" — that is the writing direction.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 1 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({});
+  return assert.rejects(() => recoverHiddenDeliveries(client, ACFG, 'guard', classes), /jobs could not be read/);
+});
+
+test('assertActionsReadable: a 404 on the repo-level runs endpoint throws instead of yielding zero runs', () => {
+  // The whole point: ghPaged answers a 404 by returning [], which is
+  // indistinguishable from "no runs" and turns every merged PR into a
+  // never_fired entry on the replay list.
+  const client = attemptClient({});
+  return assert.rejects(() => assertActionsReadable(client, ACFG, 'guard'), /actions:read|not readable/);
+});
+
+test('assertActionsReadable: a repo with ZERO runs is readable, not a failure', () => {
+  // The distinction that makes the probe usable at all. A never-onboarded repo
+  // answers 200 with total_count 0; only an inaccessible one 404s. Confusing the
+  // two would abort the audit on every repo that simply is not a subject yet.
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs?per_page=1': { total_count: 0, workflow_runs: [] },
+  });
+  return assertActionsReadable(client, ACFG, 'guard').then((p) => {
+    assert.equal(p.total_count, 0);
+    // And it probed the REPO-level endpoint, not the workflow-specific one whose
+    // 404 legitimately means "no caller here".
+    assert.deepEqual(client.asked, ['/repos/praetorian-inc/guard/actions/runs?per_page=1']);
+  });
+});
+
+test('needsPayloadProbe: BOTH rescue routes are excluded, and an ordinary success is not', () => {
+  // One field per rescue route, and the reason they differ is not symmetric:
+  // re-probing an attempt-rescued record actively DEMOTES it (the current run
+  // failed), while re-probing a current-run-rescued one merely wastes a call.
+  assert.equal(needsPayloadProbe({ run_id: 1 }), true);
+  assert.equal(needsPayloadProbe({ run_id: 1, recovered_attempt: 1 }), false);
+  assert.equal(needsPayloadProbe({ run_id: 1, sent_despite_conclusion: 'failure' }), false);
+  // Falsy-but-present must still exclude: attempt 0 does not exist, but
+  // `sent_despite_conclusion: ''` would be a truthiness trap for a `!rec.x` test.
+  assert.equal(needsPayloadProbe({ run_id: 1, sent_despite_conclusion: '' }), false);
+});
+
+// ── sibling successful runs for one head ─────────────────────────────────────
+
+test('successRunIdsByHead: groups only SUCCESSFUL runs, and keeps every one of them', () => {
+  const runs = [
+    run(1, 'aaa', 'success', '2026-07-01T00:00:00Z'),
+    run(2, 'aaa', 'failure', '2026-07-01T01:00:00Z'),
+    run(3, 'aaa', 'success', '2026-07-01T02:00:00Z'),
+    run(4, 'bbb', 'success', '2026-07-01T00:00:00Z'),
+    run(5, 'ccc', null, '2026-07-01T00:00:00Z'),
+  ];
+  const m = successRunIdsByHead(runs);
+  assert.deepEqual(m.get('aaa'), [1, 3]);
+  assert.deepEqual(m.get('bbb'), [4]);
+  assert.equal(m.has('ccc'), false);
+});
+
+test('verifyPayloads: a SIBLING successful run that sent rescues the head from payload_missing', () => {
+  // dedupeByHead picks one success per head. When two runs succeeded for the same
+  // head and only the other one sent, probing just the winner reports
+  // payload_missing for a PR whose author DOES have their score.
+  const recs = [{ number: 5, run_id: 700 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('skipped'),
+    '/repos/praetorian-inc/guard/actions/runs/701/jobs?per_page=100': jobsWithStep('success'),
+  });
+  const alt = new Map([[5, [700, 701]]]);
+
+  return verifyPayloads(client, ACFG, 'guard', recs, alt).then((v) => {
+    assert.equal(v.get(700), 'sent');
+    assert.equal(recs[0].sent_by_run_id, 701);
+  });
+});
+
+test('verifyPayloads: siblings are only probed when the winner did not send', () => {
+  const recs = [{ number: 5, run_id: 700 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('success'),
+    '/repos/praetorian-inc/guard/actions/runs/701/jobs?per_page=100': jobsWithStep('success'),
+  });
+  return verifyPayloads(client, ACFG, 'guard', recs, new Map([[5, [700, 701]]])).then((v) => {
+    assert.equal(v.get(700), 'sent');
+    assert.deepEqual(client.asked, ['/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100']);
+  });
+});
+
+test('verifyPayloads: no sibling sent, so the verdict stays not_sent', () => {
+  const recs = [{ number: 5, run_id: 700 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('skipped'),
+    '/repos/praetorian-inc/guard/actions/runs/701/jobs?per_page=100': jobsWithStep('skipped'),
+  });
+  return verifyPayloads(client, ACFG, 'guard', recs, new Map([[5, [700, 701]]])).then((v) => {
+    assert.equal(v.get(700), 'not_sent');
+    assert.equal('sent_by_run_id' in recs[0], false);
+  });
+});
+
+test('verifyPayloads: with no sibling map at all the behaviour is unchanged', () => {
+  // The control for the parameter's default: every existing caller passes four
+  // arguments, and the fifth must not change the answer.
+  const recs = [{ number: 5, run_id: 700 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('skipped'),
+  });
+  return verifyPayloads(client, ACFG, 'guard', recs).then((v) => {
+    assert.equal(v.get(700), 'not_sent');
+  });
+});
+
+// ── --until ──────────────────────────────────────────────────────────────────
+
+test('parseArgs: --until is validated by the same three families as --since', () => {
+  assert.throws(() => parseArgs(['--since=2026-01-01', '--until=07-2026'], NOW), /--until must be YYYY-MM-DD/);
+  assert.throws(() => parseArgs(['--since=2026-01-01', '--until=2026-13-01'], NOW), /--until is not a real date/);
+  // Roll-over: the family that does NOT produce NaN. 2026-02-31 becomes 2026-03-03.
+  assert.throws(
+    () => parseArgs(['--since=2026-01-01', '--until=2026-02-31'], NOW),
+    /normalizes to 2026-03-03/,
+  );
+});
+
+test('parseArgs: --until at or below --since is refused as an empty window', () => {
+  assert.throws(
+    () => parseArgs(['--since=2026-07-05', '--until=2026-07-05'], NOW),
+    /is not after --since/,
+  );
+  assert.throws(
+    () => parseArgs(['--since=2026-07-05', '--until=2026-07-04'], NOW),
+    /examined nothing/,
+  );
+});
+
+test('parseArgs: a valid --until is kept, and a FUTURE one is allowed', () => {
+  assert.equal(parseArgs(['--since=2026-07-05', '--until=2026-07-10'], NOW).until, '2026-07-10');
+  // "Up to now" is the default anyway, so a future upper bound is not the
+  // vacuous-clean shape the future --since check refuses.
+  assert.equal(parseArgs(['--since=2026-07-05', '--until=2030-01-01'], NOW).until, '2030-01-01');
+  // Absent by default, so every existing caller keeps the open-ended window.
+  assert.equal(parseArgs(['--since=2026-07-05'], NOW).until, null);
+});
+
+test('renderMarkdown: the header states the upper bound it actually used', () => {
+  const base = {
+    since: '2026-07-05',
+    totals: { merged_prs: 1, delivered: 1 },
+    repos_with_gaps: [],
+    repos: [],
+  };
+  assert.match(renderMarkdown({ ...base, until: null }, CFG), /Window `2026-07-05` → now\./);
+  assert.match(
+    renderMarkdown({ ...base, until: '2026-07-20' }, CFG),
+    /Window `2026-07-05` → `2026-07-20` \(exclusive\)\./,
+  );
+});
+
+// ── the composite action's gap counter ───────────────────────────────────────
+//
+// This is CI glue, not exported surface, and until now nothing exercised it: the
+// only way to learn it was broken was for a real gap to be reported to the fleet
+// with the wrong number attached. It is pinned here because a Gemini review of
+// this PR flagged `process.argv[1]` as a Critical bug and asked for `argv[2]`,
+// which is correct for a `node script.js` invocation and WRONG for `node -e`
+// (there is no script path in argv, so the first operand lands at index 1).
+// Demonstrated at the time: argv[1] prints 5 and exits 0, argv[2] throws
+// ERR_INVALID_ARG_TYPE. The tests below extract the real inline script out of
+// action.yml and run it, so the next reviewer who "fixes" the index gets a red
+// suite instead of an action that fails on every gap it finds.
+
+import { readFileSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const SCRIPT = readFileSync(join(HERE, 'audit-delivery.mjs'), 'utf8');
+
+// Extracted rather than duplicated. A copy of the script would keep passing
+// after action.yml drifted away from it — the failure mode this whole block
+// exists to catch.
+const GAP_COUNTER = (() => {
+  const yml = readFileSync(join(HERE, 'action.yml'), 'utf8');
+  const m = yml.match(/gap_count=\$\(node -e '\n([\s\S]*?)\n\s*' "\$json"\)/);
+  if (!m) {
+    throw new Error(
+      'could not extract the gap counter from action.yml — if the step was ' +
+        'reformatted, update this matcher; do NOT delete the tests, or the ' +
+        'counter goes unexercised again',
+    );
+  }
+  return m[1];
+})();
+
+const runGapCounter = (report) => {
+  const dir = mkdtempSync(join(tmpdir(), 'audit-gap-'));
+  const p = join(dir, 'report.json');
+  writeFileSync(p, JSON.stringify(report));
+  return execFileSync(process.execPath, ['-e', GAP_COUNTER, p], { encoding: 'utf8' });
+};
+
+test('action.yml gap counter: the report path arrives at process.argv[1] under node -e', () => {
+  // The literal is derived by hand: 2 replay + 1 payload_missing, plus 1 replay
+  // and 0 payload_missing = 4. Chosen so that counting replay alone (3) or
+  // payload_missing alone (1) both give a different answer.
+  const out = runGapCounter({
+    repos_with_gaps: [
+      { repo: 'guard', replay: [1, 2], payload_missing: 1 },
+      { repo: 'palatine', replay: [3], payload_missing: 0 },
+    ],
+  });
+  assert.equal(out, '4');
+});
+
+test('action.yml gap counter: payload_missing is counted even with an EMPTY replay list', () => {
+  // The specific under-count the reducer was written for: those PRs' authors are
+  // missing their score, but replaying an unmapped author re-delivers nothing, so
+  // they are deliberately off the replay list. replay.length alone would print 0
+  // for a repo that has a real, live gap.
+  assert.equal(runGapCounter({ repos_with_gaps: [{ repo: 'guard', replay: [], payload_missing: 3 }] }), '3');
+});
+
+test('action.yml gap counter: a missing payload_missing key does not poison the sum', () => {
+  // `a + undefined` is NaN, which String()s to "NaN" and would flow into
+  // $GITHUB_OUTPUT as a gap count. The `|| 0` is what prevents that; this fails
+  // if it is removed.
+  assert.equal(runGapCounter({ repos_with_gaps: [{ repo: 'guard', replay: [7, 8] }] }), '2');
+});
+
+test('action.yml gap counter: it FAILS rather than printing a reassuring 0', () => {
+  // Reached only on the audit's exit 1, so some gap class was non-empty. A zero
+  // here means this reducer cannot see the class that fired — an accounting bug
+  // that must not render as "clean".
+  assert.throws(
+    () => runGapCounter({ repos_with_gaps: [{ repo: 'guard', replay: [], payload_missing: 0 }] }),
+    /gaps reported but counted 0 affected PRs/,
+  );
+  // Same for a report it cannot parse at all.
+  assert.throws(() => {
+    const dir = mkdtempSync(join(tmpdir(), 'audit-gap-'));
+    const p = join(dir, 'report.json');
+    writeFileSync(p, 'not json');
+    execFileSync(process.execPath, ['-e', GAP_COUNTER, p], { encoding: 'utf8', stdio: 'pipe' });
+  });
+});
+
+test('action.yml gap counter: argv[2] is the WRONG index, demonstrated not asserted', () => {
+  // The control for the pin above. Without this, a reader has only my word that
+  // argv[2] is broken; with it, the suite itself shows the alternative failing.
+  const wrong = GAP_COUNTER.replace('process.argv[1]', 'process.argv[2]');
+  assert.notEqual(wrong, GAP_COUNTER);
+  assert.throws(
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), 'audit-gap-'));
+      const p = join(dir, 'report.json');
+      writeFileSync(p, JSON.stringify({ repos_with_gaps: [{ replay: [1], payload_missing: 0 }] }));
+      execFileSync(process.execPath, ['-e', wrong, p], { encoding: 'utf8', stdio: 'pipe' });
+    },
+    (e) => /ERR_INVALID_ARG_TYPE|must be of type string/.test(String(e.stderr || e.message)),
+  );
+});
+
+test('action.yml: every declared input is actually wired through to the script', () => {
+  // The class-level pin for the defect this round found twice. --until was added
+  // to the CLI to make the caller-renamed remediation expressible, but the
+  // composite action is the only path CI has, and an input that is declared and
+  // then never referenced is indistinguishable from one that works: the action
+  // accepts it, ignores it, and audits the wrong window. Asserting the WIRING
+  // rather than the presence of one flag means the next input added has to be
+  // wired too.
+  const yml = readFileSync(join(HERE, 'action.yml'), 'utf8');
+
+  const declared = [
+    ...yml
+      .slice(yml.indexOf('\ninputs:'), yml.indexOf('\noutputs:'))
+      .matchAll(/^ {2}([a-z][a-z0-9-]*):$/gm),
+  ].map((m) => m[1]);
+  // Guard against the extraction going vacuous if the file is restructured.
+  assert.ok(declared.length >= 7, `expected the input block to parse, got ${declared.join(',')}`);
+  assert.ok(declared.includes('until'), 'until must be a declared input');
+
+  const body = yml.slice(yml.indexOf('\noutputs:'));
+  for (const name of declared) {
+    // Reached the step's env block...
+    const env = new RegExp(`^\\s+([A-Z_]+): \\$\\{\\{ inputs\\.${name} \\}\\}$`, 'm').exec(body);
+    assert.ok(env, `input "${name}" is declared but never mapped into the step env`);
+    // ...and something actually CONSUMES that variable. A mapping alone is not
+    // wiring: DAYS/SINCE prove the value has to be read to matter. There are two
+    // legitimate consumers, and the pin has to accept both or it reports a
+    // false positive on the token: the run body may read `$VAR` to build argv,
+    // or the script may read process.env.VAR directly out of the inherited
+    // environment — which is how GITHUB_TOKEN reaches it, deliberately, since
+    // putting a credential in argv would expose it in the process table.
+    const readInShell = new RegExp(`\\$${env[1]}\\b|\\$\\{${env[1]}\\b`).test(
+      body.slice(body.indexOf('run: |')),
+    );
+    const readInScript = new RegExp(`process\\.env\\.${env[1]}\\b`).test(SCRIPT);
+    assert.ok(
+      readInShell || readInScript,
+      `env var ${env[1]} (input "${name}") is set but read by neither the run body nor the script`,
+    );
+  }
+});
+
+test('action.yml: --until is appended outside the since/days branch', () => {
+  // If it were nested in the --since arm, a caller using `days` would have its
+  // upper bound silently dropped — and the script resolves days into a concrete
+  // since before validating --until, so there is no reason to nest it.
+  const yml = readFileSync(join(HERE, 'action.yml'), 'utf8');
+  const args = yml.slice(yml.indexOf('args=('), yml.indexOf('rc=0'));
+  const sinceArm = args.indexOf('args+=("--days=$DAYS")');
+  const fiClosing = args.indexOf('fi', sinceArm);
+  assert.ok(sinceArm > 0 && fiClosing > sinceArm, 'could not locate the since/days branch');
+  assert.ok(
+    args.indexOf('--until=$UNTIL') > fiClosing,
+    '--until must be appended after the since/days branch closes',
+  );
 });

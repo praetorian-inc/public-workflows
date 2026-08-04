@@ -53,6 +53,7 @@ const DEFAULTS = {
   owner: 'praetorian-inc', // fleet mode
   repos: null, // comma list; fleet mode, null = enumerate the org
   since: null, // YYYY-MM-DD, overrides --days
+  until: null, // YYYY-MM-DD upper bound, exclusive; null = up to now
   days: '30',
   callerPath: '.github/workflows/leaderboard-metrics.yml',
   reusable: 'public-workflows/.github/workflows/leaderboard-metrics.yml@',
@@ -60,6 +61,12 @@ const DEFAULTS = {
   json: null,
   markdown: null,
 };
+
+// Per-REQUEST ceiling, not a budget for the audit: a wide guard window makes
+// ~880 calls, so anything short enough to bound total runtime would abort
+// healthy requests. 30s is well past GitHub's own p99 for these endpoints while
+// still turning a hung socket into a retry rather than a 6-hour job timeout.
+const REQUEST_TIMEOUT_MS = 30000;
 
 const DAY = 86400000;
 const ymd = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -155,6 +162,41 @@ export function parseArgs(argv, now = Date.now()) {
     out.since = ymd(now - days * DAY);
   }
 
+  // --until exists because the rename remediation below was unfollowable without
+  // it. That error tells the operator to re-run with the PREVIOUS caller path to
+  // cover the pre-rename period — but with only a lower bound, the re-run also
+  // covers everything AFTER the rename, where the old filename has no runs at
+  // all, so every recent PR comes back never_fired. Following the instruction
+  // produced a report that was wrong in the replay-list direction, which is the
+  // direction that writes to the prod queue.
+  //
+  // Validated by the same three-family checks as --since rather than a fresh
+  // `Date.parse` — a second date flag with weaker validation is how the
+  // roll-over bug would have come back on a different flag.
+  if (out.until) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(out.until)) {
+      throw new Error(`--until must be YYYY-MM-DD, got ${out.until}`);
+    }
+    const uts = Date.parse(`${out.until}T00:00:00Z`);
+    if (Number.isNaN(uts)) throw new Error(`--until is not a real date: ${out.until}`);
+    if (ymd(uts) !== out.until) {
+      throw new Error(
+        `--until ${out.until} is not a calendar date — it silently normalizes to ${ymd(uts)}, ` +
+          'so the audit would cover a different window than the one requested',
+      );
+    }
+    // A future --until is NOT rejected: it just means "up to now", which is the
+    // default anyway. The hazard this flag introduces is the EMPTY window — the
+    // same vacuous-clean shape the future --since check refuses, reachable here
+    // through an upper bound at or below the lower one.
+    if (uts <= Date.parse(`${out.since}T00:00:00Z`)) {
+      throw new Error(
+        `--until ${out.until} is not after --since ${out.since} — the window can contain no ` +
+          'merged PRs, so the audit would report a clean result having examined nothing',
+      );
+    }
+  }
+
   // The runs endpoint is keyed by the workflow FILE NAME, which must track
   // --caller-path rather than being hardcoded alongside it.
   out.callerFile = out.callerPath.split('/').pop();
@@ -203,6 +245,34 @@ export const FAILED = new Set([
 // being stingy is a replay of a delivery that was about to happen. Those are not
 // symmetric — one delays a report, the other double-writes to prod.
 export const GRACE_MS = 15 * 60 * 1000;
+
+// How far back a workflow run RECORD is still queryable. Past this, "no run
+// exists" stops meaning "no run ever ran" and starts meaning "the record was
+// reaped" — indistinguishable from the outside, and the two have opposite
+// remediations, so the audit must not guess.
+//
+// The obvious candidate for this number is wrong, which is why the measurement
+// is recorded here rather than the reasoning. `GET
+// /repos/{o}/{r}/actions/permissions/artifact-and-log-retention` returns
+// `{"days":90,"maximum_allowed_days":90}` for guard — but that setting governs
+// ARTIFACTS AND LOGS, not run records: guard has **3570** run records in
+// `created=2026-04-25..2026-04-30`, 96–101 days old, well past 90.
+//
+// The real cliff, measured on guard's own history (runs per created-window):
+//   2025-05-01..05-31      0
+//   2025-06-01..06-15      0    <- cliff
+//   2025-06-16..06-25   1736    <- cliff
+//   2025-07 (month)     4156
+//   2026-03 (month)    16622
+// and 400 days before the day of measurement was 2025-06-30. Deletion is
+// batched, so the observed edge wobbles a couple of weeks either side of the
+// nominal 400 — which is exactly why this is used as a conservative floor for
+// WITHHOLDING a verdict and never as a floor for asserting one.
+//
+// Not a repo-age artifact: guard was created 2024-06-11 and has 0 runs in
+// 2024-06/07, 2024-12 and 2025-03. Control in the other direction: palatine
+// shows 0 runs before 2026-06 because the REPO was created 2026-06-06.
+export const RUN_HISTORY_DAYS = 400;
 
 // Classification is pure so it can be unit-tested without touching the network.
 // `byHead` is the already-deduplicated head_sha -> run map. `now` is a parameter
@@ -302,6 +372,20 @@ export function classify(prs, byHead, onboardedTs, now = Date.now()) {
     // safe. A *concluded* run we do not recognize does NOT belong here, because
     // nothing would ever resolve it and it would be invisible forever.
     in_flight: [],
+    // "No run row" for a PR merged before the run-history horizon
+    // (RUN_HISTORY_DAYS). Undecidable rather than a gap: the record may have
+    // been reaped, and there is no API that distinguishes a reaped run from one
+    // that never existed. The direction matters — calling it never_fired puts it
+    // on the REPLAY list, so a PR that was delivered a year ago gets
+    // re-delivered to the prod queue, and consumer-side idempotency is not
+    // established (ENG-5789).
+    //
+    // This is the opposite of in_flight: in_flight resolves itself on the next
+    // audit, whereas this NEVER resolves and only gets worse with time. So it is
+    // surfaced as its own named class rather than parked — someone has to decide
+    // it from outside the Actions API (git history, the consumer table), and
+    // burying it in never_fired or delivered would hide that decision.
+    unverifiable: [],
   };
   for (const pr of prs) {
     const run = byHead.get(pr.head.sha);
@@ -328,6 +412,14 @@ export function classify(prs, byHead, onboardedTs, now = Date.now()) {
         // (ENG-5789). Withholding is safe for the same reason as in_flight: the
         // window counts back from now, so the next audit sees the settled truth.
         classes.in_flight.push(rec);
+      } else if (now - Date.parse(pr.merged_at) > RUN_HISTORY_DAYS * DAY) {
+        // Beyond the run-history horizon, "no run row" is not evidence. Ordered
+        // AFTER pre_onboarding deliberately: a PR that merged before the repo
+        // had a caller is decided by GIT history, which does not expire, so that
+        // verdict is still sound out here and is the more useful of the two.
+        // Only a PR that WAS expected to deliver and has no queryable record
+        // reaches this branch.
+        classes.unverifiable.push(rec);
       } else {
         classes.never_fired.push(rec);
       }
@@ -335,6 +427,14 @@ export function classify(prs, byHead, onboardedTs, now = Date.now()) {
     }
     rec.run_id = run.id;
     rec.conclusion = run.conclusion;
+    // Carried because the runs LIST endpoint returns one row per run at its
+    // CURRENT attempt — a re-run mutates the row in place rather than adding one.
+    // Measured on guard's leaderboard-metrics: 1537 rows, of which 1532 are at
+    // attempt 1, three at 2, one at 3, one at 6, summing to exactly the endpoint's
+    // own `total_count`. So an earlier attempt that SUCCEEDED is invisible to
+    // dedupeByHead no matter how it ranks rows, and only `/attempts/{n}` can see
+    // it. Anything > 1 here means there is hidden history behind this row.
+    rec.run_attempt = typeof run.run_attempt === 'number' ? run.run_attempt : 1;
     if (run.conclusion === null) {
       // queued / in_progress / waiting — `conclusion` stays null until a run
       // completes. This used to fall through to never_fired, which put an
@@ -381,7 +481,12 @@ export function dedupeByHead(runs) {
   //
   // The case recency exists for still works, because success-first subsumes it:
   // a first attempt that failed and a re-run that succeeded resolves to the
-  // success either way.
+  // success either way — PROVIDED both are distinct rows. They are not always.
+  // A re-run of the SAME run mutates that row's `conclusion` and `run_attempt`
+  // in place, so a success at attempt 1 followed by a failure at attempt 2
+  // presents here as a single failed row with no trace of the success. No
+  // ranking rule over these rows can recover it; `recoverHiddenDeliveries` reads
+  // `/attempts/{n}` for that, and this function does not pretend to.
   const byHead = new Map();
   const won = (r, prev) => {
     if (!prev) return true;
@@ -440,61 +545,243 @@ export const SQS_STEP = 'Send metrics to SQS';
 // cost on a wide window (guard has ~1054 in 90 days). It is unconditional
 // anyway — an opt-in flag would leave the default answer wrong, and the default
 // is what CI runs. `api_calls` in the report shows the real number.
-export async function verifyPayloads(client, cfg, repo, recs) {
+// The step probe for ONE run-or-attempt's job list, split out of verifyPayloads
+// so a prior attempt (`/attempts/{n}/jobs`) is checked by the same code that
+// checks a current run. Duplicating it would let the two drift, and the
+// truncation and rename guards below are exactly the parts that must not.
+//
+// Returns 'sent' | 'not_sent'; throws when the answer is UNKNOWN, because a run
+// whose steps cannot be read is never evidence of a delivery.
+//
+// `requireStep` is what makes this reusable for a run that did NOT succeed. For a
+// SUCCESSFUL run, a missing step means the reusable was renamed and the whole
+// audit must stop (see below). For a FAILED one it means the run died before
+// reaching the send — which is the ordinary case, not an anomaly: 8 of 25 sampled
+// guard failures died at `Set up job`, and every one of them would abort the
+// audit at exit 2 if absence were fatal here. Passing requireStep:false makes
+// absence answer 'not_sent', which leaves the record `failed` and replayable —
+// its existing verdict, so this cannot manufacture a delivery.
+//
+// A rename is still caught: it makes EVERY successful run throw, and there are
+// ~1054 of those in a 90-day guard window against 181 failures, so the audit
+// exits 2 long before any replay list is published. The success path is the
+// rename detector; this flag does not weaken it.
+export async function probeSqsStep(client, cfg, repo, jobsPath, label, { requireStep = true } = {}) {
+  // per_page is explicit: this endpoint defaults to 30 jobs, and a truncated
+  // list would hide a PRESENT delivery step, which then reads as a rename and
+  // stops the whole audit at exit 2 for a cause that is not the real one.
+  const jobs = await client.gh(`${jobsPath}?per_page=100`);
+
+  // "Could not read the jobs" and "read them, the step is gone" are different
+  // facts with different repairs, and they used to collapse into the rename
+  // message below: __missing produced steps=[], so a 404 told the operator to
+  // update SQS_STEP. Both still FAIL — a run whose steps cannot be read is
+  // never evidence of a delivery — but the message has to name its own cause.
+  if (!jobs || jobs.__missing) {
+    throw new Error(
+      `${repo}: ${label} — its jobs could not be read ` +
+        '(404 or empty body), so delivery cannot be verified either way and this is ' +
+        'UNKNOWN rather than decided. A run past its retention window is the usual ' +
+        'cause; narrow the window with --since.',
+    );
+  }
+
+  const list = jobs.jobs || [];
+  // per_page=100 raises the ceiling; it does not remove it. Assert against the
+  // server's own count rather than assuming one page is always enough, because
+  // the failure is silent in the direction that matters (a present step read
+  // as absent).
+  if (typeof jobs.total_count === 'number' && jobs.total_count > list.length) {
+    throw new Error(
+      `${repo}: ${label} reports ${jobs.total_count} jobs but only ${list.length} ` +
+        'were returned — the job list is truncated, so a present delivery step could read ' +
+        'as absent. This endpoint needs pagination.',
+    );
+  }
+
+  const steps = list.flatMap((j) => j.steps || []);
+  const step = steps.find((s) => s.name === SQS_STEP);
+  if (!step && !requireStep) {
+    // The run did not reach the send. It never delivered, so its existing
+    // replayable verdict stands — see the requireStep note above for why this is
+    // not a hole in the rename detector.
+    return 'not_sent';
+  }
+  if (!step) {
+    // Absence is NOT treated as delivered. A name probe that silently answers
+    // "fine" when it finds nothing is the same fail-open shape as the bug it
+    // is fixing, so this stops the audit at exit 2 UNKNOWN instead. The name
+    // held for all 1000 successful runs in guard's auditable window, so this
+    // fires on a future rename of the reusable's step — a real change that a
+    // human must reflect here, not a per-run oddity to shrug off.
+    throw new Error(
+      `${repo}: ${label} concluded success but has no step named "${SQS_STEP}" — ` +
+        "the reusable's step names have changed and delivery can no longer be verified. " +
+        'Update SQS_STEP rather than trusting the run conclusion.',
+    );
+  }
+  return step.conclusion === 'success' ? 'sent' : 'not_sent';
+}
+
+// Successful run ids grouped by head SHA. Pure, and separate from dedupeByHead
+// because dedupeByHead answers "which single row represents this head" while
+// this answers "which runs for this head could have sent the payload" — and when
+// a head has more than one SUCCESSFUL run those are different questions. Picking
+// one success and probing only that one reports payload_missing for a head where
+// a sibling success did send: over-reporting rather than double-delivery, but
+// still a wrong verdict on a PR whose author DOES have their score.
+export function successRunIdsByHead(runs) {
+  const m = new Map();
+  for (const r of runs) {
+    if (r.conclusion !== 'success') continue;
+    const ids = m.get(r.head_sha) || [];
+    ids.push(r.id);
+    m.set(r.head_sha, ids);
+  }
+  return m;
+}
+
+export async function verifyPayloads(client, cfg, repo, recs, altSuccessRunIds = null) {
   const verdicts = new Map();
   for (const rec of recs) {
-    // per_page is explicit: this endpoint defaults to 30 jobs, and a truncated
-    // list would hide a PRESENT delivery step, which then reads as a rename and
-    // stops the whole audit at exit 2 for a cause that is not the real one.
-    const jobs = await client.gh(
-      `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/jobs?per_page=100`,
-    );
-
-    // "Could not read the jobs" and "read them, the step is gone" are different
-    // facts with different repairs, and they used to collapse into the rename
-    // message below: __missing produced steps=[], so a 404 told the operator to
-    // update SQS_STEP. Both still FAIL — a run whose steps cannot be read is
-    // never evidence of a delivery — but the message has to name its own cause.
-    if (!jobs || jobs.__missing) {
-      throw new Error(
-        `${repo}: run ${rec.run_id} concluded success but its jobs could not be read ` +
-          '(404 or empty body) — delivery cannot be verified, so this is UNKNOWN rather ' +
-          'than delivered. A run past its retention window is the usual cause; narrow ' +
-          'the window with --since.',
-      );
+    const base = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}`;
+    let verdict = await probeSqsStep(client, cfg, repo, `${base}/jobs`, `run ${rec.run_id}`);
+    // Only when the winner says nothing was sent is a sibling success worth an
+    // API call — so the extra cost is bounded by the payload_missing count (2 in
+    // guard's 90-day window), not by the delivered count (~1054).
+    if (verdict === 'not_sent') {
+      for (const id of altSuccessRunIds?.get(rec.number) || []) {
+        if (id === rec.run_id) continue;
+        if (
+          (await probeSqsStep(
+            client,
+            cfg,
+            repo,
+            `/repos/${cfg.owner}/${repo}/actions/runs/${id}/jobs`,
+            `run ${id}`,
+          )) === 'sent'
+        ) {
+          rec.sent_by_run_id = id;
+          verdict = 'sent';
+          break;
+        }
+      }
     }
-
-    const list = jobs.jobs || [];
-    // per_page=100 raises the ceiling; it does not remove it. Assert against the
-    // server's own count rather than assuming one page is always enough, because
-    // the failure is silent in the direction that matters (a present step read
-    // as absent).
-    if (typeof jobs.total_count === 'number' && jobs.total_count > list.length) {
-      throw new Error(
-        `${repo}: run ${rec.run_id} reports ${jobs.total_count} jobs but only ${list.length} ` +
-          'were returned — the job list is truncated, so a present delivery step could read ' +
-          'as absent. This endpoint needs pagination.',
-      );
-    }
-
-    const steps = list.flatMap((j) => j.steps || []);
-    const step = steps.find((s) => s.name === SQS_STEP);
-    if (!step) {
-      // Absence is NOT treated as delivered. A name probe that silently answers
-      // "fine" when it finds nothing is the same fail-open shape as the bug it
-      // is fixing, so this stops the audit at exit 2 UNKNOWN instead. The name
-      // held for all 1000 successful runs in guard's auditable window, so this
-      // fires on a future rename of the reusable's step — a real change that a
-      // human must reflect here, not a per-run oddity to shrug off.
-      throw new Error(
-        `${repo}: run ${rec.run_id} concluded success but has no step named "${SQS_STEP}" — ` +
-          'the reusable\'s step names have changed and delivery can no longer be verified. ' +
-          'Update SQS_STEP rather than trusting the run conclusion.',
-      );
-    }
-    verdicts.set(rec.run_id, step.conclusion === 'success' ? 'sent' : 'not_sent');
+    verdicts.set(rec.run_id, verdict);
   }
   return verdicts;
+}
+
+// Three different ways an ALREADY-DELIVERED payload can hide behind a row whose
+// conclusion is not `success`, all of which end with that PR on the REPLAY list
+// and a second copy of its metrics in the prod queue; consumer-side idempotency
+// is not established (ENG-5789), and replaying is the one error direction that
+// writes. This function closes all three, because they are one class:
+//
+//   1. The run's OWN `Send metrics to SQS` step succeeded and the job failed
+//      afterwards. The send is the last authored step, but harden-runner,
+//      configure-aws-credentials and checkout all register post-job cleanup that
+//      runs after it and can fail the job — and a cancellation lands the same
+//      way. So a `failure`/`cancelled` conclusion does not imply nothing was
+//      sent, and this branch never read the steps to find out.
+//   2. A PRIOR ATTEMPT of the same run succeeded. A re-run REPLACES the
+//      runs-list row rather than adding one, so that success is invisible to
+//      every ranking rule dedupeByHead could apply.
+//   3. A SIBLING run on the same head succeeded — handled in verifyPayloads,
+//      which is the same class approached from the delivered side.
+//
+// Measured before writing (1): across all 101 non-success leaderboard-metrics
+// runs guard has, ZERO carry a successful SQS step — every one dies at `Set up
+// job`, `Checkout reusable workflow scripts`, or `Configure AWS credentials`,
+// i.e. strictly before the send. So this is latent, not live. It is fixed anyway
+// because the two other members of the same class are, and because the failure
+// is silent and writes to prod.
+//
+// Cost is bounded by what would be REPLAYED, not by population: one jobs call
+// per failed record, plus attempt probes only for records past attempt 1 (guard:
+// 5 of 1537 runs, 2 of them non-success).
+export async function recoverHiddenDeliveries(client, cfg, repo, classes) {
+  for (const key of ['failed', 'skipped_anomaly']) {
+    const kept = [];
+    for (const rec of classes[key]) {
+      let moved = false;
+
+      // (1) The current run's own send, before spending anything on attempts.
+      // Two absences that look alike and must NOT be treated alike:
+      //   - jobs UNREADABLE -> probeSqsStep throws, which is right: an unreadable
+      //     current run must not silently become "nothing was sent, go replay it".
+      //   - jobs readable, SQS step absent -> requireStep:false answers
+      //     'not_sent'. This is the ordinary shape of a failed run (it died
+      //     before the send), not the rename signal, and making it fatal here
+      //     would exit 2 on every wide audit — 8 of 25 sampled guard failures die
+      //     at `Set up job`.
+      if (
+        (await probeSqsStep(
+          client,
+          cfg,
+          repo,
+          `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/jobs`,
+          `run ${rec.run_id} (conclusion ${rec.conclusion})`,
+          { requireStep: false },
+        )) === 'sent'
+      ) {
+        rec.sent_despite_conclusion = rec.conclusion;
+        classes.delivered.push(rec);
+        continue; // NOT kept, and no attempt walk: this head already delivered.
+      }
+
+      // (2) Descending: the LATEST successful attempt is the one whose payload
+      // verdict describes the final state of this head.
+      for (let n = (rec.run_attempt || 1) - 1; n >= 1 && !moved; n--) {
+        const path = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/attempts/${n}`;
+        const att = await client.gh(path);
+        // A reaped or unreadable ATTEMPT is not fatal here, unlike an unreadable
+        // current run: the current row was already read and classified, so the
+        // audit still has a verdict. Skipping leaves the existing `failed` —
+        // over-reporting, never a silent double-delivery.
+        if (!att || att.__missing || att.conclusion !== 'success') continue;
+        rec.recovered_attempt = n;
+        const verdict = await probeSqsStep(
+          client,
+          cfg,
+          repo,
+          `${path}/jobs`,
+          `run ${rec.run_id} attempt ${n}`,
+        );
+        if (verdict === 'sent') classes.delivered.push(rec);
+        else {
+          rec.payload = 'missing';
+          classes.payload_missing.push(rec);
+        }
+        moved = true;
+      }
+      if (!moved) kept.push(rec);
+    }
+    classes[key] = kept;
+  }
+  return classes;
+}
+
+// Which `delivered` records still need the payload probe. Extracted and exported
+// because the exclusion list is now TWO fields and the pair is easy to get wrong:
+// `recoverHiddenDeliveries` rescues a record by either route, and each stamps a
+// different field.
+//
+//   recovered_attempt      — rescued from a PRIOR attempt. Re-probing would read
+//                            the CURRENT (failed) run's jobs and demote it right
+//                            back, which is the bug the recover/verify ordering
+//                            exists to prevent.
+//   sent_despite_conclusion — rescued from the CURRENT run's own send. Re-probing
+//                            reads the same jobs list and returns the same
+//                            'sent', so it cannot demote — but it is a wasted
+//                            call, and leaving it in kept the comment above
+//                            false, which is how the next reader learns the wrong
+//                            rule.
+//
+// A record can never carry both: the current-run probe `continue`s before the
+// attempt walk.
+export function needsPayloadProbe(rec) {
+  return rec.recovered_attempt === undefined && rec.sent_despite_conclusion === undefined;
 }
 
 // Pure, so the demotion is testable without a network.
@@ -582,7 +869,14 @@ export function makeClient(token) {
     for (let attempt = 0; attempt < 4; attempt++) {
       let res;
       try {
-        res = await fetch(url, { headers });
+        // A hung socket has no timeout of its own: Node's fetch waits
+        // indefinitely, so one stalled connection out of ~880 calls parks the
+        // whole audit until the job's 6-hour ceiling kills it — reported as a
+        // timeout of the audit rather than of a request, with no partial result
+        // and nothing naming the cause. AbortSignal.timeout turns that into an
+        // AbortError, which the catch below already treats as a retryable
+        // transport failure, so a stall costs one retry instead of the run.
+        res = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
         state.calls++;
       } catch (e) {
         // A REJECTED fetch is a transport failure (dropped socket, DNS, TLS
@@ -711,6 +1005,14 @@ export const COMMIT_FILES_CAP = 300;
 export async function runsInRange(client, cfg, repo) {
   const base = `/repos/${cfg.owner}/${repo}/actions/workflows/${cfg.callerFile}/runs`;
   const out = [];
+  // The upper bound stays at NOW even under --until, deliberately asymmetric with
+  // the PR filter. A run is created moments AFTER its PR merges, so a PR merged
+  // at 23:59:59 on the day before `--until` has its run created on the excluded
+  // side of that boundary. Clamping runs to --until would drop it, and a PR whose
+  // run was dropped classifies as never_fired — onto the replay list, which
+  // writes. Over-fetching runs cannot produce the mirror error: the join is by
+  // head SHA against an already-bounded PR list, so a run with no PR in the
+  // window is simply never looked up.
   const stack = [[Date.parse(`${cfg.since}T00:00:00Z`), Date.now()]];
 
   while (stack.length) {
@@ -811,6 +1113,38 @@ export async function assertReadable(client, cfg, repo) {
   return meta;
 }
 
+// `assertReadable` proves the REPOSITORY is readable. It does not prove the
+// ACTIONS API is, and those are separate grants: `contents: read` plus
+// `pull-requests: read` without `actions: read` reads repo metadata and the
+// merged-PR list perfectly well.
+//
+// That combination is not hypothetical — in a caller workflow a `permissions:`
+// block is a CEILING, so a caller that grants two of the three scopes this
+// action documents produces exactly it.
+//
+// Why it has to fail closed HERE rather than be caught downstream: `ghPaged`
+// answers a 404 by breaking out of pagination and returning an EMPTY list, which
+// is byte-identical to "this repo has no runs". Every eligible PR then classifies
+// `never_fired` and lands on the replay list — the one direction that writes to
+// the prod queue. A 403 is already fail-closed (it is in RETRY_STATUS, so it
+// throws after 4 attempts), so this closes the 404 half.
+//
+// The probe is deliberately the REPO-LEVEL runs endpoint, not the
+// workflow-specific one `runsInRange` uses. A 404 from
+// `/actions/workflows/{file}/runs` is the legitimate "this repo has no caller"
+// answer and MUST stay non-fatal; a 404 from `/actions/runs` is "no Actions
+// access". Probing the wrong one of those two would abort every repo that simply
+// is not onboarded. Costs one call per repo.
+export async function assertActionsReadable(client, cfg, repo) {
+  const probe = await client.gh(`/repos/${cfg.owner}/${repo}/actions/runs?per_page=1`);
+  if (!probe || probe.__missing) {
+    throw new Error(
+      `${cfg.owner}/${repo}: the Actions API is not readable by this token (404 on /actions/runs) — refusing to audit it. Every run would read as absent and every merged PR as never_fired, which is a replay list built out of a missing permission. The token needs actions:read in addition to contents:read and pull-requests:read.`,
+    );
+  }
+  return probe;
+}
+
 // Exported for its tests: the ORDER of the two probes in here is the whole
 // correctness property, and it is not observable from any caller's return value —
 // a dropped subject and a repo that legitimately has no caller produce the same
@@ -868,9 +1202,20 @@ export async function resolveFleet(client, cfg) {
 // is when the repo opted into the metrics program at all, not when it last
 // changed which copy of the reusable it calls. `hasCaller` still does a content
 // probe, because there the question is a different one: is this repo a subject
-// today. The residual risk of the path definition is a repo that carried an
-// unrelated workflow at this exact path before onboarding, which would date it
-// too early; no repo in the fleet does, and the file name makes it implausible.
+// today.
+//
+// MEASURED, rather than asserted, across all eight repos carrying the caller
+// (guard, caeruleus, vespasian, public-workflows, nerva, brutus, titus, julius):
+// for every one of them the OLDEST commit touching this path already contained a
+// `uses:` line pointing at a leaderboard reusable. So the residual risk of the
+// path definition — a repo that carried an unrelated workflow at this exact path
+// before onboarding, dating it too early — has zero instances in the fleet.
+//
+// The same measurement quantifies the cost of the content-based alternative, and
+// it is worse than the guard-only case above: FIVE of the eight first-callers
+// reference `praetorian-inc/.github/.github/workflows/leaderboard-metrics.yml`,
+// the pre-migration location, not `cfg.reusable`. Keying the boundary on the
+// current reusable's path would therefore mis-date five of eight repos, not one.
 //
 // Second residual, measured and deliberately NOT repaired: on a true merge commit
 // the file-introducing commit keeps the date it had on the feature branch, which
@@ -941,12 +1286,24 @@ export async function onboardedAt(client, cfg, repo) {
     );
     const entry = files.find((f) => f.filename === cfg.callerPath);
     if (entry?.status === 'renamed' && entry.previous_filename) {
+      // The remediation is TWO runs partitioned at the rename date, and it says
+      // so with both bounds. Naming only `--caller-path` was worse than naming
+      // nothing: the old filename has no runs after the rename, so a single
+      // re-run over the whole window reports every post-rename PR as never_fired
+      // and puts already-delivered PRs on the replay list. Guidance that is
+      // wrong in the writing direction is followed exactly once.
+      const cut = ymd(
+        Date.parse(earliest.commit?.committer?.date || earliest.commit?.author?.date),
+      );
       throw new Error(
         `${repo}: the caller at ${cfg.callerPath} arrived by RENAME in ${earliest.sha.slice(0, 8)} ` +
           `from ${entry.previous_filename}. Onboarding would date to the rename and runs under ` +
           'the old workflow file would be invisible, so earlier PRs would be excused as ' +
-          `pre_onboarding — a false clean. Re-run with --caller-path ${entry.previous_filename} ` +
-          'to cover the earlier period.',
+          'pre_onboarding — a false clean. Audit the two periods separately: ' +
+          `(1) --caller-path ${entry.previous_filename} --since ${cfg.since} --until ${cut}, then ` +
+          `(2) --since ${cut} with the current caller path. Do NOT re-run (1) without --until: ` +
+          'the old filename has no runs after the rename, so every later PR would come back ' +
+          'never_fired and land on the replay list.',
       );
     }
   }
@@ -956,6 +1313,7 @@ export async function onboardedAt(client, cfg, repo) {
 
 async function auditRepo(client, cfg, repo) {
   const sinceTs = Date.parse(`${cfg.since}T00:00:00Z`);
+  const untilTs = cfg.until ? Date.parse(`${cfg.until}T00:00:00Z`) : null;
 
   // `pulls` is a plain list endpoint and is NOT subject to the 1000-result cap
   // that bites the runs endpoint (guard returned all 1419). Sorted by
@@ -967,17 +1325,84 @@ async function auditRepo(client, cfg, repo) {
       null,
       (last) => Date.parse(last.updated_at) < sinceTs,
     )
-  ).filter((p) => p.merged_at && Date.parse(p.merged_at) >= sinceTs);
+  ).filter((p) => {
+    if (!p.merged_at) return false;
+    const ts = Date.parse(p.merged_at);
+    // Upper bound is EXCLUSIVE at midnight UTC, so `--until 2026-06-10` means
+    // "everything merged before 2026-06-10", and `--since A --until B` followed
+    // by `--since B` partitions the population with no PR in both halves and
+    // none in neither. An inclusive bound would double-count the boundary day,
+    // which for the rename remediation means auditing the same PRs under two
+    // different caller paths and getting two different verdicts for them.
+    if (untilTs !== null && ts >= untilTs) return false;
+    return ts >= sinceTs;
+  });
 
   const runs = await runsInRange(client, cfg, repo);
   const onboarded = await onboardedAt(client, cfg, repo);
   const classes = classify(prs, dedupeByHead(runs), onboarded ? Date.parse(onboarded) : null);
+  // Recover BEFORE the payload probe, not after: a record rescued from a prior
+  // attempt joins `delivered` or `payload_missing` with its verdict already
+  // determined by the attempt it was rescued from, so running it through
+  // verifyPayloads again would re-probe the CURRENT (failed) run and demote it
+  // straight back. Ordering is the whole correctness of this pair.
+  await recoverHiddenDeliveries(client, cfg, repo, classes);
+  const alt = new Map();
+  {
+    // pr.number -> every successful run id for that head, so verifyPayloads can
+    // fall back to a sibling success. Built here because `prs` and `runs` are
+    // both in scope; classify's contract stays head-SHA-only.
+    const succ = successRunIdsByHead(runs);
+    for (const pr of prs) {
+      const ids = succ.get(pr.head.sha);
+      if (ids && ids.length > 1) alt.set(pr.number, ids);
+    }
+  }
   // Only the successful runs need the payload probe: every other class already
   // knows it did not deliver, so there is nothing to demote.
-  applyPayloadVerdicts(classes, await verifyPayloads(client, cfg, repo, classes.delivered));
+  applyPayloadVerdicts(
+    classes,
+    await verifyPayloads(client, cfg, repo, classes.delivered.filter(needsPayloadProbe), alt),
+  );
   const caller = await hasCaller(client, cfg, repo);
 
   return { repo, onboarded, has_caller: caller, merged_prs: prs.length, classes };
+}
+
+// The classes this audit deliberately does NOT decide, phrased for a reader.
+// Shared by BOTH report branches on purpose: round 6 fixed the omission of
+// `pre_onboarding` in the clean sentence only, which left the identical hole on
+// the gaps branch — a fleet where repo A has gaps and repo B is clean-but-29-
+// pre_onboarding prints A's table and never mentions B's 29 at all. One
+// undecided class fell out of one branch; the same class fell out of the other.
+// Building both from the same totals-driven list is what stops a class added
+// later from falling out of either.
+export function undecidedCaveats(totals) {
+  const out = [];
+  if (totals.in_flight) {
+    out.push(
+      `**${totals.in_flight}** are not yet decided either way — the delivery is still ` +
+        'running, or the PR merged too recently for its run to exist yet, so re-run the ' +
+        'audit once they settle',
+    );
+  }
+  if (totals.pre_onboarding) {
+    out.push(
+      `**${totals.pre_onboarding}** merged before this repo had a caller, so no ` +
+        'delivery was ever expected and they are not gaps — but they did NOT deliver, and ' +
+        'only a backfill will score them',
+    );
+  }
+  if (totals.unverifiable) {
+    out.push(
+      `**${totals.unverifiable}** merged more than ${RUN_HISTORY_DAYS} days ago and ` +
+        'have no workflow-run record — GitHub reaps run history, so "no run" out there is ' +
+        'not evidence either way. These are NOT replayable on this report: a replay would ' +
+        're-deliver anything that did succeed. Decide them from the consumer table, not from ' +
+        'the Actions API, or narrow the window',
+    );
+  }
+  return out;
 }
 
 export function renderMarkdown(report, cfg) {
@@ -985,7 +1410,11 @@ export function renderMarkdown(report, cfg) {
   L.push('## Leaderboard delivery audit');
   L.push('');
   L.push(
-    `Window \`${report.since}\` → now. ` +
+    // The header must state the bound it actually used. Printing "→ now" under
+    // --until would describe a window wider than the one audited, and a reader
+    // comparing two partitioned runs of the rename remediation has no other way
+    // to tell which half they are holding.
+    `Window \`${report.since}\` → ${report.until ? `\`${report.until}\` (exclusive)` : 'now'}. ` +
       `Merged PRs examined: **${report.totals.merged_prs}**. ` +
       `Delivered: **${report.totals.delivered}** — each one verified to have actually ` +
       'enqueued a payload, not merely to have a successful run.',
@@ -1005,21 +1434,7 @@ export function renderMarkdown(report, cfg) {
     //
     // Built from the totals rather than written as prose per case, so a class
     // added later cannot silently fall out of the sentence again.
-    const caveats = [];
-    if (report.totals.in_flight) {
-      caveats.push(
-        `**${report.totals.in_flight}** are not yet decided either way — the delivery is still ` +
-          'running, or the PR merged too recently for its run to exist yet, so re-run the ' +
-          'audit once they settle',
-      );
-    }
-    if (report.totals.pre_onboarding) {
-      caveats.push(
-        `**${report.totals.pre_onboarding}** merged before this repo had a caller, so no ` +
-          'delivery was ever expected and they are not gaps — but they did NOT deliver, and ' +
-          'only a backfill will score them',
-      );
-    }
+    const caveats = undecidedCaveats(report.totals);
     if (caveats.length) {
       L.push(
         `No gaps among the PRs this audit can decide. Of **${report.totals.merged_prs}** ` +
@@ -1036,6 +1451,22 @@ export function renderMarkdown(report, cfg) {
       'produced no `CodeCommit` row, so its author is missing score for it.',
   );
   L.push('');
+  {
+    // The undecided classes belong on THIS branch too. Without this, a repo that
+    // is clean apart from an undecided class is absent from `repos_with_gaps`,
+    // so nothing about it reaches the report the moment any OTHER repo has a
+    // gap — the reader sees a gap list and reasonably concludes it is the whole
+    // story. Fleet-wide counts, which is why they are labelled as such: the
+    // per-repo tables below break the same classes out for gap repos.
+    const caveats = undecidedCaveats(report.totals);
+    if (caveats.length) {
+      L.push(
+        `Fleet-wide, and separate from the gaps below, of **${report.totals.merged_prs}** ` +
+          `merged PR(s) this audit did not decide: ${caveats.join('; and ')}.`,
+      );
+      L.push('');
+    }
+  }
   for (const g of report.repos_with_gaps) {
     const r = report.repos.find((x) => x.repo === g.repo);
     L.push(`### \`${g.repo}\``);
@@ -1062,7 +1493,29 @@ export function renderMarkdown(report, cfg) {
     if (g.in_flight) {
       L.push(`| not yet decided (not a gap, not replayed) | ${g.in_flight} |`);
     }
+    if (g.unverifiable) {
+      L.push(`| undecidable, run record reaped (not a gap, not replayed) | ${g.unverifiable} |`);
+    }
     L.push('');
+    if (g.unverifiable) {
+      // Deliberately NOT in the replay list and NOT a gap: the run record aged
+      // out, so "no run" is not evidence of no delivery, and replaying would
+      // re-deliver whatever did succeed. Unlike in_flight this never resolves on
+      // its own, so the report has to hand over the PR numbers — otherwise the
+      // only trace of the undecided set is a bare count nobody can act on.
+      L.push(
+        `**${g.unverifiable} PR(s) merged more than ${RUN_HISTORY_DAYS} days ago with no ` +
+          'workflow-run record.** GitHub reaps run history, so the Actions API cannot tell a ' +
+          'delivery that never fired from one whose record was deleted. Do NOT replay them on ' +
+          'the strength of this report — check the consumer table for their `CodeCommit` rows, ' +
+          'or narrow `--since` so the window sits inside the retained history.',
+      );
+      L.push('');
+      L.push(
+        `Undecidable PRs (${g.unverifiable}): ${g.unverifiable_prs.map((n) => `#${n}`).join(', ')}`,
+      );
+      L.push('');
+    }
     if (g.payload_missing) {
       // Split out from the replay list on purpose. These PRs ran, succeeded, and
       // enqueued nothing because the author did not resolve, so the repair is a
@@ -1146,6 +1599,7 @@ export function buildReport(results, cfg, apiCalls) {
   );
   return {
     since: cfg.since,
+    until: cfg.until,
     mode: cfg.selfAudit ? 'self' : 'fleet',
     fleet_size: results.length,
     api_calls: apiCalls,
@@ -1158,6 +1612,7 @@ export function buildReport(results, cfg, apiCalls) {
       pre_onboarding: sum((r) => r.classes.pre_onboarding.length),
       in_flight: sum((r) => r.classes.in_flight.length),
       payload_missing: sum((r) => r.classes.payload_missing.length),
+      unverifiable: sum((r) => r.classes.unverifiable.length),
     },
     repos_with_gaps: gaps.map((r) => ({
       repo: r.repo,
@@ -1167,9 +1622,13 @@ export function buildReport(results, cfg, apiCalls) {
       pre_onboarding: r.classes.pre_onboarding.length,
       in_flight: r.classes.in_flight.length,
       payload_missing: r.classes.payload_missing.length,
+      unverifiable: r.classes.unverifiable.length,
       // Carried as numbers, not folded into `replay`: this list is what a human
       // must fix in ENGINEER_EMAIL_MAP before any replay of them is productive.
       payload_missing_prs: r.classes.payload_missing.map((p) => p.number).sort((a, b) => a - b),
+      // Same reasoning, opposite remediation: these need a consumer-side lookup,
+      // and a replay of them would re-deliver whatever already succeeded.
+      unverifiable_prs: r.classes.unverifiable.map((p) => p.number).sort((a, b) => a - b),
       replay: replayList(r.classes),
     })),
     repos: results,
@@ -1210,8 +1669,13 @@ async function main() {
 
   // Prove every subject is readable BEFORE auditing any of it, so an unreadable
   // repo fails as UNKNOWN instead of producing a clean report over a repo whose
-  // every endpoint answered 404.
-  for (const repo of fleet) await assertReadable(client, cfg, repo);
+  // every endpoint answered 404. BOTH probes, because they cover different
+  // grants and only one of them is implied by the other's success — see
+  // assertActionsReadable.
+  for (const repo of fleet) {
+    await assertReadable(client, cfg, repo);
+    await assertActionsReadable(client, cfg, repo);
+  }
 
   const results = [];
   for (const repo of fleet) results.push(await auditRepo(client, cfg, repo));
@@ -1226,13 +1690,14 @@ async function main() {
     `mode=${report.mode} repos=${fleet.length} merged=${t.merged_prs} delivered=${t.delivered} ` +
       `FAILED=${t.failed} NEVER_FIRED=${t.never_fired} skipped_anomaly=${t.skipped_anomaly} ` +
       `payload_missing=${t.payload_missing} ` +
-      `pre_onboarding=${t.pre_onboarding} in_flight=${t.in_flight} api_calls=${report.api_calls}`,
+      `pre_onboarding=${t.pre_onboarding} in_flight=${t.in_flight} ` +
+      `unverifiable=${t.unverifiable} api_calls=${report.api_calls}`,
   );
   for (const g of report.repos_with_gaps) {
     console.log(
       `  GAP ${g.repo}: failed=${g.failed} never_fired=${g.never_fired} ` +
         `skipped_anomaly=${g.skipped_anomaly} payload_missing=${g.payload_missing} ` +
-        `replay=${g.replay.length} PRs`,
+        `unverifiable=${g.unverifiable} replay=${g.replay.length} PRs`,
     );
   }
 
