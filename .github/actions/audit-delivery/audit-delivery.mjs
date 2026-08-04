@@ -551,11 +551,23 @@ export function classify(
         .filter((p) => p.head.sha === sha)
         .map((p) => `#${p.number}`)
         .join(', ');
+      // The remediation is MANUAL ATTRIBUTION, and it says so instead of naming
+      // the narrowing that used to be here. Narrowing --since until only one of
+      // the colliders is in range does not clear this repo: it moves the other
+      // collider OUTSIDE the window, where the guard immediately below fires on
+      // the same precondition this one did (a run exists on the shared SHA) and
+      // says narrowing cannot fix it. Measured by following the old advice — step
+      // one threw "narrow --since", step two threw "narrowing cannot fix this" —
+      // so the operator was sent in a circle while a real gap sat behind it.
+      // Guidance that is wrong in the writing direction is followed exactly once,
+      // and this file already says so about the rename message below.
       throw new Error(
         `${nums} share head_sha ${sha.slice(0, 8)} — delivery is joined by head SHA, so one ` +
           "PR's successful run would be credited to the other and a real gap would read as " +
-          'delivered. Audit these PRs individually (narrow --since so only one is in range) ' +
-          'before trusting this repo.',
+          `delivered. Attribute the runs on ${sha.slice(0, 8)} to their PRs by hand before ` +
+          'trusting this repo. Narrowing --since to isolate one of them does NOT settle it: ' +
+          'that only moves the other outside the window, where it is still credited and this ' +
+          'audit refuses again for the same reason.',
       );
     }
   }
@@ -1341,7 +1353,33 @@ export function makeClient(token) {
 
   // Paginate by Link header rather than by "did I get a full page", which
   // silently stops one page early whenever the last page is exactly per_page.
-  async function ghPaged(path, pluck, stopWhen) {
+  // `identity` is REQUIRED and is the row's key. It used to be inferred from the
+  // row's shape — `it.id ?? it.number ?? it.sha` — and that guess is wrong for
+  // exactly one of the five call sites, in the false-clean direction. On a
+  // single-commit page a file's `sha` is the BLOB hash, i.e. its CONTENT, so two
+  // files with identical bytes in one commit collided and the second was dropped
+  // and counted as a benign `dupes++`. When the dropped row is the caller
+  // workflow itself, onboardedAt's rename probe below cannot find it, reads "not
+  // a rename", dates onboarding to the rename commit and excuses every earlier
+  // PR as pre_onboarding — a false clean, and one that depends on nothing but
+  // the order two files happen to appear in. Measured: same blob with the caller
+  // SECOND returned a clean onboarding date, caller FIRST threw, and distinct
+  // blobs threw in both orders.
+  //
+  // So the fix is the boundary, not the one site: a shape guess that is right
+  // four times out of five is a trap for the sixth caller, who inherits whichever
+  // field happens to exist. Declaring the key makes the commits site's `sha` —
+  // where a commit SHA genuinely IS the row identity — read as a deliberate
+  // choice rather than as the same coincidence. Fail CLOSED on a missing
+  // declaration: an undeclared key throws, which surfaces as exit 2 /
+  // `status=unknown`, never as a quietly shorter list.
+  async function ghPaged(path, pluck, { identity, stopWhen } = {}) {
+    if (typeof identity !== 'function') {
+      throw new Error(
+        `ghPaged(${path}): an explicit \`identity\` function is required — the row key ` +
+          'must be declared by the caller, never inferred from the row shape.',
+      );
+    }
     let url = path;
     const items = [];
     const seen = new Set();
@@ -1366,7 +1404,27 @@ export function makeClient(token) {
       // closed-PR fetch in auditRepo for why insertion is the benign direction
       // and what the residual is.
       for (const it of batch) {
-        const id = it?.id ?? it?.number ?? it?.sha ?? null;
+        // A row whose declared key is absent is PUSHED THROUGH undeduped rather
+        // than dropped or thrown on. Dropping is the false-clean direction at the
+        // walks that CARRY the gaps — drop a closed-PR row and that merged PR is
+        // never audited, so its missing delivery is never reported; drop the
+        // caller's row from a commit's file list and a rename goes undetected —
+        // and every current call site's key (`id`, `number`, `filename`, a commit
+        // `sha`) is mandatory in the API's own schema, so a nullish key means the
+        // response is not the shape we think it is, and keeping the row preserves
+        // the evidence for the assertions downstream.
+        //
+        // The residual runs the other way, and only at runsInRange: there,
+        // dropping would UNDERSTATE `got.length` and trip `got.length < total`
+        // into a refusal (noisy, but fail-closed), whereas keeping a keyless row
+        // that the mutating list served twice counts it twice and can mask a
+        // truncation of exactly that size — `got.length > total` is tolerated as
+        // ordinary insertion two paragraphs above, so nothing else catches it.
+        // Reaching it needs all three at once: a runs response violating its own
+        // schema, that row re-served under the cursor, and a matching shortfall.
+        // Not worth a per-call-site policy; recorded so the next reader does not
+        // read the paragraph above as "keeping is safe everywhere".
+        const id = identity(it) ?? null;
         if (id !== null) {
           if (seen.has(id)) {
             state.dupes++;
@@ -1494,6 +1552,7 @@ export async function runsInRange(client, cfg, repo) {
     const got = await client.ghPaged(
       `${base}?per_page=100&created=${encodeURIComponent(range)}`,
       (x) => x.workflow_runs || [],
+      { identity: (r) => r.id },
     );
     // Only a SHORTFALL is the danger. `total` comes from a per_page=1 probe
     // taken moments before this fetch, and the last slice's range ends at
@@ -1657,6 +1716,8 @@ export async function resolveFleet(client, cfg) {
     // behind the cursor instead.
     const repos = await client.ghPaged(
       `/orgs/${cfg.owner}/repos?per_page=100&type=all&sort=created&direction=asc`,
+      undefined,
+      { identity: (r) => r.id },
     );
     names = repos.filter((r) => !r.archived && !r.disabled).map((r) => r.name);
   }
@@ -1759,6 +1820,11 @@ export async function resolveFleet(client, cfg) {
 export async function onboardedAt(client, cfg, repo) {
   const commits = await client.ghPaged(
     `/repos/${cfg.owner}/${repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=100`,
+    undefined,
+    // A COMMIT sha is the row identity here, unlike the blob `sha` on the
+    // single-commit file page below. Declared rather than inherited precisely so
+    // the two cannot be confused again.
+    { identity: (c) => c.sha },
   );
   if (!commits.length) return null;
   const dates = commits
@@ -1805,6 +1871,12 @@ export async function onboardedAt(client, cfg, repo) {
     const files = await client.ghPaged(
       `/repos/${cfg.owner}/${repo}/commits/${earliest.sha}`,
       (body) => body?.files || [],
+      // FILENAME, not `sha`: on this endpoint `sha` is the blob hash, so two
+      // identical files collide and the loser is dropped — and the row this probe
+      // needs is the caller workflow. A path appears at most once in one commit's
+      // file list (a rename appears once, as the new path), so the filename is the
+      // row identity.
+      { identity: (f) => f.filename },
     );
     const entry = files.find((f) => f.filename === cfg.callerPath);
     if (entry?.status === 'renamed' && entry.previous_filename) {
@@ -1897,6 +1969,8 @@ export async function auditRepo(client, cfg, repo) {
   // boundary-coverage note below, which the old early stop is what made partial.
   const fetched = await client.ghPaged(
     `/repos/${cfg.owner}/${repo}/pulls?state=closed&per_page=100&sort=created&direction=asc`,
+    undefined,
+    { identity: (p) => p.number },
   );
   const inWindow = (p) => {
     if (!p.merged_at) return false;
@@ -2436,9 +2510,30 @@ async function main() {
     );
   }
 
-  // 0 = clean, 1 = gaps found, 2 = the detector itself could not run. Keeping
-  // "found something" distinct from "broke" is the whole point: a caller that
-  // treats any non-zero exit as a gap would raise an issue on a rate-limit.
+  // 0 = clean, 1 = gaps found, 2 = the detector itself could not run, 3 = no gaps
+  // but some records are UNDECIDED. Keeping "found something" distinct from
+  // "broke" is the whole point: a caller that treats any non-zero exit as a gap
+  // would raise an issue on a rate-limit.
+  //
+  // 3 exists because `in_flight` and `unverifiable` are deliberately not gap
+  // conditions (see buildReport) and that is right — an unconcluded run is not a
+  // gap — but "not a gap" is not "clean", and collapsing the two put the only
+  // machine-readable signal in the false-clean direction: measured, an audit whose
+  // ONLY records were in_flight, or unverifiable, or both, exited 0 and the action
+  // published `status=clean has_gaps=false gap_count=0`. The markdown report was
+  // honest the whole time (undecidedCaveats prints "not yet decided either way"),
+  // so the human artifact said undecided while the output a workflow branches on
+  // said clean — and this action's own docs instruct callers to branch on `status`.
+  // A detector may answer "yes", "no", or "I do not know yet"; it may not answer
+  // "no" when it means the third.
+  //
+  // Gaps still DOMINATE: a repo with both a real gap and an in-flight PR exits 1,
+  // because the gap is the actionable finding and demoting it to "undecided" would
+  // lose it. And this is NOT reported as exit 2 / `status=unknown`, which means
+  // "the detector could not run, its outputs are unreliable" and is bound to
+  // `has_gaps` being unwritten — an audit that completed and decided every record
+  // it could is not a broken run, and conflating them would make one in-flight PR
+  // look like infrastructure failure.
   //
   // exitCode, never process.exit(): stdout is a PIPE under the Actions runner,
   // and Node writes to a pipe asynchronously, so process.exit() terminates
@@ -2448,7 +2543,8 @@ async function main() {
   // exactly the evidence that explains the exit code. Assigning exitCode lets
   // main() return and the process exit naturally once the queue drains. The
   // JSON/markdown reports were never at risk (writeFileSync is synchronous).
-  process.exitCode = report.repos_with_gaps.length ? 1 : 0;
+  const undecided = t.in_flight + t.unverifiable;
+  process.exitCode = report.repos_with_gaps.length ? 1 : undecided ? 3 : 0;
 }
 
 // Only run when executed directly, so the unit tests can import the pure parts.

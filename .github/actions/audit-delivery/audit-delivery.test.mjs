@@ -2171,7 +2171,10 @@ test('the script sets process.exitCode and never calls process.exit', async () =
   );
   // And the replacement is actually present, so this cannot pass by the calls
   // simply having been deleted.
-  assert.match(src, /process\.exitCode = report\.repos_with_gaps\.length \? 1 : 0;/);
+  assert.match(
+    src,
+    /process\.exitCode = report\.repos_with_gaps\.length \? 1 : undecided \? 3 : 0;/,
+  );
   assert.match(src, /process\.exitCode = 2;/);
 });
 
@@ -4599,7 +4602,10 @@ test('ghPaged: a Link URL containing a comma still paginates', async () => {
       if (!p) throw new Error(`unexpected url ${url}`);
       return { status: 200, ok: true, headers: new Headers({ link: p.link }), json: async () => p.items };
     },
-    () => makeClient('t').ghPaged('https://api.github.com/x?ids=1,2&page=1'),
+    () =>
+      makeClient('t').ghPaged('https://api.github.com/x?ids=1,2&page=1', undefined, {
+        identity: (x) => x.id,
+      }),
   );
   assert.deepEqual(
     got.map((x) => x.id),
@@ -4625,7 +4631,7 @@ test('ghPaged: a row served twice across pages is counted ONCE', async () => {
       const p = pages[i++];
       return { status: 200, ok: true, headers: new Headers({ link: p.link }), json: async () => p.items };
     },
-    () => client.ghPaged('https://api.github.com/y?page=1'),
+    () => client.ghPaged('https://api.github.com/y?page=1', undefined, { identity: (x) => x.id }),
   );
   assert.deepEqual(got.map((x) => x.id), [1, 2, 3]);
   assert.equal(client.state.dupes, 1, 'the duplicate must be COUNTED, not silently absorbed');
@@ -4746,10 +4752,16 @@ test('auditRepo: the closed-PR walk has NO early stop — the whole history is r
   );
   const pulls = calls.find((a) => String(a[0]).includes('/pulls?'));
   assert.ok(pulls, 'auditRepo must fetch closed PRs');
+  // Pinned on `stopWhen` SPECIFICALLY, not on the argument count. Round 14 gave
+  // this call site a required `identity`, so "passes no options at all" stopped
+  // being the property and would now fail for a reason that has nothing to do with
+  // early stopping — an assertion that reds on an unrelated change stops being
+  // read. The hazard was never "an option is present", it is "a stop condition is
+  // present", which is what this now says.
   assert.equal(
-    pulls.length,
-    1,
-    `the closed-PR walk must pass no options — an early stop truncates the ` +
+    pulls[2]?.stopWhen,
+    undefined,
+    `the closed-PR walk must pass NO stopWhen — an early stop truncates the ` +
       `head-SHA collision guard. Got: ${JSON.stringify(pulls.slice(1))}`,
   );
 });
@@ -4925,4 +4937,333 @@ test('shq: single-quote wrapping survives a quote in the value', () => {
     const out = execFileSync('/bin/sh', ['-c', `printf '%s' ${shq(raw)}`], { encoding: 'utf8' });
     assert.equal(out, raw, `shq must round-trip ${JSON.stringify(raw)} through sh`);
   }
+});
+
+// ── Round 14: the row-identity contract, and "not a gap" vs "clean" ──────────
+//
+// Three defects with one shape between them: each was a place where the script
+// answered a question it had not actually decided. ghPaged GUESSED the row key
+// (`it?.id ?? it?.number ?? it?.sha`), which is right at four call sites and
+// silently wrong at the fifth, where `sha` is a BLOB hash; the exit code
+// collapsed "undecided" into `status=clean`; and the collision refusal promised
+// a remediation that provably cannot clear the repo.
+//
+// Every test below is written so the PRE-FIX code fails it. That is the point:
+// the earlier `commitsClient` stub supplies its own `ghPaged`, so no existing
+// test could see a dedupe defect inside the real one. These use the REAL
+// ghPaged through a stubbed `fetch`.
+
+const paged = (rows, { link = '' } = {}) => ({
+  status: 200,
+  ok: true,
+  headers: new Headers(link ? { link } : {}),
+  json: async () => rows,
+});
+
+test('ghPaged: an undeclared identity FAILS CLOSED, before any request is made', async () => {
+  // Fail closed rather than fall back to a guess. An undeclared key throws, which
+  // surfaces as exit 2 / status=unknown — loud. The alternative that shipped was
+  // a fallback chain, whose failure mode is a quietly SHORTER list, i.e. a false
+  // clean. `calls` is asserted because the throw must precede the network: a
+  // guard that fires after the first page has already been fetched and deduped
+  // has not prevented anything.
+  let calls = 0;
+  const client = makeClient('t');
+  await withFetch(
+    async () => {
+      calls++;
+      return paged([{ id: 1 }]);
+    },
+    async () => {
+      await assert.rejects(
+        () => client.ghPaged('/repos/o/r/x'),
+        /an explicit `identity` function is required/,
+      );
+      // Also rejected: a truthy non-function, which a caller reaching for the old
+      // positional third argument would supply by accident.
+      await assert.rejects(() => client.ghPaged('/repos/o/r/x', undefined, { identity: 'id' }), {
+        message: /identity` function is required/,
+      });
+    },
+  );
+  assert.equal(calls, 0, 'the identity guard must refuse before the first fetch');
+  assert.equal(client.state.calls, 0);
+});
+
+test('ghPaged: the DECLARED key dedupes — a colliding `id` does not', async () => {
+  // The discriminating fixture: `id` is identical across both rows while the
+  // declared key differs. Pre-fix, `it?.id` won the fallback chain and the second
+  // row was dropped as a dupe; post-fix the declaration governs and both survive.
+  const client = makeClient('t');
+  const rows = [
+    { id: 7, filename: 'a.yml' },
+    { id: 7, filename: 'b.yml' },
+  ];
+  const got = await withFetch(
+    async () => paged(rows),
+    () => client.ghPaged('/repos/o/r/commits/abc', undefined, { identity: (f) => f.filename }),
+  );
+  assert.deepEqual(
+    got.map((r) => r.filename),
+    ['a.yml', 'b.yml'],
+  );
+  assert.equal(client.state.dupes, 0);
+
+  // And the converse, so this cannot pass by the dedupe having been deleted
+  // outright: with `id` DECLARED, the same two rows collapse to one.
+  const c2 = makeClient('t');
+  const collapsed = await withFetch(
+    async () => paged(rows),
+    () => c2.ghPaged('/repos/o/r/commits/abc', undefined, { identity: (r) => r.id }),
+  );
+  assert.equal(collapsed.length, 1);
+  assert.equal(c2.state.dupes, 1);
+});
+
+test('ghPaged: a row whose declared key is ABSENT is kept, not dropped', async () => {
+  // Direction matters. Every current call site's key is mandatory in the API's own
+  // schema, so a nullish key means the response is not the shape we think it is —
+  // and the safe answer there is to keep the row, because dropping it shortens the
+  // list, and a shorter list is the false-clean direction the shortfall assertions
+  // downstream exist to catch. Two keyless rows are kept as two.
+  const client = makeClient('t');
+  const got = await withFetch(
+    async () => paged([{ filename: 'a.yml' }, {}, {}]),
+    () => client.ghPaged('/repos/o/r/commits/abc', undefined, { identity: (f) => f.filename }),
+  );
+  assert.equal(got.length, 3);
+  assert.equal(client.state.dupes, 0);
+});
+
+// The C3 matrix. onboardedAt's rename probe reads the single-commit file page,
+// where `sha` is the BLOB hash — so pre-fix, a caller workflow whose bytes matched
+// another file in the same commit collided with it and the loser was dropped and
+// counted as a benign `dupes++`. With the caller as the loser, the probe cannot
+// find its own row, reads "not a rename", dates onboarding to the rename commit
+// and excuses every earlier PR as pre_onboarding: a false clean that depends on
+// nothing but the order two files happen to appear in.
+//
+// All four cells are asserted rather than just the failing one. The two
+// distinct-blob cells are the CONTROL that proves the fixture reaches the guard at
+// all, and the same-blob/caller-first cell is why this was never caught: it threw
+// correctly, so the defect was invisible to any fixture that did not also order
+// the rows the other way.
+const RENAME_CFG = {
+  owner: 'praetorian-inc',
+  callerPath: '.github/workflows/leaderboard-metrics.yml',
+  since: '2026-01-01',
+};
+
+const renameProbe = async ({ sameBlob, callerSecond }) => {
+  const BLOB = 'b'.repeat(40);
+  const decoy = { filename: 'docs/decoy.md', sha: BLOB, status: 'added' };
+  const caller = {
+    filename: RENAME_CFG.callerPath,
+    sha: sameBlob ? BLOB : 'c'.repeat(40),
+    status: 'renamed',
+    previous_filename: '.github/workflows/old-metrics.yml',
+  };
+  const client = makeClient('t');
+  const files = callerSecond ? [decoy, caller] : [caller, decoy];
+  return withFetch(
+    async (url) => {
+      const u = String(url);
+      if (u.includes('/commits?path=')) {
+        return paged([{ sha: 'a'.repeat(40), commit: { committer: { date: '2026-03-01T00:00:00Z' } } }]);
+      }
+      if (/\/commits\/a{40}$/.test(u)) return paged({ files });
+      throw new Error(`unexpected url ${u}`);
+    },
+    async () => {
+      try {
+        return { threw: false, value: await onboardedAt(client, RENAME_CFG, 'guard'), client };
+      } catch (e) {
+        return { threw: true, message: e.message, client };
+      }
+    },
+  );
+};
+
+test('onboardedAt: a rename is caught even when the caller shares a BLOB with another file', async () => {
+  const r = await renameProbe({ sameBlob: true, callerSecond: true });
+  assert.equal(
+    r.threw,
+    true,
+    `identical bytes must not hide the rename. Got onboarded=${r.value} — the pre-fix ` +
+      'blob-SHA dedupe dropped the caller row and dated onboarding to the rename commit.',
+  );
+  assert.match(r.message, /arrived by RENAME/);
+  assert.match(r.message, /old-metrics\.yml/);
+  // The caller row was never treated as a duplicate of the decoy.
+  assert.equal(r.client.state.dupes, 0);
+});
+
+test('onboardedAt: the rename verdict does not depend on FILE ORDER', async () => {
+  // The pre-fix defect was order-dependent, so order is what this pins: all four
+  // cells must reach the same verdict.
+  for (const sameBlob of [true, false]) {
+    for (const callerSecond of [true, false]) {
+      const r = await renameProbe({ sameBlob, callerSecond });
+      assert.equal(
+        r.threw,
+        true,
+        `sameBlob=${sameBlob} callerSecond=${callerSecond} must throw; got onboarded=${r.value}`,
+      );
+      assert.equal(r.client.state.dupes, 0, `sameBlob=${sameBlob} callerSecond=${callerSecond}`);
+    }
+  }
+});
+
+// ── The exit-code contract: 3 = ran, no gaps, records UNDECIDED ──────────────
+//
+// The expression lives in main(), which is not exported and cannot run without a
+// network, so it is EXTRACTED from the shipped source and evaluated. That is
+// stronger than the source-text pin in the "never calls process.exit" test above:
+// that one proves the line reads a certain way, this one proves the line computes
+// the right number, against reports built by the real buildReport.
+// The extraction is deliberately loose about EVERYTHING except which statement it
+// found, and that is the hard-won part. A first cut anchored the expression as
+// `process\.exitCode = (report\.repos_with_gaps[^;]+);$` and sentinelled that the
+// `undecided` expression mentioned both class names. Every mutant aimed at these
+// two lines then failed to MATCH — a trailing `// MUTANT` comment defeats the `$`,
+// and reordering the ternary defeats the leading anchor — so the extractor threw at
+// module load, the tests below never registered, and three real defects looked like
+// "invalid mutant" instead of like the kills they are. An extractor that only works
+// on the correct source cannot testify about the incorrect source, which is the
+// only thing it is for. So: match the ASSIGNMENT (excluding the two literal
+// `process.exitCode = 2` sites by requiring the expression to mention this
+// contract's own inputs), tolerate anything after the `;`, and assert only that a
+// region was found — never what it contains. What it must contain is the tests'
+// job, the same lesson the run-body extractor above records.
+const EXIT_CODE_OF = (() => {
+  const src = readFileSync(join(HERE, 'audit-delivery.mjs'), 'utf8');
+  const und = /^ *const undecided = ([^;]+);/m.exec(src);
+  const rc = /^ *process\.exitCode = ((?=[^;]*(?:repos_with_gaps|undecided))[^;]+);/m.exec(src);
+  if (!und || !rc) {
+    throw new Error(
+      'could not extract the exit-code expression from audit-delivery.mjs — if it was ' +
+        'refactored, update this extractor; do NOT delete these tests, or the ' +
+        'undecided-vs-clean distinction goes unexercised',
+    );
+  }
+  return new Function('report', 't', `const undecided = ${und[1]}; return (${rc[1]});`);
+})();
+
+const EMPTY_CLASSES = {
+  delivered: [],
+  failed: [],
+  never_fired: [],
+  skipped_anomaly: [],
+  payload_missing: [],
+  pre_onboarding: [],
+  in_flight: [],
+  unverifiable: [],
+};
+const REC = { pr: 42, number: 42, head_sha: 'd'.repeat(40), merged_at: '2026-03-02T00:00:00Z' };
+const rcFor = (over) => {
+  const report = buildReport(
+    [{ repo: 'guard', merged_prs: 1, classes: { ...EMPTY_CLASSES, ...over } }],
+    { since: '2026-01-01', until: null },
+    8,
+  );
+  return { rc: EXIT_CODE_OF(report, report.totals), report };
+};
+
+test('exit code: an audit whose only records are UNDECIDED exits 3, not 0', () => {
+  // Measured pre-fix: each of these three exited 0 and the action published
+  // `status=clean has_gaps=false gap_count=0`, while the markdown report said
+  // "not yet decided either way". A detector may answer yes, no, or not-yet; it
+  // may not answer "no" when it means the third.
+  for (const [label, over] of [
+    ['in_flight only', { in_flight: [REC] }],
+    ['unverifiable only', { unverifiable: [{ ...REC, unverifiable_reason: UNVERIFIABLE_REAPED }] }],
+    ['both', { in_flight: [REC], unverifiable: [{ ...REC }] }],
+  ]) {
+    const { rc, report } = rcFor(over);
+    // The precondition, asserted so a green cannot come from the report having
+    // silently become a gap report: these classes are NOT gap conditions.
+    assert.equal(report.repos_with_gaps.length, 0, `${label}: must not be a gap`);
+    assert.equal(rc, 3, `${label}: undecided must exit 3`);
+  }
+});
+
+test('exit code: a real gap still DOMINATES an undecided record', () => {
+  // Demoting a confirmed gap to "undecided" would lose the actionable finding, so
+  // the gap arm wins. Asserted with BOTH present, which is the only fixture where
+  // the two arms disagree.
+  const { rc, report } = rcFor({ never_fired: [REC], in_flight: [REC] });
+  assert.equal(report.repos_with_gaps.length, 1);
+  assert.equal(rc, 1);
+});
+
+test('exit code: a genuinely decided, gapless audit still exits 0', () => {
+  // The control. Without it, "always return 3" passes every cell above.
+  const { rc, report } = rcFor({ delivered: [REC] });
+  assert.equal(report.repos_with_gaps.length, 0);
+  assert.equal(report.totals.in_flight + report.totals.unverifiable, 0);
+  assert.equal(rc, 0);
+});
+
+test('action contract: rc=3 publishes status=undecided, and has_gaps IS written', () => {
+  const r = runAction({ exitCode: 3 });
+  assert.equal(r.code, 0, `an undecided audit ran fine and must not fail the step: ${r.stderr}`);
+  assert.equal(r.outputs.status, 'undecided');
+  // Literally true — no gap was found — and written, which is what keeps the
+  // "unwritten iff unknown" invariant the has-gaps output documents intact.
+  assert.equal(r.outputs.has_gaps, 'false');
+  assert.equal(r.outputs.gap_count, '0');
+});
+
+test('action contract: has_gaps CANNOT distinguish undecided from clean — status can', () => {
+  // Demonstrated rather than asserted in prose, because this is exactly how an
+  // undecided audit passes for a clean one: the two runs are indistinguishable on
+  // `has_gaps`, and differ only on `status`. This is the test that would red if a
+  // future arm "simplified" `undecided` back into `clean`.
+  const clean = runAction({ exitCode: 0 });
+  const undecided = runAction({ exitCode: 3 });
+  assert.equal(clean.outputs.has_gaps, undecided.outputs.has_gaps);
+  assert.equal(clean.outputs.gap_count, undecided.outputs.gap_count);
+  assert.notEqual(clean.outputs.status, undecided.outputs.status);
+});
+
+test('classify: the collision refusal does not promise that narrowing --since settles it', () => {
+  // C2. The message used to tell the operator to narrow the window. Following that
+  // advice does not clear the repo: narrowing moves the collider OUTSIDE the
+  // window, where the out-of-window arm refuses for the same reason — the run on
+  // the shared SHA is still credited to whichever PR remains. So the refusal
+  // relocates and never lifts, and "guidance that is wrong in the writing
+  // direction is followed exactly once".
+  const SHA = 'e'.repeat(40);
+  const inWindow = pr(100, '2026-03-10T00:00:00Z', SHA);
+  const collider = pr(101, '2026-02-01T00:00:00Z', SHA);
+  const byHead = dedupeByHead([run(1, SHA, 'success', '2026-03-10T00:00:10Z')]);
+  const onboarded = Date.parse('2026-01-01T00:00:00Z');
+  const now = Date.parse('2026-04-01T00:00:00Z');
+
+  // Step 1: both in window. The message must say narrowing does NOT settle it...
+  assert.throws(() => classify([inWindow, collider], byHead, onboarded, now), /share head_sha/);
+  assert.throws(
+    () => classify([inWindow, collider], byHead, onboarded, now),
+    /Narrowing --since to isolate one of them does NOT settle it/,
+  );
+  // ...and must not still be advising it. Pinned as an absence, since the defect
+  // was the advice being PRESENT.
+  assert.throws(
+    () => classify([inWindow, collider], byHead, onboarded, now),
+    (e) => {
+      assert.doesNotMatch(
+        e.message,
+        /narrow --since to a range containing only one/,
+        'the message must not advise a remediation that cannot clear the repo',
+      );
+      return true;
+    },
+  );
+
+  // Step 2: take the old advice — narrow so only #100 is in window. Still refuses.
+  // This is what makes step 1's wording load-bearing rather than cosmetic.
+  assert.throws(
+    () => classify([inWindow], byHead, onboarded, now, [collider]),
+    /Narrowing the window cannot fix this/,
+  );
 });

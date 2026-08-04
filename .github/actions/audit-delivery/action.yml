@@ -69,7 +69,15 @@ inputs:
 outputs:
   status:
     description: >-
-      Tri-state audit result: `clean` | `gaps` | `unknown`. ALWAYS written, on
+      FOUR-valued audit result: `clean` | `gaps` | `undecided` | `unknown`.
+      `undecided` means the audit ran and found no gap, but at least one record is
+      `in_flight` (a run that has not concluded) or `unverifiable` (delivery that
+      cannot be decided — reaped logs, an unreadable attempt). It is deliberately
+      NOT folded into `clean`: those classes are correctly excluded from the GAP
+      verdict, but "not a gap" is not "no problem", and a consumer that reads
+      undecided as clean stands the repo down while delivery is still unknown —
+      the false-clean class this action exists to detect. Treat `undecided` as
+      "come back later", not as a pass. ALWAYS written, on
       every exit path — including the three pre-detector guards, which exit
       before the `case "$rc"` block is ever reached and so must, and do, write it
       themselves. Branch on THIS, not on `has-gaps`. On an unknown path
@@ -92,6 +100,9 @@ outputs:
       negative as clean: `has-gaps != 'true'` is TRUE for '', so a could-not-run
       is indistinguishable from a clean audit through this output alone. Gate on
       `status` first; consult `has-gaps` only once `status` is `gaps` or `clean`.
+      On `undecided` this is `"false"` — truthfully, since no gap was found — so
+      reading it INSTEAD of `status` is exactly how an undecided audit passes for a
+      clean one. That is the same trap as the empty string, with a written value.
     value: ${{ steps.audit.outputs.has_gaps }}
   gap-count:
     description: Number of affected PRs across all audited repos (0 when has-gaps is false)
@@ -267,6 +278,24 @@ runs:
         case "$rc" in
           0)
             echo "status=clean" >> "$GITHUB_OUTPUT"
+            echo "has_gaps=false" >> "$GITHUB_OUTPUT"
+            echo "gap_count=0" >> "$GITHUB_OUTPUT"
+            ;;
+          3)
+            # No gaps, but at least one record is UNDECIDED (in_flight or
+            # unverifiable). Distinct from `clean` because the detector did not
+            # decide those records, and distinct from `unknown` because it DID
+            # run: the step succeeds, the reports are complete and trustworthy,
+            # and `has_gaps` is written — so the "unwritten iff unknown"
+            # invariant the has-gaps output documents still holds exactly.
+            #
+            # `has_gaps=false` is literally true (no gap was found) and
+            # `gap_count=0` counts gaps, not undecided records; the undecided
+            # counts live in the JSON/markdown reports, which this arm publishes
+            # like any other successful run. A caller must gate on `status`, and
+            # `undecided` is the value that says "do not stand this repo down
+            # yet" — re-run once the in-flight runs conclude.
+            echo "status=undecided" >> "$GITHUB_OUTPUT"
             echo "has_gaps=false" >> "$GITHUB_OUTPUT"
             echo "gap_count=0" >> "$GITHUB_OUTPUT"
             ;;
