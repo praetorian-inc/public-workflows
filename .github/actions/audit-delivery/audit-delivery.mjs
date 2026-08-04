@@ -310,8 +310,89 @@ export function parseArgs(argv, now = Date.now()) {
       `--backfill-caller must be a workflow filename (letters, digits, . _ - and a .yml/.yaml suffix), got ${out.backfillCaller}`,
     );
   }
+
+  // The REPOSITORY IDENTIFIERS, which the block above should have covered and
+  // did not. It says "both are validated, not just the one a reviewer happened to
+  // cite" and then validates the two workflow filenames while leaving the owner
+  // and repo names — which sit in the SAME URLs, one path segment to the left —
+  // completely unchecked. `--repo` was shape-checked only
+  // (`/^[^/\s]+\/[^/\s]+$/`: one slash, no whitespace) and `--repos` entries were
+  // trimmed and nothing more. Measured, all four ACCEPTED before this:
+  //
+  //   --repo o/n;id   --repo 'o/n$(id)'   --repo 'o/n`id`'   --repo o/n&&id
+  //
+  // Only whitespace was rejected, and no payload needs whitespace. That value is
+  // then interpolated into the `gh workflow run --repo ${owner}/${repo}` command
+  // the report hands to a human mid-incident.
+  //
+  // The reachable direction is worse than the injection one, and it is a SILENT
+  // FALSE CLEAN. `#` and `?` do not need to reach a shell: they re-target the URL
+  // in the fetch layer, measured with the WHATWG parser —
+  //
+  //   /repos/o/guard#old/contents/.github/workflows/c.yml  ->  /repos/o/guard
+  //   /repos/o/n?x/pulls                                   ->  /repos/o/n
+  //   /repos/../x/pulls                                    ->  /x/pulls
+  //
+  // — so one entry of `--repos guard#old,caeruleus` collapses BOTH of its probes
+  // onto the repo metadata endpoint. `assertReadable` gets a 200 and passes;
+  // `hasCaller` gets the same 200, finds no `.content`, and answers `false`. The
+  // subject is dropped, `caeruleus` survives so the zero-fleet guard never fires,
+  // and the audit reports CLEAN on a fleet that never included the repo it was
+  // asked about. Reproduced: `["guard#old","caeruleus"]` -> fleet `["caeruleus"]`,
+  // and `guard?x` identically, against `["guard","caeruleus"]` -> both.
+  //
+  // That defeats `assertReadable`, whose entire purpose is that an explicitly
+  // named subject may not be silently dropped. A guard is not load-bearing if the
+  // value reaching it can make two different requests look like one.
+  //
+  // This is round 9's finding one variable over, for the third time in this file:
+  // that round fixed `--caller-path` traversal and its comment even says
+  // "rejecting `..` does nothing about `?` or `#`, which re-target the request" —
+  // about the path, while the repo name in the same URL went unvalidated. The
+  // pattern is now explicit: when a value is validated because it lands in a URL
+  // path, EVERY value in that path gets the same treatment in the same commit.
+  //
+  // Charsets are GitHub's own, so nothing legitimate is rejected: an owner is
+  // alphanumeric-plus-hyphen, max 39, not hyphen-initial; a repo name is
+  // alphanumeric plus `.`, `_`, `-`, max 100. `.` and `..` match that charset and
+  // are rejected by name, because they are the traversal segments.
+  const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+  if (!OWNER.test(out.owner)) {
+    throw new Error(
+      `owner must be a GitHub login (letters, digits, hyphens; max 39; no leading hyphen), got ${out.owner}`,
+    );
+  }
+  for (const name of out.repos ?? []) assertRepoName(name);
   return out;
 }
+
+// Exported because it is used on two populations with different trust levels and
+// the same failure direction: operator flags in parseArgs, and the names returned
+// by the org enumeration in resolveFleet. The API population should never fail
+// this — GitHub cannot mint a repo name outside its own charset — which is
+// exactly why it is checked there rather than assumed: if it ever does fail, the
+// audit must stop loudly (exit 2, `status=unknown`) instead of quietly walking a
+// re-targeted URL. Cost is one regex per repo.
+export const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
+export function assertRepoName(name) {
+  if (!REPO_NAME.test(name)) {
+    throw new Error(
+      `repository name must be letters, digits, . _ - (max 100), got ${JSON.stringify(name)} — ` +
+        'characters outside that set re-target the API request instead of failing, which drops ' +
+        'the subject from the fleet and reports clean',
+    );
+  }
+  if (name === '.' || name === '..') {
+    throw new Error(
+      `repository name may not be ${JSON.stringify(name)} — it matches the charset and traverses the API path`,
+    );
+  }
+}
+
+// Single-quote for a POSIX shell. Used on values that land inside a command the
+// report tells a HUMAN to paste, where the reader is responding to an alert and
+// is the least likely person to audit what they were handed.
+export const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
 export const FAILED = new Set([
   'failure',
@@ -1565,7 +1646,8 @@ export async function assertActionsReadable(client, cfg, repo) {
 // fleet list.
 export async function resolveFleet(client, cfg) {
   let names = cfg.repos;
-  if (!names) {
+  const discovered = !names;
+  if (discovered) {
     // Same immutable ordering as the closed-PR fetch, for the same reason and in
     // the same direction. This endpoint defaults to created DESC, so a repo
     // created mid-enumeration lands at position 1 and shifts a boundary row past
@@ -1577,7 +1659,24 @@ export async function resolveFleet(client, cfg) {
       `/orgs/${cfg.owner}/repos?per_page=100&type=all&sort=created&direction=asc`,
     );
     names = repos.filter((r) => !r.archived && !r.disabled).map((r) => r.name);
-  } else {
+  }
+
+  // ONE validation site, covering BOTH provenances, ahead of every request that
+  // embeds a name. A name outside GitHub's charset does not 404 — it RE-TARGETS
+  // the URL, and the symptom here is a repo quietly missing from the fleet,
+  // byte-indistinguishable from "not onboarded". If this ever throws the audit
+  // stops loudly at exit 2 / `status=unknown`, the only acceptable outcome for a
+  // detector that cannot trust its own subject list.
+  //
+  // Both branches, deliberately, and not because the org API might return a name
+  // GitHub itself forbids. Validating only the discovered branch would leave the
+  // EXPLICIT one trusting `parseArgs` to have run — true of the CLI path and of
+  // nothing else, and this function is exported. That is the same "one variable
+  // over" shape being fixed at the parse boundary: the guard has to sit where the
+  // value meets the URL, not at whichever entrance was audited first.
+  for (const name of names) assertRepoName(name);
+
+  if (!discovered) {
     // An explicitly named repo is a SUBJECT, and has to be proven readable
     // BEFORE the caller probe can drop it. `hasCaller` answers a repo-level 404
     // with `false`, which is byte-identical to "readable, but not onboarded" — so
@@ -1723,7 +1822,17 @@ export async function onboardedAt(client, cfg, repo) {
           `from ${entry.previous_filename}. Onboarding would date to the rename and runs under ` +
           'the old workflow file would be invisible, so earlier PRs would be excused as ' +
           'pre_onboarding — a false clean. Audit the two periods separately: ' +
-          `(1) --caller-path ${entry.previous_filename} --since ${cfg.since} --until ${cut}, then ` +
+          // QUOTED, because this is the one value in the sentence that comes from
+          // the AUDITED REPO rather than from this process: a git filename may
+          // contain `;`, `$(…)`, backticks and spaces, and the sentence it lands
+          // in is a two-step command the report tells an operator to run while
+          // responding to a false-clean alert. A rename FROM a hostile filename
+          // is a stored payload with a human as the interpreter. Quoting rather
+          // than validating, deliberately: the value is DATA here, and rejecting
+          // it would turn a weird-but-legitimate filename into a refusal to
+          // report the rename at all — which is the false clean this message
+          // exists to prevent.
+          `(1) --caller-path ${shq(entry.previous_filename)} --since ${cfg.since} --until ${cut}, then ` +
           `(2) --since ${cut} with the current caller path. Do NOT re-run (1) without --until: ` +
           'the old filename has no runs after the rename, so every later PR would come back ' +
           'never_fired and land on the replay list.',
