@@ -303,6 +303,22 @@ export const GRACE_MS = 15 * 60 * 1000;
 // shows 0 runs before 2026-06 because the REPO was created 2026-06-06.
 export const RUN_HISTORY_DAYS = 400;
 
+// Why a record is `unverifiable`. Carried ON THE RECORD and rendered from the
+// records present, rather than written once as prose, because the class started
+// with one cause and the report's paragraph said so — "merged more than 400 days
+// ago with no workflow-run record". Round 9 added a second cause, and a sentence
+// that names one cause for a class that has two is false for whichever half is
+// not named. Deriving the causes from the data means a third one added later
+// cannot make the paragraph wrong again.
+//
+// Each string completes "the Actions API cannot decide this delivery because …".
+export const UNVERIFIABLE_REAPED =
+  `merged more than ${RUN_HISTORY_DAYS} days ago and has no workflow-run record — ` +
+  'GitHub reaps run history, so "no run" out there is not evidence either way';
+export const UNVERIFIABLE_ATTEMPT_UNREADABLE =
+  'an earlier attempt of its run could not be read (404 or empty body), so whether ' +
+  'that attempt sent the payload is unknown';
+
 // Classification is pure so it can be unit-tested without touching the network.
 // `byHead` is the already-deduplicated head_sha -> run map. `now` is a parameter
 // so the grace window is testable against a fixed clock rather than by sleeping;
@@ -311,7 +327,33 @@ export const RUN_HISTORY_DAYS = 400;
 // classified — they only widen the collision guard below, which is blind to a
 // collision whose other half sits outside the window. Defaults to empty so every
 // existing caller and test keeps its current behaviour.
-export function classify(prs, byHead, onboardedTs, now = Date.now(), outsideWindow = []) {
+//
+// TWO clock anchors, not one, because the two age tests below want opposite ends
+// of the audit's own duration and each has a silent direction to avoid:
+//
+//   `fetchedAt` — when this repo's PR/run lists were READ. The grace test asks
+//     "could a run for this PR exist but not be indexed yet", and the evidence it
+//     reasons about is that snapshot, not the wall clock at classification time.
+//     A fleet audit is minutes to tens of minutes long (guard's wide run: ~10
+//     min), so a `now` read after the fetches ages every PR past a 15-minute
+//     grace it was inside of when the list was taken -> false never_fired ->
+//     replay -> a second write to prod.
+//   `now` — the CURRENT clock, for the run-history horizon. Here the conservative
+//     direction is the opposite one: an older anchor makes a PR look younger,
+//     which keeps it out of `unverifiable` and inside `never_fired`, i.e. back on
+//     the replay list. So this test wants the LATEST time available.
+//
+// Both asymmetries point the same way — never manufacture a gap — which is why
+// they are opposite ends. `fetchedAt` defaults to `now` so every existing caller
+// and test is unchanged.
+export function classify(
+  prs,
+  byHead,
+  onboardedTs,
+  now = Date.now(),
+  outsideWindow = [],
+  fetchedAt = now,
+) {
   // The whole join is head_sha -> run, and `dedupeByHead` collapses every run on
   // a SHA to one winner with success taking precedence. That is right for a
   // re-run of the same PR and wrong the moment two merged PRs share a commit,
@@ -460,7 +502,7 @@ export function classify(prs, byHead, onboardedTs, now = Date.now(), outsideWind
       // Conflating the two is what makes a naive count unactionable.
       if (onboardedTs && Date.parse(pr.merged_at) < onboardedTs) {
         classes.pre_onboarding.push(rec);
-      } else if (now - Date.parse(pr.merged_at) < GRACE_MS) {
+      } else if (fetchedAt - Date.parse(pr.merged_at) < GRACE_MS) {
         // The OTHER half of the in_flight problem, and the half the original
         // in_flight fix missed: that one covered "a run exists but has not
         // concluded", while this covers "the run row does not exist YET".
@@ -470,7 +512,13 @@ export function classify(prs, byHead, onboardedTs, now = Date.now(), outsideWind
         // a delivery that is about to happen on the replay list, which
         // double-delivers, and consumer-side idempotency is not established
         // (ENG-5789). Withholding is safe for the same reason as in_flight: the
-        // window counts back from now, so the next audit sees the settled truth.
+        // next audit reads a settled run list and decides it for real.
+        //
+        // Anchored on `fetchedAt`, NOT `now` — see the header. This used to read
+        // `now`, with a comment claiming "the window counts back from now, so a
+        // freshly merged PR is always in range". That is false as soon as the
+        // audit outlives the grace: the PR list is read first, and every minute
+        // spent on runs, onboarding and probes moves `now` away from it.
         classes.in_flight.push(rec);
       } else if (now - Date.parse(pr.merged_at) > RUN_HISTORY_DAYS * DAY) {
         // Beyond the run-history horizon, "no run row" is not evidence. Ordered
@@ -479,6 +527,7 @@ export function classify(prs, byHead, onboardedTs, now = Date.now(), outsideWind
         // verdict is still sound out here and is the more useful of the two.
         // Only a PR that WAS expected to deliver and has no queryable record
         // reaches this branch.
+        rec.unverifiable_reason = UNVERIFIABLE_REAPED;
         classes.unverifiable.push(rec);
       } else {
         classes.never_fired.push(rec);
@@ -610,8 +659,10 @@ export const SQS_STEP = 'Send metrics to SQS';
 // checks a current run. Duplicating it would let the two drift, and the
 // truncation and rename guards below are exactly the parts that must not.
 //
-// Returns 'sent' | 'not_sent'; throws when the answer is UNKNOWN, because a run
-// whose steps cannot be read is never evidence of a delivery.
+// Returns 'sent' | 'not_sent', or 'unknown' when the jobs cannot be read and the
+// caller passed unreadableIsFatal:false. It NEVER answers 'not_sent' for an
+// unreadable list: a run whose steps cannot be read is not evidence of a delivery,
+// and it is not evidence of the absence of one either.
 //
 // `requireStep` is what makes this reusable for a run that did NOT succeed. For a
 // SUCCESSFUL run, a missing step means the reusable was renamed and the whole
@@ -626,7 +677,27 @@ export const SQS_STEP = 'Send metrics to SQS';
 // ~1054 of those in a 90-day guard window against 181 failures, so the audit
 // exits 2 long before any replay list is published. The success path is the
 // rename detector; this flag does not weaken it.
-export async function probeSqsStep(client, cfg, repo, jobsPath, label, { requireStep = true } = {}) {
+// `unreadableIsFatal` is what makes the head-wide walk safe to widen. For the row
+// the audit must DECIDE, an unreadable jobs list has to stop everything: turning
+// it into "nothing was sent" is a replay instruction built on no evidence. But the
+// walk now also probes AUXILIARY evidence — sibling runs on the same head and
+// earlier attempts — and those are old by nature (guard's shared heads date from
+// the dual-trigger era), so their job lists are the ones GitHub reaps first. With
+// a fatal read, one reaped sibling would exit 2 on a whole fleet audit and produce
+// no report at all. Passing false answers 'unknown' instead, which the caller
+// turns into `unverifiable` for that ONE record: undecided, not replayed, and the
+// other repos still get audited.
+//
+// A rename and a truncated page still throw either way. Those are facts about the
+// probe itself being wrong, not about one record's history being unreadable.
+export async function probeSqsStep(
+  client,
+  cfg,
+  repo,
+  jobsPath,
+  label,
+  { requireStep = true, unreadableIsFatal = true } = {},
+) {
   // per_page is explicit: this endpoint defaults to 30 jobs, and a truncated
   // list would hide a PRESENT delivery step, which then reads as a rename and
   // stops the whole audit at exit 2 for a cause that is not the real one.
@@ -638,6 +709,7 @@ export async function probeSqsStep(client, cfg, repo, jobsPath, label, { require
   // update SQS_STEP. Both still FAIL — a run whose steps cannot be read is
   // never evidence of a delivery — but the message has to name its own cause.
   if (!jobs || jobs.__missing) {
+    if (!unreadableIsFatal) return 'unknown';
     throw new Error(
       `${repo}: ${label} — its jobs could not be read ` +
         '(404 or empty body), so delivery cannot be verified either way and this is ' +
@@ -683,203 +755,275 @@ export async function probeSqsStep(client, cfg, repo, jobsPath, label, { require
   return step.conclusion === 'success' ? 'sent' : 'not_sent';
 }
 
-// Successful run ids grouped by head SHA. Pure, and separate from dedupeByHead
-// because dedupeByHead answers "which single row represents this head" while
-// this answers "which runs for this head could have sent the payload" — and when
-// a head has more than one SUCCESSFUL run those are different questions. Picking
-// one success and probing only that one reports payload_missing for a head where
-// a sibling success did send: over-reporting rather than double-delivery, but
-// still a wrong verdict on a PR whose author DOES have their score.
-export function successRunIdsByHead(runs) {
-  const m = new Map();
+// pr.number -> EVERY runs-list row on that PR's head, newest first. Pure.
+//
+// Replaces `successRunIdsByHead`, which grouped only the SUCCESSFUL runs. That
+// was the wrong population for both probe paths, and in the silent direction: a
+// job can complete `Send metrics to SQS` and then die in post-job cleanup
+// (harden-runner, configure-aws-credentials and checkout all register post steps,
+// and a cancellation lands the same way), so a NON-success sibling is exactly as
+// capable of having delivered as a successful one. Filtering them out made the
+// probe blind to a delivery on the head it was asked about — and for the records
+// `recoverHiddenDeliveries` handles, every sibling is non-success BY
+// CONSTRUCTION, because dedupeByHead ranks success first, so a success on that
+// head would have won the ranking and the row would not be `failed` at all.
+//
+// Only heads with more than one row are returned: with a single row the caller's
+// own record already IS that row, so an entry would carry no information.
+export function headRunsByPr(prs, runs) {
+  const byHead = new Map();
   for (const r of runs) {
-    if (r.conclusion !== 'success') continue;
-    const ids = m.get(r.head_sha) || [];
-    ids.push(r.id);
-    m.set(r.head_sha, ids);
+    const list = byHead.get(r.head_sha) || [];
+    list.push({
+      id: r.id,
+      conclusion: r.conclusion,
+      run_attempt: typeof r.run_attempt === 'number' ? r.run_attempt : 1,
+      created_at: r.created_at,
+    });
+    byHead.set(r.head_sha, list);
   }
-  return m;
+  // Newest first, explicitly rather than trusting the endpoint's order: the walk
+  // below stops at the first send it finds, and "the newest run that sent" is the
+  // one an operator will go and read.
+  for (const list of byHead.values()) {
+    list.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  }
+  const out = new Map();
+  for (const pr of prs) {
+    const list = byHead.get(pr.head.sha);
+    if (list && list.length > 1) out.set(pr.number, list);
+  }
+  return out;
 }
 
-export async function verifyPayloads(client, cfg, repo, recs, altSuccessRunIds = null) {
+// Every place a delivery for ONE HEAD can hide, walked in cost order, shared by
+// both probe paths. `runs` is the caller's own run first, then its siblings on the
+// same head newest-first; each entry is `{ id, conclusion, run_attempt }`.
+//
+// The unit is the HEAD, not the row, because dedupeByHead keeps exactly one run
+// per head and the rows it discards are not interchangeable with the one it kept.
+// Within a run the unit is the ATTEMPT, and every attempt is probed regardless of
+// its own conclusion — for the same reason the row's own run is probed despite a
+// failed conclusion: a non-success conclusion is not evidence that nothing was
+// sent. Restricting either walk to successes was the same defect in two places.
+//
+// `requireStep` tracks the CONCLUSION of the run-or-attempt being probed, never
+// the call site. For a SUCCESSFUL one a missing send step means the reusable was
+// renamed and the whole audit must stop; for a non-success one it means the run
+// died before the send, which is ordinary. Hardcoding either answer keeps one of
+// those two properties and loses the other, so the flag is derived instead.
+//
+// Returns:
+//   sent             — the first send found: `{ run_id, attempt }`, attempt null
+//                      for the run's current state. null if nothing sent.
+//   ownLatestSuccess — the latest attempt OF THE CALLER'S OWN RUN that concluded
+//                      success and did not send. Own-run-only on purpose: see the
+//                      payload_missing branch in recoverHiddenDeliveries.
+//   unreadable       — some attempt record could not be read, so "nothing sent
+//                      here" is not a fact about this head. Reported alongside
+//                      `sent` rather than instead of it: a send that IS found
+//                      decides the head no matter what else was unreadable.
+async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
+  let ownLatestSuccess = null;
+  let unreadable = false;
+  for (const run of runs) {
+    const own = run.id === ownRunId;
+    const base = `/repos/${cfg.owner}/${repo}/actions/runs/${run.id}`;
+    const label = own
+      ? `run ${run.id} (conclusion ${run.conclusion})`
+      : `run ${run.id} (sibling on the same head, conclusion ${run.conclusion})`;
+    // Only the OWN run's unreadable jobs are fatal — see probeSqsStep.
+    const verdict = await probeSqsStep(client, cfg, repo, `${base}/jobs`, label, {
+      requireStep: run.conclusion === 'success',
+      unreadableIsFatal: own,
+    });
+    if (verdict === 'sent') {
+      return { sent: { run_id: run.id, attempt: null }, ownLatestSuccess, unreadable };
+    }
+    if (verdict === 'unknown') unreadable = true;
+    for (let n = (run.run_attempt || 1) - 1; n >= 1; n--) {
+      const path = `${base}/attempts/${n}`;
+      const att = await client.gh(path);
+      if (!att || att.__missing) {
+        // An unreadable attempt is NOT skipped over silently any more. It used to
+        // `continue` with a comment calling that "over-reporting, never a silent
+        // double-delivery" — false in the writing direction: leaving the record
+        // `failed` leaves it on the REPLAY list, and replaying is what writes to
+        // prod. The caller turns this into `unverifiable`, which replayList
+        // excludes.
+        unreadable = true;
+        continue;
+      }
+      const ok = att.conclusion === 'success';
+      // An attempt is auxiliary evidence on every run, the caller's own included:
+      // its ROW was already read and classified, so an unreadable attempt makes
+      // this head undecided rather than the audit unrunnable.
+      const av = await probeSqsStep(client, cfg, repo, `${path}/jobs`, `${label} attempt ${n}`, {
+        requireStep: ok,
+        unreadableIsFatal: false,
+      });
+      if (av === 'sent') {
+        return { sent: { run_id: run.id, attempt: n }, ownLatestSuccess, unreadable };
+      }
+      if (av === 'unknown') unreadable = true;
+      // `ownLatestSuccess` is set only on a POSITIVE not_sent, never merely
+      // because the attempt concluded success. The caller turns it into
+      // `payload_missing` — a definite "this PR's author has no score" claim —
+      // and a jobs list nobody could read is not evidence for a definite claim.
+      // Setting it before the probe (the first way I wrote this) would let one
+      // 404 manufacture that claim, which is the same error direction as the
+      // silent `continue` above.
+      if (av === 'not_sent' && ok && own && ownLatestSuccess === null) ownLatestSuccess = n;
+    }
+  }
+  return { sent: null, ownLatestSuccess, unreadable };
+}
+
+export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null) {
   const verdicts = new Map();
   for (const rec of recs) {
-    const base = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}`;
-    let verdict = await probeSqsStep(client, cfg, repo, `${base}/jobs`, `run ${rec.run_id}`);
-    // Only when the winner says nothing was sent is a sibling success worth an
-    // API call — so the extra cost is bounded by the payload_missing count (2 in
-    // guard's 90-day window), not by the delivered count (~1054).
-    if (verdict === 'not_sent') {
-      for (const id of altSuccessRunIds?.get(rec.number) || []) {
-        if (id === rec.run_id) continue;
-        if (
-          (await probeSqsStep(
-            client,
-            cfg,
-            repo,
-            `/repos/${cfg.owner}/${repo}/actions/runs/${id}/jobs`,
-            `run ${id}`,
-          )) === 'sent'
-        ) {
-          rec.sent_by_run_id = id;
-          verdict = 'sent';
-          break;
-        }
-      }
-    }
-    // Prior ATTEMPTS of this same run, the third hiding place and the one no
-    // branch covered. recoverHiddenDeliveries walks attempts only for rows whose
-    // conclusion is failed/skipped; a row that concluded SUCCESS never enters it
-    // and arrives here instead. So a run re-run to success whose re-run did not
-    // send, over an attempt 1 that succeeded and DID send, was demoted to
-    // payload_missing on the strength of the winning attempt alone — a false gap
-    // in the same direction as the sibling case, from the delivered side.
-    //
-    // Bounded by the payload_missing count (2 in guard's 90-day window), not by
-    // the delivered count, for the same reason the sibling walk is: it runs only
-    // after the winner has already said `not_sent`.
-    if (verdict === 'not_sent') {
-      for (let n = (rec.run_attempt || 1) - 1; n >= 1; n--) {
-        const path = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/attempts/${n}`;
-        const att = await client.gh(path);
-        // Same asymmetry as in recoverHiddenDeliveries: an unreadable attempt
-        // leaves the existing (replayable) verdict rather than inventing a
-        // delivery.
-        if (!att || att.__missing || att.conclusion !== 'success') continue;
-        if (
-          (await probeSqsStep(
-            client,
-            cfg,
-            repo,
-            `${path}/jobs`,
-            `run ${rec.run_id} attempt ${n}`,
-          )) === 'sent'
-        ) {
-          rec.sent_by_attempt = n;
-          verdict = 'sent';
-          break;
-        }
-      }
+    // The own run is probed FIRST and the walk returns on the first send, so the
+    // common case (a successful run that did send) still costs exactly one call
+    // per delivered record — this function's dominant cost, ~1054 on a 90-day
+    // guard window. Siblings and attempts are only reached once the winner has
+    // said `not_sent`, which bounds them by the payload_missing count (2).
+    const own = {
+      // Defaulted to `success`, NOT left undefined, because this function only
+      // ever receives `delivered` records and `requireStep` is derived from the
+      // conclusion: an absent field would silently answer "not a success", which
+      // turns the rename detector OFF for the ~1054-run population it exists to
+      // watch — a check that cannot fail. The default is also the conservative
+      // direction (requireStep true throws rather than shrugging).
+      conclusion: rec.conclusion === undefined ? 'success' : rec.conclusion,
+      id: rec.run_id,
+      run_attempt: rec.run_attempt || 1,
+    };
+    const siblings = (headRunIds?.get(rec.number) || []).filter((r) => r.id !== rec.run_id);
+    const { sent, unreadable } = await walkHeadForSend(
+      client,
+      cfg,
+      repo,
+      [own, ...siblings],
+      rec.run_id,
+    );
+    let verdict = 'not_sent';
+    if (sent) {
+      verdict = 'sent';
+      // The own run's own current state sending is the ORDINARY case and gets no
+      // stamp. Anything else is a rescue, and the field says which hiding place
+      // it came out of, because that is where an operator has to look.
+      if (sent.run_id !== rec.run_id) {
+        rec.sent_by_run_id = sent.run_id;
+        if (sent.attempt !== null) rec.sent_by_run_attempt = sent.attempt;
+      } else if (sent.attempt !== null) rec.sent_by_attempt = sent.attempt;
+    } else if (unreadable) {
+      // Nothing sent that could be READ. `not_sent` here would demote the record
+      // to payload_missing — a definite "this author has no score" claim built on
+      // an attempt nobody could read. `unverifiable` is the class for exactly that.
+      verdict = 'unverifiable';
+      rec.unverifiable_reason = UNVERIFIABLE_ATTEMPT_UNREADABLE;
     }
     verdicts.set(rec.run_id, verdict);
   }
   return verdicts;
 }
 
-// Three different ways an ALREADY-DELIVERED payload can hide behind a row whose
-// conclusion is not `success`, all of which end with that PR on the REPLAY list
-// and a second copy of its metrics in the prod queue; consumer-side idempotency
-// is not established (ENG-5789), and replaying is the one error direction that
-// writes. This function closes all three, because they are one class:
+// Every way an ALREADY-DELIVERED payload can hide behind a row whose conclusion
+// is not `success` — each of which ends with that PR on the REPLAY list and a
+// second copy of its metrics in the prod queue; consumer-side idempotency is not
+// established (ENG-5789), and replaying is the one error direction that writes.
+// They are one class, and the walk is one function (`walkHeadForSend`) so a place
+// closed on this side cannot stay open on the delivered side:
 //
-//   1. The run's OWN `Send metrics to SQS` step succeeded and the job failed
-//      afterwards. The send is the last authored step, but harden-runner,
-//      configure-aws-credentials and checkout all register post-job cleanup that
-//      runs after it and can fail the job — and a cancellation lands the same
-//      way. So a `failure`/`cancelled` conclusion does not imply nothing was
-//      sent, and this branch never read the steps to find out.
-//   2. A PRIOR ATTEMPT of the same run succeeded. A re-run REPLACES the
-//      runs-list row rather than adding one, so that success is invisible to
-//      every ranking rule dedupeByHead could apply.
-//   3. A SIBLING run on the same head succeeded — handled in verifyPayloads,
-//      which is the same class approached from the delivered side. That function
-//      also walks prior ATTEMPTS, because (2) below is gated on a non-success
-//      conclusion: a row that concluded SUCCESS having sent nothing never reaches
-//      this function at all, so its own earlier attempts have to be checked there.
+//   - The run's OWN `Send metrics to SQS` step succeeded and the job failed
+//     afterwards. The send is the last authored step, but harden-runner,
+//     configure-aws-credentials and checkout all register post-job cleanup that
+//     runs after it and can fail the job — and a cancellation lands the same way.
+//     So a `failure`/`cancelled` conclusion does not imply nothing was sent.
+//   - A PRIOR ATTEMPT of the same run sent. A re-run REPLACES the runs-list row
+//     rather than adding one, so that attempt is invisible to every ranking rule
+//     dedupeByHead could apply.
+//   - A SIBLING RUN on the same head sent. dedupeByHead keeps ONE row per head,
+//     and for the records that reach this function every discarded sibling is
+//     non-success by construction (a success would have won the ranking), which
+//     is precisely why filtering siblings to successes — as the old
+//     `successRunIdsByHead` did — left this open on both sides.
+//   - Any ATTEMPT of any of those, success or not, for the first reason above.
 //
-// Measured before writing (1): across all 101 non-success leaderboard-metrics
+// Not an enumeration to trust: the walk is head-wide and attempt-exhaustive, so a
+// hiding place is covered by the traversal rather than by appearing on this list.
+//
+// Measured on the first of them: across all 101 non-success leaderboard-metrics
 // runs guard has, ZERO carry a successful SQS step — every one dies at `Set up
 // job`, `Checkout reusable workflow scripts`, or `Configure AWS credentials`,
-// i.e. strictly before the send. So this is latent, not live. It is fixed anyway
-// because the two other members of the same class are, and because the failure
-// is silent and writes to prod.
+// i.e. strictly before the send. So it is latent, not live, and fixed anyway
+// because the failure is silent and writes to prod.
 //
-// Cost is bounded by what would be REPLAYED, not by population: one jobs call
-// per failed record, plus attempt probes only for records past attempt 1 (guard:
-// 5 of 1537 runs, 2 of them non-success).
-export async function recoverHiddenDeliveries(client, cfg, repo, classes) {
+// Cost is bounded by what would be REPLAYED, never by population: one jobs call
+// per record here, plus one per sibling on a shared head, plus attempt probes only
+// for runs past attempt 1 (guard: 5 of 1537 runs, 2 of them non-success).
+export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds = null) {
   for (const key of ['failed', 'skipped_anomaly']) {
     const kept = [];
     for (const rec of classes[key]) {
-      let moved = false;
-
-      // (1) The current run's own send, before spending anything on attempts.
-      // Two absences that look alike and must NOT be treated alike:
-      //   - jobs UNREADABLE -> probeSqsStep throws, which is right: an unreadable
-      //     current run must not silently become "nothing was sent, go replay it".
-      //   - jobs readable, SQS step absent -> requireStep:false answers
-      //     'not_sent'. This is the ordinary shape of a failed run (it died
-      //     before the send), not the rename signal, and making it fatal here
-      //     would exit 2 on every wide audit — 8 of 25 sampled guard failures die
-      //     at `Set up job`.
-      if (
-        (await probeSqsStep(
-          client,
-          cfg,
-          repo,
-          `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/jobs`,
-          `run ${rec.run_id} (conclusion ${rec.conclusion})`,
-          { requireStep: false },
-        )) === 'sent'
-      ) {
-        rec.sent_despite_conclusion = rec.conclusion;
+      const own = {
+        id: rec.run_id,
+        conclusion: rec.conclusion,
+        run_attempt: rec.run_attempt || 1,
+      };
+      const siblings = (headRunIds?.get(rec.number) || []).filter((r) => r.id !== rec.run_id);
+      const { sent, ownLatestSuccess, unreadable } = await walkHeadForSend(
+        client,
+        cfg,
+        repo,
+        [own, ...siblings],
+        rec.run_id,
+      );
+      if (sent) {
+        // Which hiding place it came out of, because that is what an operator has
+        // to open to check the claim. `needsPayloadProbe` keys on these fields, so
+        // every rescue route must stamp one of them.
+        if (sent.run_id === rec.run_id) {
+          if (sent.attempt === null) rec.sent_despite_conclusion = rec.conclusion;
+          else rec.recovered_attempt = sent.attempt;
+        } else {
+          rec.sent_by_run_id = sent.run_id;
+          if (sent.attempt !== null) rec.sent_by_run_attempt = sent.attempt;
+        }
         classes.delivered.push(rec);
-        continue; // NOT kept, and no attempt walk: this head already delivered.
-      }
-
-      // (2) Descending over EVERY successful attempt, not down to the first one.
-      // The question this audit answers is "was the payload ever delivered", and
-      // an earlier attempt's send is as real as a later one's — the consumer
-      // already has the message. Stopping at the latest successful attempt asked
-      // a different question ("what does the final state say") and answered this
-      // one wrongly whenever attempt 2 succeeded without sending while attempt 1
-      // succeeded AND sent: the record went to `payload_missing`, a FALSE gap
-      // pointing at a prod replay of a message already in the queue.
-      //
-      // The file already implemented the right rule one screen up and this branch
-      // contradicted it: verifyPayloads walks EVERY sibling success on the head
-      // rather than trusting the winner. Sibling runs and prior attempts are the
-      // same hiding place reached two ways, so they get the same exhaustive walk.
-      //
-      // Cost stays bounded by what would be replayed: attempts are only probed
-      // for records past attempt 1 (guard: 5 of 1537 runs, 2 of them non-success),
-      // and the extra probes here happen only when the latest success says
-      // nothing was sent.
-      let sentAttempt = null;
-      let latestSuccess = null;
-      for (let n = (rec.run_attempt || 1) - 1; n >= 1 && sentAttempt === null; n--) {
-        const path = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/attempts/${n}`;
-        const att = await client.gh(path);
-        // A reaped or unreadable ATTEMPT is not fatal here, unlike an unreadable
-        // current run: the current row was already read and classified, so the
-        // audit still has a verdict. Skipping leaves the existing `failed` —
-        // over-reporting, never a silent double-delivery.
-        if (!att || att.__missing || att.conclusion !== 'success') continue;
-        if (latestSuccess === null) latestSuccess = n;
-        const verdict = await probeSqsStep(
-          client,
-          cfg,
-          repo,
-          `${path}/jobs`,
-          `run ${rec.run_id} attempt ${n}`,
-        );
-        if (verdict === 'sent') sentAttempt = n;
-      }
-      if (sentAttempt !== null) {
-        rec.recovered_attempt = sentAttempt;
-        classes.delivered.push(rec);
-        moved = true;
-      } else if (latestSuccess !== null) {
-        // Every successful attempt was probed and none sent. Only now is
-        // payload_missing the honest verdict; it is stamped with the LATEST
-        // success because that is the attempt whose absence of a send an operator
-        // will go and look at.
-        rec.recovered_attempt = latestSuccess;
+      } else if (unreadable) {
+        // Nothing sent that could be READ. The old code `continue`d past the
+        // unreadable attempt and left the record `failed`, which its own comment
+        // called "over-reporting, never a silent double-delivery". Wrong in the
+        // writing direction: `failed` IS the replay list, and a replay writes.
+        // `unverifiable` is the existing class for "delivery cannot be decided",
+        // and replayList excludes it.
+        //
+        // Ordered BEFORE payload_missing, which is the reverse of how I first
+        // wrote it. The argument for the other order was "positive evidence
+        // outranks an unreadable one, or a 404 silences a real gap" — true about
+        // evidence, wrong about the CLAIM. payload_missing asserts this PR
+        // delivered nothing and sends an operator to edit ENGINEER_EMAIL_MAP and
+        // re-run, and the re-run writes to the prod queue. An unreadable sibling
+        // or attempt is a place the send could be hiding, so that assertion is
+        // not established. Undecided-with-a-reason loses no information: the
+        // report names the reason and points at `gh run list --commit <sha>`.
+        rec.unverifiable_reason = UNVERIFIABLE_ATTEMPT_UNREADABLE;
+        classes.unverifiable.push(rec);
+      } else if (ownLatestSuccess !== null) {
+        // Every piece of evidence on this head was READ, none of it a send, and
+        // an attempt of THIS row's run concluded success — only now is
+        // payload_missing honest. Stamped with the LATEST such attempt, because
+        // that is the one an operator will open.
+        //
+        // Own-run-only: a SIBLING that succeeded without sending is not evidence
+        // about this row's payload, so it cannot earn this class; such a record
+        // simply stays on the replay list, which is the reported direction rather
+        // than the silent one.
+        rec.recovered_attempt = ownLatestSuccess;
         rec.payload = 'missing';
         classes.payload_missing.push(rec);
-        moved = true;
-      }
-      if (!moved) kept.push(rec);
+      } else kept.push(rec);
     }
     classes[key] = kept;
   }
@@ -901,20 +1045,35 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes) {
 //                            call, and leaving it in kept the comment above
 //                            false, which is how the next reader learns the wrong
 //                            rule.
+//   sent_by_run_id         — rescued from a SIBLING run on the same head.
+//                            Re-probing reads THIS row's run, which is the failed
+//                            one that sent nothing, so it demotes a delivery that
+//                            was just proven — the same trap as the attempt case,
+//                            reached by the route added in round 9.
 //
-// A record can never carry both: the current-run probe `continue`s before the
-// attempt walk.
+// A record carries exactly one: `walkHeadForSend` returns on the first send it
+// finds, and each route stamps its own field.
 export function needsPayloadProbe(rec) {
-  return rec.recovered_attempt === undefined && rec.sent_despite_conclusion === undefined;
+  return (
+    rec.recovered_attempt === undefined &&
+    rec.sent_despite_conclusion === undefined &&
+    rec.sent_by_run_id === undefined
+  );
 }
 
 // Pure, so the demotion is testable without a network.
 export function applyPayloadVerdicts(classes, verdicts) {
   const kept = [];
   for (const rec of classes.delivered) {
-    if (verdicts.get(rec.run_id) === 'not_sent') {
+    const verdict = verdicts.get(rec.run_id);
+    if (verdict === 'not_sent') {
       rec.payload = 'missing';
       classes.payload_missing.push(rec);
+    } else if (verdict === 'unverifiable') {
+      // Not `delivered` (nothing readable sent) and not `payload_missing` (that
+      // asserts the author has no score, on the strength of an attempt nobody
+      // could read). Both of those are claims; this class is the absence of one.
+      classes.unverifiable.push(rec);
     } else kept.push(rec);
   }
   classes.delivered = kept;
@@ -1444,6 +1603,12 @@ export async function onboardedAt(client, cfg, repo) {
 // hands it one — and a pure classify() test passes whether or not this function
 // actually does.
 export async function auditRepo(client, cfg, repo) {
+  // Read BEFORE the first fetch, and used only for the in_flight grace window —
+  // see the two-anchor note on classify(). Per repo rather than per process
+  // because it dates THIS repo's PR snapshot, which is what the grace test reasons
+  // about; a process-wide start would be conservative too, just needlessly looser
+  // for repo #20 of a fleet.
+  const fetchedAt = Date.now();
   const sinceTs = Date.parse(`${cfg.since}T00:00:00Z`);
   const untilTs = cfg.until ? Date.parse(`${cfg.until}T00:00:00Z`) : null;
 
@@ -1504,29 +1669,31 @@ export async function auditRepo(client, cfg, repo) {
     onboarded ? Date.parse(onboarded) : null,
     Date.now(),
     outsideWindow,
+    fetchedAt,
   );
+  // pr.number -> every run on that PR's head. Built here because `prs` and `runs`
+  // are both in scope (classify's contract stays head-SHA-only), and built ONCE
+  // for both probe paths: they ask the same question from opposite sides, and the
+  // round-8 finding was one of them being fixed while the other was not.
+  const headRunIds = headRunsByPr(prs, runs);
   // Recover BEFORE the payload probe, not after: a record rescued from a prior
-  // attempt joins `delivered` or `payload_missing` with its verdict already
-  // determined by the attempt it was rescued from, so running it through
-  // verifyPayloads again would re-probe the CURRENT (failed) run and demote it
-  // straight back. Ordering is the whole correctness of this pair.
-  await recoverHiddenDeliveries(client, cfg, repo, classes);
-  const alt = new Map();
-  {
-    // pr.number -> every successful run id for that head, so verifyPayloads can
-    // fall back to a sibling success. Built here because `prs` and `runs` are
-    // both in scope; classify's contract stays head-SHA-only.
-    const succ = successRunIdsByHead(runs);
-    for (const pr of prs) {
-      const ids = succ.get(pr.head.sha);
-      if (ids && ids.length > 1) alt.set(pr.number, ids);
-    }
-  }
+  // attempt or a sibling run joins `delivered` or `payload_missing` with its
+  // verdict already determined by the run it was rescued from, so running it
+  // through verifyPayloads again would re-probe the CURRENT (failed) run and
+  // demote it straight back. Ordering is the whole correctness of this pair, and
+  // `needsPayloadProbe` is the other half of it.
+  await recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds);
   // Only the successful runs need the payload probe: every other class already
   // knows it did not deliver, so there is nothing to demote.
   applyPayloadVerdicts(
     classes,
-    await verifyPayloads(client, cfg, repo, classes.delivered.filter(needsPayloadProbe), alt),
+    await verifyPayloads(
+      client,
+      cfg,
+      repo,
+      classes.delivered.filter(needsPayloadProbe),
+      headRunIds,
+    ),
   );
   const caller = await hasCaller(client, cfg, repo);
 
@@ -1541,7 +1708,13 @@ export async function auditRepo(client, cfg, repo) {
 // undecided class fell out of one branch; the same class fell out of the other.
 // Building both from the same totals-driven list is what stops a class added
 // later from falling out of either.
-export function undecidedCaveats(totals) {
+//
+// `unverifiableReasons` is the distinct set of per-record reasons actually
+// present. Passing them rather than hardcoding the paragraph is what keeps the
+// `unverifiable` sentence true as the class grows a second and third cause;
+// defaults to empty so a caller that has none still gets a correct, if less
+// specific, sentence.
+export function undecidedCaveats(totals, unverifiableReasons = []) {
   const out = [];
   if (totals.in_flight) {
     out.push(
@@ -1558,15 +1731,23 @@ export function undecidedCaveats(totals) {
     );
   }
   if (totals.unverifiable) {
+    const because = unverifiableReasons.length
+      ? ` — ${unverifiableReasons.join('; or ')}`
+      : ' for want of a readable run record';
     out.push(
-      `**${totals.unverifiable}** merged more than ${RUN_HISTORY_DAYS} days ago and ` +
-        'have no workflow-run record — GitHub reaps run history, so "no run" out there is ' +
-        'not evidence either way. These are NOT replayable on this report: a replay would ' +
-        're-deliver anything that did succeed. Decide them from the consumer table, not from ' +
-        'the Actions API, or narrow the window',
+      `**${totals.unverifiable}** cannot be decided from the Actions API${because}. These ` +
+        'are NOT replayable on this report: a replay would re-deliver anything that did ' +
+        'succeed. Decide them from the consumer table, not from the Actions API, or narrow ' +
+        'the window',
     );
   }
   return out;
+}
+
+// The distinct `unverifiable` reasons across a set of records, in a stable order
+// so the report does not churn between runs.
+export function unverifiableReasons(recs) {
+  return [...new Set(recs.map((r) => r.unverifiable_reason).filter(Boolean))].sort();
 }
 
 export function renderMarkdown(report, cfg) {
@@ -1598,7 +1779,7 @@ export function renderMarkdown(report, cfg) {
     //
     // Built from the totals rather than written as prose per case, so a class
     // added later cannot silently fall out of the sentence again.
-    const caveats = undecidedCaveats(report.totals);
+    const caveats = undecidedCaveats(report.totals, report.unverifiable_reasons);
     if (caveats.length) {
       L.push(
         `No gaps among the PRs this audit can decide. Of **${report.totals.merged_prs}** ` +
@@ -1622,7 +1803,7 @@ export function renderMarkdown(report, cfg) {
     // gap — the reader sees a gap list and reasonably concludes it is the whole
     // story. Fleet-wide counts, which is why they are labelled as such: the
     // per-repo tables below break the same classes out for gap repos.
-    const caveats = undecidedCaveats(report.totals);
+    const caveats = undecidedCaveats(report.totals, report.unverifiable_reasons);
     if (caveats.length) {
       L.push(
         `Fleet-wide, and separate from the gaps below, of **${report.totals.merged_prs}** ` +
@@ -1658,7 +1839,11 @@ export function renderMarkdown(report, cfg) {
       L.push(`| not yet decided (not a gap, not replayed) | ${g.in_flight} |`);
     }
     if (g.unverifiable) {
-      L.push(`| undecidable, run record reaped (not a gap, not replayed) | ${g.unverifiable} |`);
+      // Cause-neutral on purpose. This row used to read "run record reaped",
+      // which was the only cause when it was written and is now one of two — a
+      // row label is prose too, and it goes false the same way the paragraph
+      // below did. The causes are listed under the table, from the records.
+      L.push(`| undecidable by the Actions API (not a gap, not replayed) | ${g.unverifiable} |`);
     }
     L.push('');
     if (g.unverifiable) {
@@ -1667,14 +1852,23 @@ export function renderMarkdown(report, cfg) {
       // re-deliver whatever did succeed. Unlike in_flight this never resolves on
       // its own, so the report has to hand over the PR numbers — otherwise the
       // only trace of the undecided set is a bare count nobody can act on.
+      // Rendered from the records rather than written as prose: the paragraph
+      // below used to name the 400-day cause as if it were the only one, which
+      // went false the moment the class gained a second cause. The colon is
+      // conditional so an empty list cannot leave the report promising an
+      // enumeration it does not then print.
+      const reasons = g.unverifiable_reasons || [];
       L.push(
-        `**${g.unverifiable} PR(s) merged more than ${RUN_HISTORY_DAYS} days ago with no ` +
-          'workflow-run record.** GitHub reaps run history, so the Actions API cannot tell a ' +
-          'delivery that never fired from one whose record was deleted. Do NOT replay them on ' +
-          'the strength of this report — check the consumer table for their `CodeCommit` rows, ' +
-          'or narrow `--since` so the window sits inside the retained history.',
+        `**${g.unverifiable} PR(s) whose delivery the Actions API cannot decide.** Do NOT ` +
+          'replay them on the strength of this report — check the consumer table for their ' +
+          '`CodeCommit` rows, or narrow `--since` so the window sits inside the retained ' +
+          `history.${reasons.length ? ' Why they are undecidable, from the records themselves:' : ''}`,
       );
       L.push('');
+      if (reasons.length) {
+        for (const reason of reasons) L.push(`- ${reason}`);
+        L.push('');
+      }
       L.push(
         `Undecidable PRs (${g.unverifiable}): ${g.unverifiable_prs.map((n) => `#${n}`).join(', ')}`,
       );
@@ -1802,6 +1996,10 @@ export function buildReport(results, cfg, apiCalls) {
       payload_missing: sum((r) => r.classes.payload_missing.length),
       unverifiable: sum((r) => r.classes.unverifiable.length),
     },
+    // Fleet-wide, for the two prose branches. Outside `totals` because every other
+    // key there is a count and code that sums totals would trip over a string
+    // array; the per-repo tables get their own copy below.
+    unverifiable_reasons: unverifiableReasons(results.flatMap((r) => r.classes.unverifiable)),
     repos_with_gaps: gaps.map((r) => ({
       repo: r.repo,
       failed: r.classes.failed.length,
@@ -1817,6 +2015,7 @@ export function buildReport(results, cfg, apiCalls) {
       // Same reasoning, opposite remediation: these need a consumer-side lookup,
       // and a replay of them would re-deliver whatever already succeeded.
       unverifiable_prs: r.classes.unverifiable.map((p) => p.number).sort((a, b) => a - b),
+      unverifiable_reasons: unverifiableReasons(r.classes.unverifiable),
       replay: replayList(r.classes),
     })),
     repos: results,
