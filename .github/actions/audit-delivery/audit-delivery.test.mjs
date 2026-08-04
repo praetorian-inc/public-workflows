@@ -32,6 +32,7 @@ import {
   retryDelayMs,
   makeClient,
   runsInRange,
+  onboardedAt,
   assertReadable,
   verifyPayloads,
   applyPayloadVerdicts,
@@ -43,6 +44,7 @@ import {
   RETRY_STATUS,
   API_CAP,
   SLICE_MAX,
+  COMMIT_FILES_CAP,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1750,4 +1752,259 @@ test('the early-abort paths RETURN after setting exitCode', async () => {
       `the guard for "${guard}" must return immediately after setting exitCode, or it falls through`,
     );
   }
+});
+
+// ── round-5 findings: the head_sha join collision, and rename blindness ───────
+//
+// Both are silent-direction defects — each makes a real gap read as delivered or
+// excused — so both tests assert a THROW. The pair of literals in the first test
+// is guard's real #2938/#2939 case (branch `mario-prod` into main and prod), not
+// an invented shape.
+
+test('classify: two merged PRs on the SAME head_sha refuse to be joined', () => {
+  const prs = [
+    pr(2938, '2026-07-01T00:00:00Z', '8e27899b22b4091667b39ea3487c51dbb3855e35'),
+    pr(2939, '2026-07-02T00:00:00Z', '8e27899b22b4091667b39ea3487c51dbb3855e35'),
+  ];
+  // One success is all it takes: pre-fix, dedupeByHead's success-first winner was
+  // credited to BOTH PRs, so #2939's absent delivery reported as delivered.
+  const byHead = dedupeByHead([
+    run(1, '8e27899b22b4091667b39ea3487c51dbb3855e35', 'success', '2026-07-01T00:00:10Z'),
+  ]);
+  assert.throws(() => classify(prs, byHead, null), /share head_sha 8e27899b/);
+  assert.throws(() => classify(prs, byHead, null), /#2938, #2939/);
+});
+
+test('classify: the collision guard names the CONSEQUENCE, not just the collision', () => {
+  // Asserted separately from the identifiers because the identifiers are what a
+  // future refactor keeps and the explanation is what it drops. An operator who
+  // sees only "share head_sha" has no reason to think the report is unsafe.
+  const prs = [pr(1, '2026-07-01T00:00:00Z', 'dupsha'), pr(2, '2026-07-01T00:00:00Z', 'dupsha')];
+  const byHead = dedupeByHead([run(1, 'dupsha', 'success', '2026-07-01T00:00:10Z')]);
+  assert.throws(() => classify(prs, byHead, null), /would read as delivered/);
+});
+
+test('classify: a collision with NO run on the shared SHA does not refuse the audit', () => {
+  // The live regression the run-existence predicate fixes, as a test. This is
+  // guard's real Aug-2025 pair, and both of its shared SHAs report total_count 0 —
+  // with no run to credit, each PR is classified from its own merged_at and no
+  // verdict can cross between them. The first version of this guard threw here
+  // anyway and took out the whole wide-window historical audit that ENG-5775 needs.
+  const prs = [
+    pr(2938, '2025-08-25T21:26:59Z', '8e27899b22b4091667b39ea3487c51dbb3855e35'),
+    pr(2939, '2025-08-21T16:52:50Z', '8e27899b22b4091667b39ea3487c51dbb3855e35'),
+  ];
+  const out = classify(prs, new Map(), Date.parse('2026-01-01T00:00:00Z'));
+  assert.equal(out.pre_onboarding.length, 2);
+  assert.equal(out.never_fired.length, 0);
+});
+
+test('classify: onboarding does NOT make a collision safe', () => {
+  // This test refuted a wrong version of the guard, so it is kept as the pin. The
+  // narrowing was first written as "2+ colliding PRs past onboarding", on the
+  // reasoning that a pre-onboarding PR never consults byHead. It does: the
+  // `pre_onboarding` bucket is only reachable inside the `!run` branch, so with a
+  // run present the 2025 PR here is credited `delivered` — silently dropping a PR
+  // that genuinely needs backfilling off the replay list. Hence the predicate is
+  // run-existence, and this mixed pair must still refuse.
+  const prs = [
+    pr(1, '2025-08-25T00:00:00Z', 'sharedsha'),
+    pr(2, '2026-06-01T00:00:00Z', 'sharedsha'),
+  ];
+  const byHead = dedupeByHead([run(9, 'sharedsha', 'success', '2026-06-01T00:00:10Z')]);
+  assert.throws(
+    () => classify(prs, byHead, Date.parse('2026-01-01T00:00:00Z')),
+    /share head_sha sharedsh/,
+  );
+  // And the pre-onboarding PR is named in the refusal, since it is the one whose
+  // verdict was about to be wrong.
+  assert.throws(() => classify(prs, byHead, Date.parse('2026-01-01T00:00:00Z')), /#1, #2/);
+});
+
+test('classify: two merged PRs on DIFFERENT head_shas are not a collision', () => {
+  // The control. Without it the guard could throw on every multi-PR input and
+  // every test above would still pass, since they would all be throwing too.
+  const prs = [pr(1, '2026-07-01T00:00:00Z', 'shaone'), pr(2, '2026-07-01T00:00:00Z', 'shatwo')];
+  const out = classify(prs, new Map(), Date.parse('2026-01-01T00:00:00Z'));
+  assert.equal(out.never_fired.length, 2);
+});
+
+test('classify: the SAME sha appearing once is not a collision', () => {
+  // The other control: a single PR must not trip a count-based guard.
+  const prs = [pr(1, '2026-07-01T00:00:00Z', 'lonesha')];
+  const byHead = dedupeByHead([run(1, 'lonesha', 'success', '2026-07-01T00:00:10Z')]);
+  const out = classify(prs, byHead, null);
+  assert.deepEqual(
+    out.delivered.map((r) => r.number),
+    [1],
+  );
+});
+
+// onboardedAt talks to the API, so these use a stub client rather than mocking
+// fetch — same stance as runsInRange's tests. The stub mirrors ghPaged's real
+// contract in the two ways this code depends on: `pluck` runs against each page
+// BODY, and multiple pages are concatenated. Detail fixtures are therefore an
+// ARRAY OF PAGE BODIES, so the rename probe's pagination is traversed here rather
+// than assumed — a single-object fixture could not tell a paging probe from a
+// first-page-only one.
+const commitsClient = (commits, detailPagesBySha) => {
+  const urls = [];
+  return {
+    urls,
+    ghPaged: async (url, pluck) => {
+      urls.push(url);
+      const pages = url.includes('?path=')
+        ? [commits]
+        : detailPagesBySha[url.split('/').pop()] || [];
+      return pages.flatMap((body) => (pluck ? pluck(body) : body));
+    },
+  };
+};
+
+const ONBOARD_CFG = {
+  owner: 'praetorian-inc',
+  callerPath: '.github/workflows/leaderboard-metrics.yml',
+};
+
+test('onboardedAt: a caller that arrived by RENAME throws instead of dating onboarding late', async () => {
+  const client = commitsClient(
+    [
+      { sha: 'renamesha', commit: { committer: { date: '2026-07-07T00:00:00Z' } } },
+      { sha: 'latersha', commit: { committer: { date: '2026-07-10T00:00:00Z' } } },
+    ],
+    {
+      renamesha: [
+        {
+          files: [
+            {
+              filename: '.github/workflows/leaderboard-metrics.yml',
+              status: 'renamed',
+              previous_filename: '.github/workflows/leaderboard.yml',
+            },
+          ],
+        },
+      ],
+    },
+  );
+  await assert.rejects(() => onboardedAt(client, ONBOARD_CFG, 'somerepo'), /arrived by RENAME/);
+  // The previous path is the actionable part: without it the operator cannot
+  // re-run to cover the earlier period, and the throw is just an obstacle.
+  await assert.rejects(
+    () => onboardedAt(client, ONBOARD_CFG, 'somerepo'),
+    /--caller-path \.github\/workflows\/leaderboard\.yml/,
+  );
+});
+
+test('onboardedAt: an ADDED caller returns the earliest date and does not throw', async () => {
+  // Control for the test above. The status literal matters: keying the guard on
+  // `previous_filename` alone would fire on any commit the API annotates.
+  const client = commitsClient(
+    [
+      { sha: 'addsha', commit: { committer: { date: '2026-07-07T00:00:00Z' } } },
+      { sha: 'editsha', commit: { committer: { date: '2026-07-10T00:00:00Z' } } },
+    ],
+    {
+      addsha: [
+        { files: [{ filename: '.github/workflows/leaderboard-metrics.yml', status: 'added' }] },
+      ],
+    },
+  );
+  assert.equal(await onboardedAt(client, ONBOARD_CFG, 'somerepo'), '2026-07-07T00:00:00Z');
+});
+
+test('onboardedAt: the rename probe reads the EARLIEST commit, not the first returned', async () => {
+  // The commits endpoint returns newest-first, so a guard that probed
+  // `commits[0]` would inspect the most recent edit and never see the rename.
+  // Ordering here is deliberately newest-first, as the real API returns it.
+  const client = commitsClient(
+    [
+      { sha: 'newest', commit: { committer: { date: '2026-07-10T00:00:00Z' } } },
+      { sha: 'oldest', commit: { committer: { date: '2026-07-07T00:00:00Z' } } },
+    ],
+    {
+      newest: [
+        { files: [{ filename: '.github/workflows/leaderboard-metrics.yml', status: 'modified' }] },
+      ],
+      oldest: [
+        {
+          files: [
+            {
+              filename: '.github/workflows/leaderboard-metrics.yml',
+              status: 'renamed',
+              previous_filename: '.github/workflows/old-name.yml',
+            },
+          ],
+        },
+      ],
+    },
+  );
+  await assert.rejects(() => onboardedAt(client, ONBOARD_CFG, 'somerepo'), /old-name\.yml/);
+});
+
+test('onboardedAt: no commits at the caller path returns null without a detail call', async () => {
+  const urls = [];
+  const client = {
+    ghPaged: async (url) => {
+      urls.push(url);
+      return [];
+    },
+  };
+  assert.equal(await onboardedAt(client, ONBOARD_CFG, 'somerepo'), null);
+  // Exactly one call: the commits-by-path query. A probe that ran anyway would
+  // dereference an undefined `earliest` and turn "never onboarded" into a crash.
+  assert.equal(urls.length, 1);
+});
+
+test('onboardedAt: the rename probe pages past the first COMMIT_FILES_CAP files', async () => {
+  // This is why the probe reads the detail with ghPaged and not gh. A fleet-wide
+  // migration commit — the very kind that introduced most of these callers —
+  // touches more files than one response carries, and a first page that simply
+  // lacks our path is byte-indistinguishable from a commit that never touched it.
+  // Read one page only and the probe answers "not a rename" precisely on the
+  // largest commits, which is the silent direction. Page 1 is sized at the real
+  // measured boundary rather than a round number, so the fixture stays a fixture
+  // of the API and not of this test.
+  const page1 = {
+    files: Array.from({ length: COMMIT_FILES_CAP }, (_, i) => ({
+      filename: `unrelated/file-${i}.md`,
+      status: 'modified',
+    })),
+  };
+  const page2 = {
+    files: [
+      {
+        filename: '.github/workflows/leaderboard-metrics.yml',
+        status: 'renamed',
+        previous_filename: '.github/workflows/buried.yml',
+      },
+    ],
+  };
+  const client = commitsClient([{ sha: 'bigsha', commit: { committer: { date: '2026-07-07T00:00:00Z' } } }], {
+    bigsha: [page1, page2],
+  });
+  await assert.rejects(
+    () => onboardedAt(client, ONBOARD_CFG, 'somerepo'),
+    /--caller-path \.github\/workflows\/buried\.yml/,
+  );
+});
+
+test('onboardedAt: a page-1-only reader would have passed this fixture', async () => {
+  // The control that gives the test above its meaning: the SAME 300-file first
+  // page with no rename anywhere returns a date and does not throw. So the
+  // rejection above is caused by page 2's content, not by the page count or the
+  // fixture's size — without this, a guard that threw on any large commit would
+  // pass both.
+  const page1 = {
+    files: Array.from({ length: COMMIT_FILES_CAP }, (_, i) => ({
+      filename: `unrelated/file-${i}.md`,
+      status: 'modified',
+    })),
+  };
+  const page2 = {
+    files: [{ filename: '.github/workflows/leaderboard-metrics.yml', status: 'added' }],
+  };
+  const client = commitsClient([{ sha: 'bigsha', commit: { committer: { date: '2026-07-07T00:00:00Z' } } }], {
+    bigsha: [page1, page2],
+  });
+  assert.equal(await onboardedAt(client, ONBOARD_CFG, 'somerepo'), '2026-07-07T00:00:00Z');
 });

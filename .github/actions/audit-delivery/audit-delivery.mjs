@@ -175,6 +175,77 @@ export const GRACE_MS = 15 * 60 * 1000;
 // so the grace window is testable against a fixed clock rather than by sleeping;
 // every production caller keeps the real clock.
 export function classify(prs, byHead, onboardedTs, now = Date.now()) {
+  // The whole join is head_sha -> run, and `dedupeByHead` collapses every run on
+  // a SHA to one winner with success taking precedence. That is right for a
+  // re-run of the same PR and wrong the moment two merged PRs share a commit,
+  // which happens for real: one branch opened against two bases. guard has two
+  // such pairs in 5291 merged PRs — #2938/#2939 (`mario-prod` into main and
+  // prod) and #2735/#2766 (`jwh/capdev-workflow-tweak` into main and capdev).
+  // Two runs SHOULD then exist, because the caller triggers on
+  // `pull_request_target: closed` with no `branches:` filter, so each PR's own
+  // close event fires its own delivery — and collapsing them lets ONE success
+  // speak for BOTH PRs, making a real failure read as delivered. That is the
+  // silent direction.
+  //
+  // Be precise about what is measured, because the distinction decides how much
+  // this matters. The COLLISION is observed: 2 pairs in guard's 5291 merged PRs,
+  // 0 in palatine, caeruleus and vespasian. The two-runs half is INFERRED from
+  // the trigger config, not observed — both real pairs merged in Aug 2025, before
+  // guard was onboarded, and each shared SHA has `total_count: 0` runs today, so
+  // both currently classify pre_onboarding and the mis-join cannot fire on them.
+  // The defect is therefore LATENT rather than live: it needs a collision that
+  // happens AFTER onboarding. It is still worth the eight lines, because the cost
+  // of being wrong is a false clean and the frequency is "twice in a year of one
+  // repo's history" rather than never.
+  //
+  // Nothing on the run distinguishes them — both real pairs share `head_branch`
+  // as well as `head_sha`, and `run.pull_requests` is unreliable — so the join is
+  // not repairable here, only detectable. Throwing (exit 2, "could not run")
+  // follows the same rule as the truncation guard above: when the audit cannot
+  // answer correctly it must refuse loudly rather than emit a verdict it cannot
+  // support. A clean-looking report is the one outcome that must never come out
+  // of an unjoinable input.
+  //
+  // But refusing must be CONFINED to the collisions that can actually corrupt a
+  // verdict, because refusal is not free: the first version of this guard sat
+  // unconditionally at the top of classify(), and `--repo praetorian-inc/guard
+  // --since 2025-07-01` — the wide historical window the ENG-5775 backfill needs —
+  // stopped dead on the Aug-2025 pair — an input whose verdict was never in doubt,
+  // for the reason given below. A detector that cries wrong-input on sound input
+  // gets narrowed or switched off, which costs the real detections too.
+  //
+  // The predicate is whether a RUN EXISTS on the shared SHA — not, as a first
+  // attempt had it, whether the colliding PRs are past onboarding. That version
+  // was wrong and a test caught it: `pre_onboarding` is only reachable inside the
+  // `!run` branch below, so a pre-onboarding PR sharing a SHA with a
+  // post-onboarding run does not classify pre_onboarding at all — it is credited
+  // `delivered`, which quietly removes a PR that genuinely needs backfilling from
+  // the replay list. Onboarding does not make a collision safe.
+  //
+  // What actually makes it safe is the absence of a run:
+  //   - no run on the SHA → every colliding PR takes the `!run` path and is
+  //     classified from its own merged_at alone, so no verdict can cross between
+  //     them. Sound, and this is guard's real Aug-2025 case (both SHAs report
+  //     total_count 0), which is why the wide historical window audits cleanly.
+  //   - a run exists → dedupeByHead's single winner is credited to EVERY colliding
+  //     PR while at most one of them owns it. Unsound, whatever the dates say.
+  const byShaCount = new Map();
+  for (const pr of prs) byShaCount.set(pr.head.sha, (byShaCount.get(pr.head.sha) || 0) + 1);
+  for (const [sha, n] of byShaCount) {
+    if (n > 1 && byHead.get(sha)) {
+      const nums = prs
+        .filter((p) => p.head.sha === sha)
+        .map((p) => `#${p.number}`)
+        .join(', ');
+      throw new Error(
+        `${nums} share head_sha ${sha.slice(0, 8)} — delivery is joined by head SHA, so one ` +
+          "PR's successful run would be credited to the other and a real gap would read as " +
+          'delivered. Audit these PRs individually (narrow --since so only one is in range) ' +
+          'before trusting this repo.',
+      );
+    }
+  }
+
   const classes = {
     delivered: [],
     failed: [],
@@ -581,6 +652,20 @@ export function makeClient(token) {
 export const API_CAP = 1000;
 export const SLICE_MAX = 900;
 
+// A DIFFERENT cap on a different endpoint, and unlike API_CAP this one is only a
+// PAGE SIZE: `GET /repos/:o/:r/commits/:sha` returns at most 300 entries in
+// `files` per response, but it does emit `Link: rel="next"`, so the rest is
+// reachable. Measured, not taken from the docs: three real palatine commits
+// touching 818, 472 and 400 files each came back with exactly 300, and page 2
+// held a different set. What makes it worth a name is that nothing in the BODY
+// says it was cut — no `truncated` flag, and `files.length === 300` is also what
+// a genuine 300-file commit looks like — so code that reads `files` from a single
+// `gh` call cannot tell a complete list from a clamped one. The rename probe in
+// onboardedAt pages instead. Exported so its tests can size a fixture page at the
+// real boundary rather than at a hand-picked number that would still pass if the
+// boundary moved.
+export const COMMIT_FILES_CAP = 300;
+
 // Exported for tests: `client` is already the only way this reaches the network,
 // so a stub client exercises the slicing and the truncation guard directly —
 // no fetch mocking, and nothing about the real transport is faked.
@@ -717,7 +802,25 @@ async function resolveFleet(client, cfg) {
 // today. The residual risk of the path definition is a repo that carried an
 // unrelated workflow at this exact path before onboarding, which would date it
 // too early; no repo in the fleet does, and the file name makes it implausible.
-async function onboardedAt(client, cfg, repo) {
+//
+// Second residual, measured and deliberately NOT repaired: on a true merge commit
+// the file-introducing commit keeps the date it had on the feature branch, which
+// can precede the day it reached the default branch, so the boundary lands early
+// by up to a branch lifetime and PRs merged in that sliver read `never_fired`
+// instead of `pre_onboarding`. Reachability by repo setting, not by assumption —
+// guard, palatine and public-workflows are squash-only (`allow_merge_commit:
+// false`, `allow_rebase_merge: false`) so it cannot occur there at all, while
+// caeruleus and vespasian permit merge and rebase commits, so it can. It has not:
+// all four live onboarding commits are single-parent squashes with
+// `committer.date == author.date` and a `(#N)` subject. It stays unrepaired
+// because the error direction is a NOISY FALSE POSITIVE — an extra reported gap,
+// investigated and dismissed — not a missed one, and the fix (resolving when a
+// commit landed on the default branch) costs a search-API round trip per repo to
+// buy accuracy in a case with zero occurrences. Rebase merges are unaffected:
+// rebasing rewrites `committer.date` to the rebase, which is what this reads
+// first. If a fleet repo ever switches to merge commits, revisit this before the
+// never_fired count is trusted.
+export async function onboardedAt(client, cfg, repo) {
   const commits = await client.ghPaged(
     `/repos/${cfg.owner}/${repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=100`,
   );
@@ -726,6 +829,59 @@ async function onboardedAt(client, cfg, repo) {
     .map((c) => c.commit?.committer?.date || c.commit?.author?.date)
     .filter(Boolean)
     .sort();
+
+  // A RENAME is the one thing that makes both halves of this audit read short at
+  // once, and it does it silently. `/commits?path=` does not follow renames (no
+  // `--follow`), so if the caller was renamed inside the window the earliest
+  // commit here is the RENAME, dating onboarding late and excusing every earlier
+  // PR as pre_onboarding — "not a gap". The runs side reads short in the same
+  // direction, because runsInRange queries by `cfg.callerFile` and GitHub keys
+  // runs to the workflow file, so runs under the old name are simply absent.
+  // Late boundary plus missing runs is a FALSE CLEAN — the one verdict this
+  // detector must never produce, and the same trap the comment above avoids for
+  // the reusable-migration case.
+  //
+  // Detectable by asking the earliest commit which files it touched and whether
+  // this path arrived by rename. Name the previous path so the operator can
+  // re-run against it rather than reverse-engineer it.
+  //
+  // Read the file list with ghPaged, not gh. The single-commit endpoint returns
+  // at most COMMIT_FILES_CAP entries per response — verified against three real
+  // palatine commits of 818, 472 and 400 files, all of which came back with
+  // exactly 300 — and a single `gh` call would therefore see only the first page.
+  // That truncation is silent in the ONE direction that matters: our path merely
+  // absent from a cut-off list reads as "not a rename", so the probe would agree
+  // with whatever it was built to rule out, and only on the biggest commits. The
+  // list IS paginated (`Link: rel="next"`, and page 2 returns a different set) —
+  // it just is not paginated by the shape of the body, since `files` is a key on
+  // an object rather than the top-level array, which is exactly what ghPaged's
+  // `pluck` is for. So there is nothing here to refuse: page it and get a
+  // complete answer. Onboarding commits are normally one file; this costs one
+  // request in the normal case and stays correct in the fleet-wide-migration case
+  // that first introduced most of these callers.
+  const earliest = commits.reduce((a, c) =>
+    (c.commit?.committer?.date || c.commit?.author?.date || '') <
+    (a.commit?.committer?.date || a.commit?.author?.date || '')
+      ? c
+      : a,
+  );
+  if (earliest?.sha) {
+    const files = await client.ghPaged(
+      `/repos/${cfg.owner}/${repo}/commits/${earliest.sha}`,
+      (body) => body?.files || [],
+    );
+    const entry = files.find((f) => f.filename === cfg.callerPath);
+    if (entry?.status === 'renamed' && entry.previous_filename) {
+      throw new Error(
+        `${repo}: the caller at ${cfg.callerPath} arrived by RENAME in ${earliest.sha.slice(0, 8)} ` +
+          `from ${entry.previous_filename}. Onboarding would date to the rename and runs under ` +
+          'the old workflow file would be invisible, so earlier PRs would be excused as ' +
+          `pre_onboarding — a false clean. Re-run with --caller-path ${entry.previous_filename} ` +
+          'to cover the earlier period.',
+      );
+    }
+  }
+
   return dates[0] || null;
 }
 
