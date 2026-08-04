@@ -1187,7 +1187,7 @@ export const RETRY_STATUS = new Set([403, 429, 500, 502, 503, 504]);
 // a rejected fetch are this script's control flow, not the API's semantics, so
 // they are worth pinning even though the file otherwise refuses to mock fetch.
 export function makeClient(token) {
-  const state = { calls: 0 };
+  const state = { calls: 0, dupes: 0 };
   const headers = {
     authorization: `Bearer ${token}`,
     accept: 'application/vnd.github+json',
@@ -1263,6 +1263,7 @@ export function makeClient(token) {
   async function ghPaged(path, pluck, stopWhen) {
     let url = path;
     const items = [];
+    const seen = new Set();
     let stop = false;
     while (url) {
       const res = await request(url);
@@ -1270,11 +1271,42 @@ export function makeClient(token) {
       if (!res.ok) throw new Error(`${res.status} on ${url}`);
       const body = await res.json();
       const batch = pluck ? pluck(body) : body;
-      items.push(...batch);
+      // Paginating a list that MUTATES under the cursor can hand back the same
+      // row twice, and a duplicate is not cosmetic here: it double-counts a
+      // merged PR (inflating merged_prs) or a run, and — worse — it inflates
+      // `got.length` in runsInRange, where the shortfall assertion is
+      // `got.length < total`. A duplicate can therefore MASK a real truncation,
+      // defeating the one check standing between this audit and the silent
+      // 1000-cap clamp that shipped 420 phantom gaps. Deduping strengthens that
+      // assertion rather than weakening it: after this, a short slice is short.
+      //
+      // Counted rather than thrown, because with the immutable orderings below a
+      // duplicate proves an INSERTION, which loses nothing — see the note on the
+      // closed-PR fetch in auditRepo for why insertion is the benign direction
+      // and what the residual is.
+      for (const it of batch) {
+        const id = it?.id ?? it?.number ?? it?.sha ?? null;
+        if (id !== null) {
+          if (seen.has(id)) {
+            state.dupes++;
+            continue;
+          }
+          seen.add(id);
+        }
+        items.push(it);
+      }
       if (stopWhen && batch.length && stopWhen(batch[batch.length - 1])) stop = true;
+      // Extracted by REGEX, not by splitting on ',': a URL carrying a comma in a
+      // query parameter splits the `rel="next"` entry in two, and the half that
+      // matches `rel="next"` is then missing its opening `<`, so the slice below
+      // returned junk and pagination stopped SILENTLY at page 1 — a truncated
+      // fetch read as a complete one, i.e. a false clean. No URL this script
+      // builds contains a comma today, so this is a latent trap rather than a
+      // live defect; it is one line either way, and the failure direction is the
+      // one this whole script exists to refuse.
       const link = res.headers.get('link') || '';
-      const next = link.split(',').find((p) => p.includes('rel="next"'));
-      url = stop ? null : next ? next.slice(next.indexOf('<') + 1, next.indexOf('>')) : null;
+      const next = /<([^>]+)>\s*;\s*rel="next"/.exec(link);
+      url = stop ? null : next ? next[1] : null;
     }
     return items;
   }
@@ -1414,7 +1446,7 @@ export async function runsInRange(client, cfg, repo) {
 
 const b64 = (s) => Buffer.from(s, 'base64').toString('utf8');
 
-async function hasCaller(client, cfg, repo) {
+export async function hasCaller(client, cfg, repo) {
   // Encoded per SEGMENT, never as a whole string: encodeURIComponent turns `/`
   // into `%2F`, which the contents API does not read as a directory separator,
   // so encoding whole would 404 on every legitimate nested path — i.e. on the
@@ -1430,7 +1462,39 @@ async function hasCaller(client, cfg, repo) {
   // a same-named file that calls something else entirely. Content, not
   // filename, and not the check name: a workflow has three independent
   // identities and they routinely disagree, so a filename probe under-counts.
-  return b64(f.content).includes(cfg.reusable);
+  //
+  // But a raw substring probe over the whole file counts a MENTION as a call, and
+  // that is not hypothetical — it fires on this repo, on the default path, in
+  // org-enumerated fleet mode. `public-workflows` IS the reusable's home, so the
+  // default --caller-path resolves to the reusable ITSELF, and that file carries a
+  // commented drop-in caller template whose `uses:` line names its own pinned ref:
+  //
+  //   #       uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@<sha>
+  //
+  // Measured: the substring matched, so hasCaller said true and the repo joined
+  // the fleet — while `/actions/workflows/leaderboard-metrics.yml/runs` reported
+  // total_count=0, because a reusable accrues no runs of its own; the real
+  // deliveries are recorded against this repo's actual caller,
+  // leaderboard-metrics-caller.yml (total_count=15). Every merged PR would then
+  // classify never_fired and the report would print a replay command against the
+  // PROD queue for deliveries that had in fact succeeded. A fabricated replay list
+  // is the worst output this tool can produce, and a commented example was enough
+  // to produce it.
+  //
+  // So: strip comments and require the reference to sit on a `uses:` line. A YAML
+  // comment starts at a `#` that begins a line or follows whitespace (`a#b` is
+  // not one), which is why the strip is anchored rather than a bare indexOf('#') —
+  // and why a real caller's trailing ` # v2.16.3` version pin is removed without
+  // touching the ref in front of it. Requiring `uses:` is the half that turns
+  // "mentions" into "calls"; both halves are needed, since a commented line
+  // still contains `uses:`.
+  const stripComment = (l) => l.replace(/(^|\s)#.*$/, '$1');
+  return b64(f.content)
+    .split('\n')
+    .some((l) => {
+      const code = stripComment(l);
+      return /(^|\s)uses:\s/.test(code) && code.includes(cfg.reusable);
+    });
 }
 
 // A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no commits
@@ -1502,7 +1566,16 @@ export async function assertActionsReadable(client, cfg, repo) {
 export async function resolveFleet(client, cfg) {
   let names = cfg.repos;
   if (!names) {
-    const repos = await client.ghPaged(`/orgs/${cfg.owner}/repos?per_page=100&type=all`);
+    // Same immutable ordering as the closed-PR fetch, for the same reason and in
+    // the same direction. This endpoint defaults to created DESC, so a repo
+    // created mid-enumeration lands at position 1 and shifts a boundary row past
+    // the cursor — dropping a repo from the fleet. A dropped repo is never
+    // audited, reports nothing, and the fleet still says clean: the identical
+    // false-clean direction, one level up. Explicit asc so new repos append
+    // behind the cursor instead.
+    const repos = await client.ghPaged(
+      `/orgs/${cfg.owner}/repos?per_page=100&type=all&sort=created&direction=asc`,
+    );
     names = repos.filter((r) => !r.archived && !r.disabled).map((r) => r.name);
   } else {
     // An explicitly named repo is a SUBJECT, and has to be proven readable
@@ -1676,13 +1749,45 @@ export async function auditRepo(client, cfg, repo) {
   const untilTs = cfg.until ? Date.parse(`${cfg.until}T00:00:00Z`) : null;
 
   // `pulls` is a plain list endpoint and is NOT subject to the 1000-result cap
-  // that bites the runs endpoint (guard returned all 1419). Sorted by
-  // updated_at desc, we can stop as soon as updated_at falls below the window:
-  // updated_at >= merged_at always, so nothing in the window is skipped.
+  // that bites the runs endpoint (guard returned all 1419).
+  //
+  // ORDERED BY AN IMMUTABLE KEY, AND THIS IS LOAD-BEARING.
+  //
+  // This fetch used to be `sort=updated&direction=desc` with an early stop once
+  // updated_at fell below --since — cheap, and unsound. Offset pagination reads
+  // POSITIONS, so any row that moves between page N and page N+1 shifts the rest:
+  // a PR sitting at position 250 that gets touched (a comment, a label, a push)
+  // jumps to position 1, every row behind it shifts back one, and the row that
+  // was at the page boundary is now BEHIND the cursor and is never returned. It
+  // is dropped from the audit entirely. `updated_at` is the most frequently
+  // mutated field on the resource, so the old ordering maximised exactly the
+  // event that loses rows, on the busiest repos, on every audit.
+  //
+  // A dropped merged PR cannot be classified, so it cannot be reported as a gap:
+  // the loss direction is a FALSE CLEAN, which is the one direction this detector
+  // exists to eliminate.
+  //
+  // `created_at` never changes, so no row can move. What remains is insertion and
+  // removal of rows, and with direction=asc the two are not symmetric:
+  //   * INSERTION — a PR closing mid-audit joins the list at its creation
+  //     position. Ordered oldest-first that is at or after the cursor, so nothing
+  //     already read shifts out of reach; at worst one row is served twice, and
+  //     ghPaged dedupes it (counted as state.dupes).
+  //   * REMOVAL — a closed PR being REOPENED leaves the list and shifts the tail
+  //     forward one, which can carry a row past the cursor with no duplicate to
+  //     signal it. This is the one residual, and it is not closed here: it needs a
+  //     mutation-free snapshot the REST API does not offer. It is bounded by "a
+  //     reopen must land inside the seconds this loop is running", against a
+  //     merged-PR field that cannot itself be reopened.
+  // Descending would invert this — new closes would land at position 1 and shift
+  // the whole list — so the direction is as load-bearing as the sort key.
+  //
+  // The cost is a full history walk: asc puts the window at the END, so there is
+  // no valid early stop (measured: guard 65 pages, public-workflows 2,
+  // caeruleus 1, at 100/page). That buys back more than it spends — see the
+  // boundary-coverage note below, which the old early stop is what made partial.
   const fetched = await client.ghPaged(
-    `/repos/${cfg.owner}/${repo}/pulls?state=closed&per_page=100&sort=updated&direction=desc`,
-    null,
-    (last) => Date.parse(last.updated_at) < sinceTs,
+    `/repos/${cfg.owner}/${repo}/pulls?state=closed&per_page=100&sort=created&direction=asc`,
   );
   const inWindow = (p) => {
     if (!p.merged_at) return false;
@@ -1714,14 +1819,21 @@ export async function auditRepo(client, cfg, repo) {
   // — `--since A --until cut` then `--since cut` — so the boundary is something
   // operators are told to place, not an accident.
   //
-  // Coverage is honestly partial, and the asymmetry is not arbitrary. The upper
-  // side is complete: pagination walks from newest, so every PR merged after
-  // --until is already in `fetched`, at zero extra API cost. The lower side is
-  // best-effort: pagination stops once updated_at falls below --since, so a PR
-  // merged before the window is here only if it was touched since. Closing that
-  // properly means paging further back on every audit — a real cost for the
-  // rarer half of a latent defect — so it stays uncovered rather than covered by
-  // a page count that would look principled and not be.
+  // Coverage is now COMPLETE on both sides, and the immutable ordering above is
+  // what made it so. The previous revision of this comment recorded the upper
+  // side as complete and the lower side as best-effort, because pagination walked
+  // from newest and stopped once updated_at fell below --since — so a PR merged
+  // before the window was present only if something had touched it since, and
+  // closing that "properly means paging further back on every audit". Removing
+  // the early stop is exactly that page-further-back, and it was not adopted for
+  // this reason: it fell out of fixing the drift defect. Both halves of the
+  // collision guard are now fed by the same full history, so a collision
+  // straddling EITHER boundary is visible.
+  //
+  // Worth recording as the shape of the mistake: the asymmetry was reasoned about
+  // carefully and defended as principled, while the ordering that produced it was
+  // not examined at all. The cheap half of a guard was documented as the honest
+  // limit of the expensive half.
   const outsideWindow = fetched.filter((p) => p.merged_at && !inWindow(p));
 
   const runs = await runsInRange(client, cfg, repo);
@@ -2116,6 +2228,39 @@ export function buildReport(results, cfg, apiCalls) {
   };
 }
 
+// ── Emitting a workflow command safely ──────────────────────────────────────
+//
+// `::error::<message>` is LINE-ORIENTED: the runner reads it to the end of the
+// line, so a message that contains a newline does not produce a two-line error —
+// it produces a SECOND command that the runner obeys.
+//
+// Reproduced with one thrown error, no privileges, straight from an input:
+//
+//   --repo $'a/b\n::add-mask::SECRET\n::error::forged'
+//     ::error::--repo must be owner/name, got a/b
+//     ::add-mask::SECRET
+//     ::error::forged
+//
+// Three directives from one throw. `::add-mask::` is the mild one; the direction
+// that matters for a DETECTOR is `::stop-commands::`, which switches command
+// processing off for everything after it — an injected value could suppress the
+// very error being raised about it, and this tool's whole purpose is to be the
+// thing that does not go quiet.
+//
+// No input is attacker-controlled today: every one is set by the caller
+// workflow's author (repo defaults to github.repository), so this is hardening,
+// not a live exploit — stated plainly rather than dressed up, because the fix is
+// three replaces and GitHub documents them as required for any interpolated
+// message. `%` MUST be escaped first, or the escapes below get re-escaped.
+export const wfEscape = (s) =>
+  String(s).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
+// Single emitter, so the escape cannot be forgotten at a call site. The two
+// constant messages carry no interpolation and need no escaping; they route
+// through here anyway, because a rule with two exceptions is how the next
+// interpolated message ends up emitted raw.
+export const wfError = (msg) => console.error(`::error::${wfEscape(msg)}`);
+
 async function main() {
   const cfg = parseArgs(process.argv.slice(2));
 
@@ -2123,8 +2268,8 @@ async function main() {
   if (!token) {
     // Fail LOUDLY. A detector that silently reports "0 gaps" because it had no
     // credentials is the exact failure class this script exists to catch.
-    console.error(
-      '::error::GITHUB_TOKEN (or GH_TOKEN) is unset — refusing to run. An unauthenticated audit would report a clean fleet it never actually read.',
+    wfError(
+      'GITHUB_TOKEN (or GH_TOKEN) is unset — refusing to run. An unauthenticated audit would report a clean fleet it never actually read.',
     );
     // exitCode + return, NOT process.exit: see the note at the end of main().
     // The `return` is load-bearing — setting exitCode does not stop execution,
@@ -2141,8 +2286,8 @@ async function main() {
   // is a discovery question rather than a subject question.
   const fleet = cfg.selfAudit ? cfg.repos : await resolveFleet(client, cfg);
   if (!fleet.length) {
-    console.error(
-      '::error::resolved ZERO caller repos — the fleet probe is broken or the token cannot read the org. Refusing to report a clean fleet.',
+    wfError(
+      'resolved ZERO caller repos — the fleet probe is broken or the token cannot read the org. Refusing to report a clean fleet.',
     );
     process.exitCode = 2;
     return; // load-bearing, as above
@@ -2200,7 +2345,7 @@ async function main() {
 // Only run when executed directly, so the unit tests can import the pure parts.
 if (process.argv[1] && process.argv[1].endsWith('audit-delivery.mjs')) {
   main().catch((e) => {
-    console.error(`::error::${e.message}`);
+    wfError(e.message);
     process.exitCode = 2;
   });
 }

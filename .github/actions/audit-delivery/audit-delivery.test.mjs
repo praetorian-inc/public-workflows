@@ -6,11 +6,24 @@
 // package.json and no node tooling).
 //
 // SCOPE: the pure, exported surface — parseArgs, classify, dedupeByHead,
-// replayList, renderMarkdown, buildReport. The networking layer (makeClient,
-// runsInRange, auditRepo) is deliberately untested here: it was validated
-// against the live GitHub API and reproduces a known real outage exactly
-// (guard 1419/1052/183/5/179, palatine 384/310/1/0/73). Mocking `fetch` to
-// re-assert that would test the mock, not the API.
+// replayList, renderMarkdown, buildReport — plus, since round 12, the REQUEST
+// SHAPES the networking layer emits.
+//
+// The original scope note said the networking layer was deliberately untested,
+// on the grounds that it had been validated against the live API and mocking
+// `fetch` would test the mock rather than the API. That reasoning holds for
+// RESPONSE handling and does not hold for the requests themselves, which round
+// 12 demonstrated the hard way: the closed-PR walk paginated over `updated_at`,
+// a mutable sort key, so a PR touched mid-walk shifted the page boundary and a
+// merged PR was silently dropped — and a dropped PR cannot be reported as a gap,
+// so the defect's only symptom was a CLEANER report. No response fixture can see
+// that; nothing about the ordering is observable in what comes back. The
+// property lives in the URL, so that is where it is asserted. Live validation
+// could not have caught it either, and did not: the audit had been run against
+// guard and palatine and looked right both times.
+//
+// The live-validation figures still stand as evidence for the response layer
+// (guard 1419/1052/183/5/179, palatine 384/310/1/0/73).
 //
 // EVERY expectation below is an independently-derived literal. Nothing is
 // computed by calling the code under test, so each assertion can actually fail:
@@ -57,6 +70,8 @@ import {
   SLICE_MAX,
   COMMIT_FILES_CAP,
   auditRepo,
+  hasCaller,
+  wfEscape,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -4020,9 +4035,11 @@ test('auditRepo: the --until boundary collision reaches the guard end-to-end', a
       calls.push(path);
       if (path.includes('/pulls?'))
         return [
-          // Merged 2026-07-20, excluded by --until 2026-07-01. Newest first, which
-          // is the order `sort=updated&direction=desc` returns and the reason this
-          // PR is in the fetch set at zero extra cost.
+          // Merged 2026-07-20, excluded by --until 2026-07-01. Present in the
+          // fetch set because the closed-PR walk is a FULL history walk ordered by
+          // the immutable `created` key — see the note on that fetch. Order within
+          // this stub is irrelevant to the guard; what matters is that both PRs are
+          // there for it to compare.
           { ...pr(11, '2026-07-20T00:00:00Z', shared), updated_at: '2026-07-20T00:00:00Z' },
           { ...pr(10, '2026-06-01T00:00:00Z', shared), updated_at: '2026-06-01T00:00:00Z' },
         ];
@@ -4469,4 +4486,265 @@ test('action contract: CONTROL — every status value the action can emit is one
     runAction({ exitCode: 2, report: null }).outputs.status,
   ];
   assert.deepEqual(seen, ['clean', 'gaps', 'unknown']);
+});
+
+// ── Round 12: mentions vs calls, mutable pagination, and command injection ────
+//
+// All four areas below were reported by an automated reviewer and CONFIRMED by
+// measurement against the live API before a line was changed. Each test is
+// written to fail for the original defect specifically, not for "something in
+// this area changed".
+
+// The two hasCaller fixtures are the REAL files in this repository, not
+// hand-written strings. That is deliberate: the defect was a substring probe
+// matching this repo's own commented caller template, so a synthetic fixture
+// would only prove the fix handles the example I invented. Reading the artifact
+// means the test fails if the artifact ever grows a new way to fool the probe.
+const WF_DIR = join(HERE, '..', '..', 'workflows');
+const readWf = (name) => {
+  try {
+    return readFileSync(join(WF_DIR, name), 'utf8');
+  } catch {
+    throw new Error(
+      `could not read .github/workflows/${name} — these two tests use the REAL files as ` +
+        'fixtures on purpose. If the file moved, repoint WF_DIR; do NOT delete these tests, ' +
+        'or the mention-vs-call distinction goes unexercised.',
+    );
+  }
+};
+const callerCfg = () => parseArgs(['--repo', 'praetorian-inc/public-workflows']);
+const contentClient = (text) => ({
+  gh: async () => ({ type: 'file', content: Buffer.from(text, 'utf8').toString('base64') }),
+});
+
+test('hasCaller: a COMMENTED caller template is a MENTION, not a caller', async () => {
+  // The confirmed defect, on the DEFAULT caller path, in org-enumerated fleet
+  // mode. public-workflows is the reusable's own home, so --caller-path resolves
+  // to the reusable itself, which carries a commented drop-in template naming its
+  // own pinned ref. Pre-fix hasCaller matched that substring and admitted this
+  // repo to the fleet, while the runs endpoint for that path reports
+  // total_count=0 (the real deliveries are recorded against
+  // leaderboard-metrics-caller.yml, total_count=15) — so every merged PR would
+  // classify never_fired and the report would print a PROD replay command for
+  // deliveries that had actually succeeded.
+  const cfg = callerCfg();
+  const reusable = readWf('leaderboard-metrics.yml');
+
+  // ANTI-VACUOUS: if the commented template is ever deleted, this test would pass
+  // for the wrong reason — there would be nothing left to mistake for a caller.
+  // Assert the trap is still in the fixture before asserting we avoid it.
+  const commentedRef = reusable
+    .split('\n')
+    .filter((l) => l.trimStart().startsWith('#') && l.includes(cfg.reusable));
+  assert.ok(
+    commentedRef.length > 0,
+    'fixture no longer contains a commented reference to the reusable, so this test ' +
+      'proves nothing — restore one or delete the test deliberately',
+  );
+  assert.ok(
+    commentedRef.some((l) => /uses:/.test(l)),
+    'the commented reference must still be a `uses:` line — that is the exact shape ' +
+      'that fooled the probe, and a bare prose mention is a weaker fixture',
+  );
+
+  assert.equal(await hasCaller(contentClient(reusable), cfg, 'public-workflows'), false);
+});
+
+test('hasCaller: CONTROL — a real caller with a trailing version comment IS a caller', async () => {
+  // The over-rejection direction, which the test above cannot see: a fix that
+  // simply refused any line containing `#` would also refuse every real caller in
+  // the fleet, because the pinned `uses:` line carries a trailing ` # v2.16.3`
+  // version comment. That failure is SILENT and worse than the bug being fixed —
+  // a repo dropped from the fleet is never audited and the fleet still reports
+  // clean. The comment strip has to be anchored, and this is what says so.
+  const cfg = callerCfg();
+  const caller = readWf('leaderboard-metrics-caller.yml');
+  assert.ok(
+    /uses:.*\S\s+#\s*\S/.test(caller),
+    'fixture must still carry a `uses:` line with a TRAILING comment, or the ' +
+      'over-rejection case is not exercised',
+  );
+  assert.equal(await hasCaller(contentClient(caller), cfg, 'public-workflows'), true);
+});
+
+test('hasCaller: a mention outside a `uses:` line is not a caller', async () => {
+  // Prose, a docs block, a heredoc in a run: step. Same reusable string, no call.
+  const cfg = callerCfg();
+  const text = `name: x\n# see ${cfg.reusable}abc for details\njobs:\n  a:\n    steps:\n      - run: echo "${cfg.reusable}abc"\n`;
+  assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), false);
+});
+
+test('ghPaged: a Link URL containing a comma still paginates', async () => {
+  // Pre-fix the header was split on ',', so a comma inside a query parameter cut
+  // the rel="next" entry in half; the surviving half had no opening '<' and the
+  // slice returned junk, so pagination stopped at page 1 SILENTLY. A truncated
+  // fetch read as a complete one is a false clean, which is the direction that
+  // matters. No URL this script builds carries a comma today — this pins the
+  // parser, not a live exploit.
+  const pages = new Map([
+    [
+      'https://api.github.com/x?ids=1,2&page=1',
+      { items: [{ id: 1 }], link: '<https://api.github.com/x?ids=1,2&page=2>; rel="next"' },
+    ],
+    ['https://api.github.com/x?ids=1,2&page=2', { items: [{ id: 2 }], link: '' }],
+  ]);
+  const got = await withFetch(
+    async (url) => {
+      const p = pages.get(String(url));
+      if (!p) throw new Error(`unexpected url ${url}`);
+      return { status: 200, ok: true, headers: new Headers({ link: p.link }), json: async () => p.items };
+    },
+    () => makeClient('t').ghPaged('https://api.github.com/x?ids=1,2&page=1'),
+  );
+  assert.deepEqual(
+    got.map((x) => x.id),
+    [1, 2],
+    'page 2 must be fetched — stopping at page 1 is the silent truncation',
+  );
+});
+
+test('ghPaged: a row served twice across pages is counted ONCE', async () => {
+  // Offset pagination over a list that mutates can serve the same row on two
+  // pages. A duplicate double-counts a merged PR, and in runsInRange it inflates
+  // `got.length`, which can MASK the shortfall assertion that is the only thing
+  // standing between this audit and the silent 1000-result clamp. Deduping makes
+  // that assertion strictly stronger.
+  const pages = [
+    { items: [{ id: 1 }, { id: 2 }], link: '<https://api.github.com/y?page=2>; rel="next"' },
+    { items: [{ id: 2 }, { id: 3 }], link: '' },
+  ];
+  let i = 0;
+  const client = makeClient('t');
+  const got = await withFetch(
+    async () => {
+      const p = pages[i++];
+      return { status: 200, ok: true, headers: new Headers({ link: p.link }), json: async () => p.items };
+    },
+    () => client.ghPaged('https://api.github.com/y?page=1'),
+  );
+  assert.deepEqual(got.map((x) => x.id), [1, 2, 3]);
+  assert.equal(client.state.dupes, 1, 'the duplicate must be COUNTED, not silently absorbed');
+});
+
+test('auditRepo: the closed-PR walk is ordered by an IMMUTABLE key', async () => {
+  // The defect: `sort=updated&direction=desc` orders by the most frequently
+  // mutated field on the resource. Offset pagination reads POSITIONS, so a PR
+  // touched between page N and N+1 jumps to position 1, every row behind it
+  // shifts back one, and the row at the page boundary lands BEHIND the cursor and
+  // is never returned — dropped from the audit. A dropped merged PR cannot be
+  // reported as a gap, so the loss direction is a FALSE CLEAN.
+  //
+  // Asserted on the request itself because that is where the property lives: no
+  // response this stub can return distinguishes a sound ordering from an unsound
+  // one. A drift simulation would only re-assert that offset pagination drifts.
+  const paths = [];
+  const client = {
+    ghPaged: async (path) => {
+      paths.push(path);
+      if (path.includes('/pulls?')) return [];
+      return [];
+    },
+    gh: async (path) => (path.includes('per_page=1&created=') ? { total_count: 0 } : {}),
+  };
+  await auditRepo(
+    client,
+    { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+    'guard',
+  );
+  const pulls = paths.find((p) => p.includes('/pulls?'));
+  assert.ok(pulls, 'auditRepo must fetch closed PRs');
+  assert.match(pulls, /sort=created/, 'must order by an immutable key');
+  assert.match(pulls, /direction=asc/, 'asc is load-bearing: desc puts new rows at position 1');
+  assert.doesNotMatch(pulls, /sort=updated/, 'updated_at is the mutable key that caused the loss');
+});
+
+test('resolveFleet: org enumeration is ordered by an immutable key', async () => {
+  // Same class one level up, same false-clean direction: this endpoint defaults to
+  // created DESC, so a repo created mid-enumeration shifts a boundary row past the
+  // cursor and a whole repo silently leaves the fleet — never audited, reports
+  // nothing, fleet still says clean.
+  const paths = [];
+  const fleet = await resolveFleet(
+    {
+      ghPaged: async (path) => {
+        paths.push(path);
+        return [];
+      },
+      gh: async () => ({}),
+    },
+    { owner: 'praetorian-inc', repos: null, callerPath: '.github/workflows/c.yml', reusable: 'r' },
+  );
+  assert.deepEqual(fleet, []);
+  assert.match(paths[0], /sort=created/);
+  assert.match(paths[0], /direction=asc/);
+});
+
+test('wfEscape: % is escaped FIRST, or the escapes get re-escaped', () => {
+  // Order is the whole correctness of this function. Escaping \n before % turns
+  // "\n" into "%0A" and then into "%250A", which the runner renders as the
+  // literal text %0A instead of a newline — a message quietly corrupted by its
+  // own sanitiser.
+  assert.equal(wfEscape('a\nb'), 'a%0Ab');
+  assert.equal(wfEscape('a\rb'), 'a%0Db');
+  assert.equal(wfEscape('100%'), '100%25');
+  assert.equal(wfEscape('%0A'), '%250A', 'a literal %0A must stay literal');
+  assert.equal(wfEscape('%\n'), '%25%0A', 'the inserted escape must not be re-escaped');
+});
+
+test('an injected newline in an input cannot emit a second workflow command', async () => {
+  // End-to-end through the real process, because the defect lives in what reaches
+  // the RUNNER's stdout, not in what a function returns. `::error::` is
+  // line-oriented, so a newline in a message does not wrap it — it starts a new
+  // command the runner obeys. Pre-fix this exact invocation emitted THREE
+  // directives from one thrown error, including an ::add-mask:: the caller never
+  // wrote. ::stop-commands:: is the direction that matters for a detector: it
+  // would switch off command processing for everything after it, silencing the
+  // very error being raised.
+  const r = spawnSync(
+    process.execPath,
+    [join(HERE, 'audit-delivery.mjs'), '--repo', 'a/b\n::add-mask::SECRET\n::error::forged'],
+    { encoding: 'utf8', env: { ...process.env, GITHUB_TOKEN: 'x' } },
+  );
+  const commands = (r.stderr + r.stdout).split('\n').filter((l) => l.startsWith('::'));
+  assert.equal(commands.length, 1, `exactly one directive, got:\n${commands.join('\n')}`);
+  assert.match(commands[0], /^::error::--repo must be owner\/name/);
+  assert.match(commands[0], /%0A::add-mask::SECRET/, 'the injected payload must be INERT, not absent');
+});
+
+test('auditRepo: the closed-PR walk has NO early stop — the whole history is read', async () => {
+  // A near-miss from this round, recorded as a test because it is the trap the
+  // NEXT person optimising this walk will step into. `created asc` costs 65 pages
+  // on guard, and the obvious saving is to stop once created_at passes --until.
+  // That would be wrong, and silently: the upper boundary is complete only
+  // because pagination reads the ENTIRE list. A PR created after --until can
+  // share a head SHA with an in-window PR, and dedupeByHead needs both members to
+  // resolve the collision — dropping the out-of-window one turns a resolved
+  // collision into a phantom gap. Under `asc` the window sits at the END of the
+  // list, so there is no sound early stop at all: the lower edge cannot terminate
+  // (everything interesting is still ahead) and the upper edge must not.
+  //
+  // Asserted on the CALL SHAPE because that is where a stop condition would be
+  // introduced: ghPaged takes it as an options argument, so its absence is the
+  // property. A response-based test cannot see the difference — a stub that
+  // returns one page looks identical either way.
+  const calls = [];
+  await auditRepo(
+    {
+      ghPaged: async (...a) => {
+        calls.push(a);
+        return [];
+      },
+      gh: async () => ({ total_count: 0 }),
+    },
+    { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: '2026-06-01' },
+    'guard',
+  );
+  const pulls = calls.find((a) => String(a[0]).includes('/pulls?'));
+  assert.ok(pulls, 'auditRepo must fetch closed PRs');
+  assert.equal(
+    pulls.length,
+    1,
+    `the closed-PR walk must pass no options — an early stop truncates the ` +
+      `head-SHA collision guard. Got: ${JSON.stringify(pulls.slice(1))}`,
+  );
 });
