@@ -1,0 +1,142 @@
+name: Audit Leaderboard Delivery
+description: >-
+  Audit whether every merged PR in a window produced a successful
+  leaderboard-metrics delivery, and write a JSON + markdown report to
+  $RUNNER_TEMP. Preconditions: `github-token` can read the audited repo's
+  contents AND actions (the audit reads merged PRs and workflow runs), and
+  node 18+ is on PATH (the script uses global fetch). Failure policy: finding
+  gaps is NOT an action failure — the action succeeds with `has-gaps=true` and
+  leaves it to the caller to decide what to do (file an issue, then fail). The
+  action fails only when the audit could not be trusted to have run at all
+  (missing token, bad flag, rate limit, truncated run list), because a detector
+  that reports "0 gaps" after failing to read anything is the exact failure
+  class it exists to catch. On that failure the outputs are not meaningful.
+
+inputs:
+  github-token:
+    description: Token with contents:read and actions:read on the audited repo
+    required: true
+  repo:
+    description: "owner/repo to audit"
+    required: true
+  days:
+    description: Size of the audit window in days, counted back from now. Ignored when `since` is set.
+    required: false
+    default: "30"
+  since:
+    description: >-
+      Explicit window start as YYYY-MM-DD. Overrides `days` when non-empty.
+    required: false
+    default: ""
+  caller-path:
+    description: >-
+      Path of the metrics caller workflow in the audited repo. Its basename is
+      what the workflow-runs API is queried by, so a repo that renamed its
+      caller must pass the new path or every merged PR reads as never-fired.
+    required: false
+    default: .github/workflows/leaderboard-metrics.yml
+  backfill-caller:
+    description: >-
+      Filename of the backfill workflow, used to render the replay command in
+      the report. Not invoked by this action.
+    required: false
+    default: leaderboard-backfill-caller.yml
+
+outputs:
+  has-gaps:
+    description: '"true" when at least one merged PR has no successful delivery, else "false"'
+    value: ${{ steps.audit.outputs.has_gaps }}
+  gap-count:
+    description: Number of affected PRs across all audited repos (0 when has-gaps is false)
+    value: ${{ steps.audit.outputs.gap_count }}
+  report-markdown:
+    description: Path to the rendered markdown report (unset if the audit did not produce one)
+    value: ${{ steps.audit.outputs.report_markdown }}
+  report-json:
+    description: Path to the JSON report (unset if the audit did not produce one)
+    value: ${{ steps.audit.outputs.report_json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Audit leaderboard delivery
+      id: audit
+      shell: bash
+      # Every input reaches the script through env, never through a ${{ }}
+      # interpolation in the run body: an interpolated value is spliced into the
+      # script before bash ever sees it, so a crafted input would execute as
+      # code (zizmor template-injection, High).
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ inputs.repo }}
+        DAYS: ${{ inputs.days }}
+        SINCE: ${{ inputs.since }}
+        CALLER_PATH: ${{ inputs.caller-path }}
+        BACKFILL_CALLER: ${{ inputs.backfill-caller }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+
+        json="${RUNNER_TEMP:-/tmp}/audit-delivery.json"
+        md="${RUNNER_TEMP:-/tmp}/audit-delivery.md"
+
+        # Built as an array so every value stays one argv element no matter what
+        # it contains — a flat string would word-split on spaces.
+        args=(
+          "--repo=$REPO"
+          "--caller-path=$CALLER_PATH"
+          "--backfill-caller=$BACKFILL_CALLER"
+          "--json=$json"
+          "--markdown=$md"
+        )
+        if [ -n "$SINCE" ]; then
+          args+=("--since=$SINCE")
+        else
+          args+=("--days=$DAYS")
+        fi
+
+        # The script's three-way exit status is load-bearing: 0 clean, 1 gaps
+        # found, 2 could-not-run. So capture it exactly.
+        #   - `|| rc=$?` because `set -e` would otherwise abort the step on the
+        #     perfectly expected exit 1 and lose the distinction entirely.
+        #   - No pipeline at all: `node ... | tee` would report tee's status,
+        #     silently turning every exit 1 and exit 2 into a clean 0.
+        rc=0
+        node "$ACTION_PATH/audit-delivery.mjs" "${args[@]}" || rc=$?
+
+        # Advertise the reports only if they exist. Nothing is written on the
+        # exit-2 paths, and a path output pointing at a missing file would send
+        # a caller off to upload or comment an artifact that is not there.
+        if [ -f "$json" ]; then
+          echo "report_json=$json" >> "$GITHUB_OUTPUT"
+        fi
+        if [ -f "$md" ]; then
+          echo "report_markdown=$md" >> "$GITHUB_OUTPUT"
+        fi
+
+        case "$rc" in
+          0)
+            echo "has_gaps=false" >> "$GITHUB_OUTPUT"
+            echo "gap_count=0" >> "$GITHUB_OUTPUT"
+            ;;
+          1)
+            echo "has_gaps=true" >> "$GITHUB_OUTPUT"
+            # Count the affected PRs from the report the script just wrote. A
+            # count that cannot be produced is reported as an error rather than
+            # as 0 — understating a live gap to zero would read as "clean".
+            if [ ! -f "$json" ]; then
+              echo "::error::audit reported gaps (exit 1) but wrote no JSON report at $json"
+              exit 1
+            fi
+            if ! gap_count=$(jq -e '[.repos_with_gaps[].replay | length] | add // 0' "$json"); then
+              echo "::error::could not read a gap count out of $json"
+              exit 1
+            fi
+            echo "gap_count=$gap_count" >> "$GITHUB_OUTPUT"
+            echo "::warning::Leaderboard delivery gaps detected for ${REPO}: ${gap_count} affected PR(s). See the report for the replay command."
+            ;;
+          *)
+            echo "::error::audit-delivery could not complete (exit ${rc}) — treat this as an UNKNOWN result, not a clean one. Common causes: token cannot read contents+actions, API rate limit, truncated run list."
+            exit 1
+            ;;
+        esac
