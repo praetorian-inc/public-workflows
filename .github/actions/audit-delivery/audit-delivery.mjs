@@ -132,6 +132,13 @@ export function classify(prs, byHead, onboardedTs) {
     skipped_anomaly: [],
     never_fired: [],
     pre_onboarding: [],
+    // A run exists but has not concluded yet (`conclusion === null`). NOT a gap
+    // and NOT a delivery — the honest answer is "not known yet", so it is
+    // neither replayed nor counted as delivered. It resolves itself on the next
+    // audit, which is what makes withholding a verdict safe here; a *concluded*
+    // run we do not recognize does NOT belong in this bucket, because nothing
+    // would ever resolve it.
+    in_flight: [],
   };
   for (const pr of prs) {
     const run = byHead.get(pr.head.sha);
@@ -153,7 +160,17 @@ export function classify(prs, byHead, onboardedTs) {
     }
     rec.run_id = run.id;
     rec.conclusion = run.conclusion;
-    if (run.conclusion === 'success') classes.delivered.push(rec);
+    if (run.conclusion === null) {
+      // queued / in_progress / waiting — `conclusion` stays null until a run
+      // completes. This used to fall through to never_fired, which put an
+      // ACTIVELY RUNNING delivery on the replay list: audit a PR merged seconds
+      // ago and the report demands a replay of a delivery that is about to
+      // succeed on its own. The window counts back from *now*, so a freshly
+      // merged PR is always in range — ordinary operation, not a corner case.
+      // Replaying it would double-deliver, and consumer-side idempotency is
+      // not established (ENG-5789).
+      classes.in_flight.push(rec);
+    } else if (run.conclusion === 'success') classes.delivered.push(rec);
     else if (FAILED.has(run.conclusion)) classes.failed.push(rec);
     else if (run.conclusion === 'skipped') {
       // The reusable gates on `merged == true`. A run that SKIPPED for a PR
@@ -161,22 +178,57 @@ export function classify(prs, byHead, onboardedTs) {
       // not a benign skip. Benign skips pair with unmerged closes, which are
       // filtered out by the caller and so never reach here.
       classes.skipped_anomaly.push(rec);
-    } else classes.never_fired.push(rec); // in_progress/null at audit time
+    } else {
+      // A CONCLUDED run whose conclusion is not one we enumerate: `neutral`,
+      // `stale`, or anything GitHub adds later. It is not `success`, so no
+      // delivery happened — and unlike an in-flight run it will NEVER change on
+      // a later audit, so parking it in in_flight would hide it permanently
+      // (neither delivered, nor a gap, forever). Fail safe: an unknown terminal
+      // conclusion is treated as a failed delivery, so it is surfaced and
+      // replayable. The `conclusion` field is carried on the record, so the
+      // report still says which value it actually was.
+      classes.failed.push(rec);
+    }
   }
   return classes;
 }
 
 export function dedupeByHead(runs) {
-  // Latest run wins per head_sha: a re-run must not be judged by its first,
-  // failed attempt.
+  // A SUCCESS outranks everything, and only then does the latest run win.
+  //
+  // Recency alone was wrong in one direction. The question this audit asks is
+  // "did a successful delivery ever happen for this head", and a delivery that
+  // succeeded stays delivered — the consumer already holds the row. So if a
+  // succeeded run is later re-run and fails (or is still running), recency would
+  // pick the newer non-success, classify the PR as a gap, and put an
+  // ALREADY-DELIVERED PR on the replay list. That is the one error direction
+  // that causes a double delivery rather than a missed one.
+  //
+  // The case recency exists for still works, because success-first subsumes it:
+  // a first attempt that failed and a re-run that succeeded resolves to the
+  // success either way.
   const byHead = new Map();
+  const won = (r, prev) => {
+    if (!prev) return true;
+    const a = r.conclusion === 'success';
+    const b = prev.conclusion === 'success';
+    if (a !== b) return a;
+    return Date.parse(r.created_at) > Date.parse(prev.created_at);
+  };
   for (const r of runs) {
-    const prev = byHead.get(r.head_sha);
-    if (!prev || Date.parse(r.created_at) > Date.parse(prev.created_at)) {
-      byHead.set(r.head_sha, r);
-    }
+    if (won(r, byHead.get(r.head_sha))) byHead.set(r.head_sha, r);
   }
   return byHead;
+}
+
+// One under the backfill's own 256-job matrix cap, so a batch is never exactly
+// at the limit it is trying to stay below.
+export const REPLAY_BATCH = 250;
+
+export function chunk(xs, n) {
+  const out = [];
+  for (let i = 0; i < xs.length; i += n) out.push(xs.slice(i, i + n));
+  return out;
 }
 
 export function replayList(classes) {
@@ -187,6 +239,45 @@ export function replayList(classes) {
 
 // ── Networking ───────────────────────────────────────────────────────────────
 
+// How long to wait before retrying a 403/429, in ms. Pure and exported so the
+// header handling can be tested without a network or a real clock.
+//
+// `retry-after` is checked FIRST because it is the header GitHub sends for
+// SECONDARY (abuse) rate limits, and those are the ones a paginating audit
+// actually trips. Keying only off `x-ratelimit-reset` — which secondary-limit
+// responses need not carry — made every secondary-limit retry wait the 1s floor
+// and burn all four attempts in about three seconds.
+export function retryDelayMs(headers, now = Date.now()) {
+  const MIN = 1000;
+  const MAX = 60000;
+  const clamp = (ms) => Math.max(MIN, Math.min(MAX, ms));
+
+  // Documented as either delta-seconds or an HTTP date; GitHub sends seconds.
+  const ra = headers.get('retry-after');
+  if (ra) {
+    const secs = Number(ra);
+    if (Number.isFinite(secs) && secs > 0) return clamp(secs * 1000);
+    const when = Date.parse(ra);
+    if (Number.isFinite(when)) return clamp(when - now);
+  }
+
+  // Primary limit: an epoch-seconds instant. Only usable if it is actually in
+  // the future — a missing or past value must not silently become the floor.
+  // The `delta > 0` test is intent, not arithmetic: MIN clamps a negative up to
+  // the floor anyway, so removing it changes no output TODAY. It is here so that
+  // lowering MIN can never resurrect the original bug, where a missing header
+  // made `reset - now` hugely negative and every retry waited the floor.
+  const reset = Number(headers.get('x-ratelimit-reset'));
+  if (Number.isFinite(reset) && reset > 0) {
+    const delta = reset * 1000 - now;
+    if (delta > 0) return clamp(delta);
+  }
+
+  // Nothing usable: a 403 can also mean "no permission", which no wait fixes.
+  // Retry cheaply and let the attempt cap turn it into an exit-2 UNKNOWN.
+  return MIN;
+}
+
 function makeClient(token) {
   const state = { calls: 0 };
   const headers = {
@@ -196,23 +287,32 @@ function makeClient(token) {
     'user-agent': 'leaderboard-delivery-audit',
   };
 
-  async function gh(path) {
-    const url = path.startsWith('http') ? path : `${API}${path}`;
+  // THE single point at which this script talks to the network. Both gh() and
+  // ghPaged() go through here, because they used to not: the rate-limit retry
+  // lived in gh() while ghPaged() called fetch() directly, and ghPaged() is the
+  // one that makes most of the calls (every page of PRs and of workflow runs —
+  // 40 of guard's 42). A 403/429 mid-pagination therefore aborted the whole
+  // audit with no retry at all, on precisely the busiest repos.
+  async function request(rawUrl) {
+    const url = rawUrl.startsWith('http') ? rawUrl : `${API}${rawUrl}`;
     for (let attempt = 0; attempt < 4; attempt++) {
       const res = await fetch(url, { headers });
       state.calls++;
-      if (res.status === 404) return { __missing: true };
       if (res.status === 403 || res.status === 429) {
-        const reset = Number(res.headers.get('x-ratelimit-reset') || 0) * 1000;
-        const waitMs = Math.max(1000, Math.min(60000, reset - Date.now()));
-        if (attempt === 3) throw new Error(`rate limited on ${url}`);
-        await new Promise((r) => setTimeout(r, waitMs));
+        if (attempt === 3) throw new Error(`rate limited on ${url} after 4 attempts`);
+        await new Promise((r) => setTimeout(r, retryDelayMs(res.headers)));
         continue;
       }
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText} on ${url}`);
-      return res.json();
+      return res;
     }
     throw new Error(`unreachable: retries exhausted on ${url}`);
+  }
+
+  async function gh(path) {
+    const res = await request(path);
+    if (res.status === 404) return { __missing: true };
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText} on ${path}`);
+    return res.json();
   }
 
   // Paginate by Link header rather than by "did I get a full page", which
@@ -222,8 +322,7 @@ function makeClient(token) {
     const items = [];
     let stop = false;
     while (url) {
-      const res = await fetch(url.startsWith('http') ? url : `${API}${url}`, { headers });
-      state.calls++;
+      const res = await request(url);
       if (res.status === 404) break;
       if (!res.ok) throw new Error(`${res.status} on ${url}`);
       const body = await res.json();
@@ -253,7 +352,10 @@ function makeClient(token) {
 // So the range is SLICED until every slice fits under the cap, and each slice
 // asserts that what it fetched equals what the API said existed. Truncation can
 // no longer be silent — it either subdivides or it throws.
-async function runsInRange(client, cfg, repo) {
+// Exported for tests: `client` is already the only way this reaches the network,
+// so a stub client exercises the slicing and the truncation guard directly —
+// no fetch mocking, and nothing about the real transport is faked.
+export async function runsInRange(client, cfg, repo) {
   const base = `/repos/${cfg.owner}/${repo}/actions/workflows/${cfg.callerFile}/runs`;
   const out = [];
   const stack = [[Date.parse(`${cfg.since}T00:00:00Z`), Date.now()]];
@@ -284,9 +386,18 @@ async function runsInRange(client, cfg, repo) {
       `${base}?per_page=100&created=${encodeURIComponent(range)}`,
       (x) => x.workflow_runs || [],
     );
-    if (got.length !== total) {
+    // Only a SHORTFALL is the danger. `total` comes from a per_page=1 probe
+    // taken moments before this fetch, and the last slice's range ends at
+    // today — so any run created in between lands in `got` and makes
+    // `got.length > total`. On a repo merging ~15 PRs a day that is ordinary
+    // churn, and a strict `!==` here turned it into a spurious exit-2 "audit
+    // could not complete", i.e. a false page on exactly the high-velocity repos
+    // the slicing exists to serve. Growth is harmless: an extra run is more
+    // data, not less. A shortfall is what silent truncation looks like, and
+    // that still throws.
+    if (got.length < total) {
       throw new Error(
-        `${repo}: slice ${range} reported total_count=${total} but ${got.length} runs were retrievable — refusing to classify against a truncated run list`,
+        `${repo}: slice ${range} reported total_count=${total} but only ${got.length} runs were retrievable — refusing to classify against a truncated run list`,
       );
     }
     out.push(...got);
@@ -365,7 +476,18 @@ export function renderMarkdown(report, cfg) {
   );
   L.push('');
   if (!report.repos_with_gaps.length) {
-    L.push('No gaps. Every merged PR in the window has a successful metrics delivery.');
+    // Do not claim every PR delivered while some are still undetermined — that
+    // sentence would be false, and falsely reassuring, exactly when a delivery
+    // is mid-flight.
+    if (report.totals.in_flight) {
+      L.push(
+        `No gaps. **${report.totals.in_flight}** merged PR(s) have a delivery still ` +
+          'running and are not yet decided either way — re-run the audit once they ' +
+          'conclude. Every other merged PR in the window delivered successfully.',
+      );
+    } else {
+      L.push('No gaps. Every merged PR in the window has a successful metrics delivery.');
+    }
     return L.join('\n');
   }
   L.push(
@@ -393,16 +515,34 @@ export function renderMarkdown(report, cfg) {
     if (g.pre_onboarding) {
       L.push(`| pre-onboarding (not a gap) | ${g.pre_onboarding} |`);
     }
+    if (g.in_flight) {
+      L.push(`| still running (not a gap, not replayed) | ${g.in_flight} |`);
+    }
     L.push('');
     L.push(`Affected PRs (${g.replay.length}): ${g.replay.map((n) => `#${n}`).join(', ')}`);
     L.push('');
-    L.push('Replay them with the repo\'s own backfill caller:');
+    // The backfill workflow fans out one matrix job per PR, and GitHub caps a
+    // matrix at 256 jobs — it validates that itself and refuses the whole run
+    // with "split into batches". So a single command for a list this long is one
+    // the report KNOWS will bounce; batch it here instead of handing over a
+    // paste that fails. (The shell is not the constraint: 188 PR numbers is
+    // ~940 bytes against a 1MB ARG_MAX.)
+    const batches = chunk(g.replay, REPLAY_BATCH);
+    L.push(
+      batches.length > 1
+        ? `Replay them with the repo's own backfill caller. ${g.replay.length} PRs exceeds ` +
+            `the backfill's 256-job matrix cap, so this is split into ${batches.length} ` +
+            'batches — dispatch them one at a time:'
+        : "Replay them with the repo's own backfill caller:",
+    );
     L.push('');
     L.push('```sh');
-    L.push(
-      `gh workflow run ${cfg.backfillCaller} --repo ${cfg.owner}/${g.repo} \\\n` +
-        `  -f pr_numbers='${g.replay.join(',')}'`,
-    );
+    for (const b of batches) {
+      L.push(
+        `gh workflow run ${cfg.backfillCaller} --repo ${cfg.owner}/${g.repo} \\\n` +
+          `  -f pr_numbers='${b.join(',')}'`,
+      );
+    }
     L.push('```');
     L.push('');
     L.push(
@@ -423,6 +563,9 @@ export function renderMarkdown(report, cfg) {
 
 export function buildReport(results, cfg, apiCalls) {
   const sum = (f) => results.reduce((n, r) => n + f(r), 0);
+  // in_flight is deliberately NOT a gap condition: an unconcluded run is an
+  // unknown, and raising on it would make the audit's verdict depend on how
+  // close it ran to a merge.
   const gaps = results.filter(
     (r) =>
       r.classes.failed.length || r.classes.never_fired.length || r.classes.skipped_anomaly.length,
@@ -439,6 +582,7 @@ export function buildReport(results, cfg, apiCalls) {
       never_fired: sum((r) => r.classes.never_fired.length),
       skipped_anomaly: sum((r) => r.classes.skipped_anomaly.length),
       pre_onboarding: sum((r) => r.classes.pre_onboarding.length),
+      in_flight: sum((r) => r.classes.in_flight.length),
     },
     repos_with_gaps: gaps.map((r) => ({
       repo: r.repo,
@@ -446,6 +590,7 @@ export function buildReport(results, cfg, apiCalls) {
       never_fired: r.classes.never_fired.length,
       skipped_anomaly: r.classes.skipped_anomaly.length,
       pre_onboarding: r.classes.pre_onboarding.length,
+      in_flight: r.classes.in_flight.length,
       replay: replayList(r.classes),
     })),
     repos: results,
@@ -489,7 +634,7 @@ async function main() {
   console.log(
     `mode=${report.mode} repos=${fleet.length} merged=${t.merged_prs} delivered=${t.delivered} ` +
       `FAILED=${t.failed} NEVER_FIRED=${t.never_fired} skipped_anomaly=${t.skipped_anomaly} ` +
-      `pre_onboarding=${t.pre_onboarding} api_calls=${report.api_calls}`,
+      `pre_onboarding=${t.pre_onboarding} in_flight=${t.in_flight} api_calls=${report.api_calls}`,
   );
   for (const g of report.repos_with_gaps) {
     console.log(

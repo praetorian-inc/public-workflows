@@ -80,6 +80,16 @@ runs:
         json="${RUNNER_TEMP:-/tmp}/audit-delivery.json"
         md="${RUNNER_TEMP:-/tmp}/audit-delivery.md"
 
+        # Clear any prior report BEFORE running. The paths are fixed, so a
+        # second invocation in the same job that dies on an exit-2 path (rate
+        # limit, bad token) writes nothing — and the `[ -f ]` checks below would
+        # then publish the FIRST invocation's report as if it described this
+        # run. Stale-but-plausible output is worse than absent output, since the
+        # documented contract is that outputs are meaningless after a failure.
+        # RUNNER_TEMP also survives across steps, and is not guaranteed clean on
+        # self-hosted runners.
+        rm -f "$json" "$md"
+
         # Built as an array so every value stays one argv element no matter what
         # it contains — a flat string would word-split on spaces.
         args=(
@@ -128,7 +138,21 @@ runs:
               echo "::error::audit reported gaps (exit 1) but wrote no JSON report at $json"
               exit 1
             fi
-            if ! gap_count=$(jq -e '[.repos_with_gaps[].replay | length] | add // 0' "$json"); then
+            # Counted with node, not jq: node is already a documented
+            # prerequisite (the detector needs it), whereas jq is only
+            # incidentally present on GitHub-hosted images. Depending on it
+            # would make this action fail on a container or self-hosted runner
+            # for a reason nothing in the input contract mentions.
+            # A throw here exits non-zero rather than printing 0, so an
+            # unreadable report is reported as an error instead of understating
+            # a live gap to zero.
+            if ! gap_count=$(node -e '
+              const fs = require("node:fs");
+              const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const n = r.repos_with_gaps.reduce((a, g) => a + g.replay.length, 0);
+              if (!Number.isInteger(n)) throw new Error("non-integer gap count");
+              process.stdout.write(String(n));
+            ' "$json"); then
               echo "::error::could not read a gap count out of $json"
               exit 1
             fi
