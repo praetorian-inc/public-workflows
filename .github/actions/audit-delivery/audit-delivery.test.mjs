@@ -295,6 +295,58 @@ test('parseArgs: a callerPath basename that would re-target the API URL is rejec
   }
 });
 
+test('parseArgs: a callerPath DIRECTORY that re-targets the API URL is rejected too', () => {
+  // The test above guards the basename, which is the part that cannot carry a
+  // traversal — and the full path is interpolated into an API URL path as well,
+  // in `hasCaller`. Same defect class, one variable over, so it needs the same
+  // guard rather than the same reasoning.
+  //
+  // Measured before the fix, which is why this is a test and not a comment:
+  //
+  //   parseArgs(['--caller-path=../../../../orgs/evil/leaderboard.yml'])  // ACCEPTED
+  //   new URL('/repos/praetorian-inc/guard/contents/' + that, 'https://api.github.com')
+  //     -> 'https://api.github.com/orgs/evil/leaderboard.yml'
+  //
+  // The basename is `leaderboard.yml`, so every check above passed while the
+  // request left the repository entirely with the Bearer token attached.
+  // Asserted per MESSAGE, not just "throws": an absolute path is caught by the
+  // empty-segment rule too (a leading `/` yields an empty first segment), so a
+  // bare `assert.throws` would pass with the absolute guard deleted and report a
+  // path traversal for `/etc/x.yml` — the wrong cause, and the operator's fix
+  // for it is different.
+  for (const [bad, why] of [
+    // walks off /repos/{owner}/{repo} entirely
+    ['../../../../orgs/evil/leaderboard.yml', /empty, "\." or "\.\." path segments/],
+    // traversal after a legitimate-looking prefix
+    ['.github/../../../x.yml', /empty, "\." or "\.\." path segments/],
+    // a `.` segment is not a directory either
+    ['./x.yml', /empty, "\." or "\.\." path segments/],
+    // an empty segment collapses the path
+    ['.github//workflows/x.yml', /empty, "\." or "\.\." path segments/],
+    // absolute, and it must say so rather than blaming a traversal
+    ['/etc/x.yml', /must be repo-relative, not absolute/],
+  ]) {
+    assert.throws(
+      () => parseArgs([`--caller-path=${bad}`], NOW),
+      why,
+      `--caller-path=${JSON.stringify(bad)} must be rejected, with its own cause`,
+    );
+  }
+
+  // The control, and the reason this guard is not anchored to
+  // `.github/workflows/`: the caller-renamed remediation prints
+  // `--caller-path <previous_filename>`, and a workflow MOVED INTO that
+  // directory has a previous path outside it. Anchoring would reject the exact
+  // command the report tells an operator to run.
+  for (const ok of [
+    '.github/workflows/leaderboard-metrics.yml',
+    'ci/legacy/metrics.yml',
+    'bare.yml',
+  ]) {
+    assert.equal(parseArgs([`--caller-path=${ok}`], NOW).callerPath, ok);
+  }
+});
+
 test('parseArgs: a backfillCaller carrying shell metacharacters is rejected', () => {
   // backfillCaller is interpolated into the `gh workflow run` line the report
   // tells a HUMAN to paste into a shell. The report is read by someone
@@ -1668,6 +1720,33 @@ test('resolveFleet: the readability probe runs BEFORE the caller probe', async (
   // /contents/ URL appears first, the caller probe got there before the guard.
   assert.equal(client.calls[0], '/repos/praetorian-inc/typo');
   assert.doesNotMatch(client.calls[0], /\/contents\//);
+});
+
+test('resolveFleet: the caller path is percent-encoded per SEGMENT before the request', async () => {
+  // The other half of the traversal fix, and it does not follow from the first:
+  // rejecting `..` in parseArgs does nothing about `?` or `#`, which re-target
+  // the request by starting a query or a fragment rather than by walking up.
+  // `.github/wo?rk/x.yml` has a valid basename and no traversal segment, so it
+  // reaches here — and unencoded it requests `/repos/o/r/contents/.github/wo`
+  // with `rk/x.yml` as the query string, i.e. a different resource whose answer
+  // is then read as this repo's caller file.
+  const client = fleetClient({ guard: { readable: true, caller: true } });
+
+  const fleet = await resolveFleet(client, {
+    ...FLEET_CFG,
+    repos: ['guard'],
+    callerPath: '.github/wo?rk/x.yml',
+  });
+  assert.deepEqual(fleet, ['guard']);
+
+  const contents = client.calls.filter((u) => u.includes('/contents/'));
+  assert.equal(contents.length, 1);
+  assert.equal(contents[0], '/repos/praetorian-inc/guard/contents/.github/wo%3Frk/x.yml');
+  // Encoded per segment, so the separators SURVIVE. Encoding the whole string
+  // would send `%2F` for every `/`, which the contents API does not read as a
+  // directory separator — that would 404 on the default path, i.e. on every
+  // repo, which the zero-fleet guard then reports as a broken fleet probe.
+  assert.equal(contents[0].includes('%2F'), false);
 });
 
 test('resolveFleet: a READABLE repo with no caller is still dropped, not an error', async () => {

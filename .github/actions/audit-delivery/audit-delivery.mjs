@@ -226,6 +226,31 @@ export function parseArgs(argv, now = Date.now()) {
     }
   }
 
+  // The FULL path is interpolated into an API URL path as well (`hasCaller`), so
+  // validating only the basename below was the same defect one variable over —
+  // and that comment names the mechanism exactly ("a value containing `/` or
+  // `..` re-targets the request"), about the one part of the path that cannot
+  // contain either. Measured, not reasoned: `--caller-path
+  // ../../../../orgs/evil/x.yml` passes the basename check (basename `x.yml`),
+  // and `new URL('/repos/praetorian-inc/guard/contents/' + that, API_BASE)`
+  // resolves to `https://api.github.com/orgs/evil/x.yml` — off the repo
+  // entirely, with the Bearer token attached.
+  //
+  // Deliberately NOT anchored to `.github/workflows/`: the caller-renamed
+  // remediation prints `--caller-path <previous_filename>`, and a workflow moved
+  // INTO that directory has a previous path outside it, so anchoring would
+  // reject the command this report tells an operator to run.
+  if (out.callerPath.startsWith('/')) {
+    throw new Error(
+      `--caller-path must be repo-relative, not absolute, got ${out.callerPath}`,
+    );
+  }
+  if (out.callerPath.split('/').some((s) => s === '' || s === '.' || s === '..')) {
+    throw new Error(
+      `--caller-path must not contain empty, "." or ".." path segments, got ${out.callerPath}`,
+    );
+  }
+
   // The runs endpoint is keyed by the workflow FILE NAME, which must track
   // --caller-path rather than being hardcoded alongside it.
   out.callerFile = out.callerPath.split('/').pop();
@@ -1361,7 +1386,16 @@ export async function runsInRange(client, cfg, repo) {
 const b64 = (s) => Buffer.from(s, 'base64').toString('utf8');
 
 async function hasCaller(client, cfg, repo) {
-  const f = await client.gh(`/repos/${cfg.owner}/${repo}/contents/${cfg.callerPath}`);
+  // Encoded per SEGMENT, never as a whole string: encodeURIComponent turns `/`
+  // into `%2F`, which the contents API does not read as a directory separator,
+  // so encoding whole would 404 on every legitimate nested path — i.e. on the
+  // default. Both this and the `..` rejection in parseArgs are load-bearing and
+  // neither implies the other: encodeURIComponent leaves `..` untouched (dots
+  // are unreserved), and rejecting `..` does nothing about `?` or `#`, which
+  // re-target the request just as effectively by starting a query or a fragment
+  // — `.github/wo?rk/x.yml` requests `/repos/o/r/contents/.github/wo`.
+  const path = cfg.callerPath.split('/').map(encodeURIComponent).join('/');
+  const f = await client.gh(`/repos/${cfg.owner}/${repo}/contents/${path}`);
   if (!f || f.__missing || !f.content) return false;
   // CONTENT probe: the caller must actually call the reusable. A repo can carry
   // a same-named file that calls something else entirely. Content, not
