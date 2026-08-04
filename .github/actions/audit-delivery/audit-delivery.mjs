@@ -79,6 +79,19 @@ export function parseArgs(argv, now = Date.now()) {
     out[k] = v;
   }
 
+  // An EXPLICITLY passed empty --repo is a caller bug, not a request for fleet
+  // mode. `if (out.repo)` below is false for '', so an empty value used to skip
+  // the owner/name check, skip the --repo/--repos exclusion, leave selfAudit
+  // false, and fall through to DEFAULTS.owner with repos=null — i.e. silently
+  // promote "audit this one repo" into an org-wide enumeration. The distinction
+  // from `null` is the point: null means the flag was never passed (fleet mode
+  // is then intentional), '' means a caller interpolated an unset value.
+  if (out.repo === '') {
+    throw new Error(
+      '--repo was passed with an empty value — refusing to fall back to an org-wide fleet audit',
+    );
+  }
+
   if (out.repo) {
     if (!/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
       throw new Error(`--repo must be owner/name, got ${out.repo}`);
@@ -325,8 +338,41 @@ export const SQS_STEP = 'Send metrics to SQS';
 export async function verifyPayloads(client, cfg, repo, recs) {
   const verdicts = new Map();
   for (const rec of recs) {
-    const jobs = await client.gh(`/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/jobs`);
-    const steps = (jobs && !jobs.__missing ? jobs.jobs || [] : []).flatMap((j) => j.steps || []);
+    // per_page is explicit: this endpoint defaults to 30 jobs, and a truncated
+    // list would hide a PRESENT delivery step, which then reads as a rename and
+    // stops the whole audit at exit 2 for a cause that is not the real one.
+    const jobs = await client.gh(
+      `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/jobs?per_page=100`,
+    );
+
+    // "Could not read the jobs" and "read them, the step is gone" are different
+    // facts with different repairs, and they used to collapse into the rename
+    // message below: __missing produced steps=[], so a 404 told the operator to
+    // update SQS_STEP. Both still FAIL — a run whose steps cannot be read is
+    // never evidence of a delivery — but the message has to name its own cause.
+    if (!jobs || jobs.__missing) {
+      throw new Error(
+        `${repo}: run ${rec.run_id} concluded success but its jobs could not be read ` +
+          '(404 or empty body) — delivery cannot be verified, so this is UNKNOWN rather ' +
+          'than delivered. A run past its retention window is the usual cause; narrow ' +
+          'the window with --since.',
+      );
+    }
+
+    const list = jobs.jobs || [];
+    // per_page=100 raises the ceiling; it does not remove it. Assert against the
+    // server's own count rather than assuming one page is always enough, because
+    // the failure is silent in the direction that matters (a present step read
+    // as absent).
+    if (typeof jobs.total_count === 'number' && jobs.total_count > list.length) {
+      throw new Error(
+        `${repo}: run ${rec.run_id} reports ${jobs.total_count} jobs but only ${list.length} ` +
+          'were returned — the job list is truncated, so a present delivery step could read ' +
+          'as absent. This endpoint needs pagination.',
+      );
+    }
+
+    const steps = list.flatMap((j) => j.steps || []);
     const step = steps.find((s) => s.name === SQS_STEP);
     if (!step) {
       // Absence is NOT treated as delivered. A name probe that silently answers
@@ -408,7 +454,10 @@ export function retryDelayMs(headers, now = Date.now()) {
 // would pass no matter what ships.
 export const RETRY_STATUS = new Set([403, 429, 500, 502, 503, 504]);
 
-function makeClient(token) {
+// Exported for the retry tests only. The attempt CAP and the decision to retry
+// a rejected fetch are this script's control flow, not the API's semantics, so
+// they are worth pinning even though the file otherwise refuses to mock fetch.
+export function makeClient(token) {
   const state = { calls: 0 };
   const headers = {
     authorization: `Bearer ${token}`,
@@ -426,8 +475,25 @@ function makeClient(token) {
   async function request(rawUrl) {
     const url = rawUrl.startsWith('http') ? rawUrl : `${API}${rawUrl}`;
     for (let attempt = 0; attempt < 4; attempt++) {
-      const res = await fetch(url, { headers });
-      state.calls++;
+      let res;
+      try {
+        res = await fetch(url, { headers });
+        state.calls++;
+      } catch (e) {
+        // A REJECTED fetch is a transport failure (dropped socket, DNS, TLS
+        // reset), not an answer, and it used to bypass this loop entirely and
+        // abort the audit as exit-2 UNKNOWN. That is the same consequence the
+        // status retries below exist to avoid, and it is likelier than a 502
+        // over the ~880 calls a wide guard window now makes. Counted as a call
+        // either way, so api_calls stays honest about what was attempted.
+        state.calls++;
+        if (attempt === 3) {
+          throw new Error(`fetch failed on ${url} after 4 attempts: ${e.message}`);
+        }
+        // No response means no rate-limit headers to read, so use the floor.
+        await new Promise((r) => setTimeout(r, retryDelayMs(new Headers())));
+        continue;
+      }
       // 403/429 are the rate limits; the 5xx entries are the ephemeral server
       // errors the API emits under load. Both are worth retrying, and both are
       // FATAL to an audit if they are not, because an aborted audit is an exit-2
@@ -871,7 +937,13 @@ async function main() {
     console.error(
       '::error::GITHUB_TOKEN (or GH_TOKEN) is unset — refusing to run. An unauthenticated audit would report a clean fleet it never actually read.',
     );
-    process.exit(2);
+    // exitCode + return, NOT process.exit: see the note at the end of main().
+    // The `return` is load-bearing — setting exitCode does not stop execution,
+    // so without it this would fall through to makeClient(undefined) and audit
+    // the whole window unauthenticated, which is the failure this check exists
+    // to prevent.
+    process.exitCode = 2;
+    return;
   }
   const client = makeClient(token);
 
@@ -883,7 +955,8 @@ async function main() {
     console.error(
       '::error::resolved ZERO caller repos — the fleet probe is broken or the token cannot read the org. Refusing to report a clean fleet.',
     );
-    process.exit(2);
+    process.exitCode = 2;
+    return; // load-bearing, as above
   }
 
   // Prove every subject is readable BEFORE auditing any of it, so an unreadable
@@ -917,13 +990,22 @@ async function main() {
   // 0 = clean, 1 = gaps found, 2 = the detector itself could not run. Keeping
   // "found something" distinct from "broke" is the whole point: a caller that
   // treats any non-zero exit as a gap would raise an issue on a rate-limit.
-  process.exit(report.repos_with_gaps.length ? 1 : 0);
+  //
+  // exitCode, never process.exit(): stdout is a PIPE under the Actions runner,
+  // and Node writes to a pipe asynchronously, so process.exit() terminates
+  // without flushing whatever is still queued. Measured on node 22 against a
+  // slow consumer, process.exit(1) delivered 56 of 2001 written lines and lost
+  // the last one entirely — which here is the summary and the GAP lines, i.e.
+  // exactly the evidence that explains the exit code. Assigning exitCode lets
+  // main() return and the process exit naturally once the queue drains. The
+  // JSON/markdown reports were never at risk (writeFileSync is synchronous).
+  process.exitCode = report.repos_with_gaps.length ? 1 : 0;
 }
 
 // Only run when executed directly, so the unit tests can import the pure parts.
 if (process.argv[1] && process.argv[1].endsWith('audit-delivery.mjs')) {
   main().catch((e) => {
     console.error(`::error::${e.message}`);
-    process.exit(2);
+    process.exitCode = 2;
   });
 }

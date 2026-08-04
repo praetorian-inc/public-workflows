@@ -30,6 +30,7 @@ import {
   renderMarkdown,
   buildReport,
   retryDelayMs,
+  makeClient,
   runsInRange,
   assertReadable,
   verifyPayloads,
@@ -268,6 +269,42 @@ test('parseArgs: --repo turns on self-audit and splits owner/name', () => {
 test('parseArgs: fleet mode leaves selfAudit false', () => {
   assert.equal(parseArgs([], NOW).selfAudit, false);
   assert.equal(parseArgs(['--repos=guard,palatine'], NOW).selfAudit, false);
+});
+
+test('parseArgs: an EMPTY --repo is rejected, not silently promoted to an org-wide audit', () => {
+  // `required: true` on an action input is documentation, not enforcement, so a
+  // caller interpolating an unset expression sends ''. The old `if (out.repo)`
+  // was false for '', which skipped the owner/name check AND the --repo/--repos
+  // exclusion, left selfAudit false, and fell through to DEFAULTS.owner with
+  // repos=null — turning "audit this repo" into an enumeration of the whole org.
+  assert.throws(() => parseArgs(['--repo='], NOW), /--repo was passed with an empty value/);
+  assert.throws(() => parseArgs(['--repo', ''], NOW), /--repo was passed with an empty value/);
+});
+
+test('parseArgs: an empty --repo does NOT leak fleet mode through selfAudit', () => {
+  // The consequence, asserted directly rather than via the message: whatever
+  // parseArgs does with '', it must never be the fleet configuration. Written so
+  // it fails on the pre-fix code (which returned selfAudit=false, repos=null)
+  // even if the error wording changes.
+  let cfg = null;
+  try {
+    cfg = parseArgs(['--repo='], NOW);
+  } catch {
+    return; // throwing is the accepted outcome
+  }
+  assert.fail(
+    `empty --repo must not produce a usable config; got selfAudit=${cfg.selfAudit} repos=${JSON.stringify(cfg.repos)}`,
+  );
+});
+
+test('parseArgs: omitting --repo entirely still selects fleet mode', () => {
+  // Control for the two above. `null` (flag never passed) and `''` (caller
+  // passed an unset value) are different facts and only the second is a bug —
+  // rejecting both would break the org-wide sweep this script also supports.
+  const cfg = parseArgs(['--repos=guard'], NOW);
+  assert.equal(cfg.selfAudit, false);
+  assert.equal(cfg.repo, null);
+  assert.deepEqual(cfg.repos, ['guard']);
 });
 
 test('parseArgs: --repos is split, trimmed, and emptied entries dropped', () => {
@@ -1415,8 +1452,70 @@ test('verifyPayloads: a 404 on the jobs endpoint throws, it does not pass the ru
   const client = jobsClient({ 444: { __missing: true } });
   return assert.rejects(
     () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 4, run_id: 444 }]),
-    /has no step named/,
+    /jobs could not be read/,
   );
+});
+
+test('verifyPayloads: an unreadable jobs list does NOT blame the step name', async () => {
+  // The earlier version of this test asserted /has no step named/ for the 404
+  // case and so PINNED a misleading diagnosis: __missing produced steps=[], the
+  // step lookup missed, and the operator was told to update SQS_STEP when the
+  // real cause was that the run's jobs could not be read at all (a run past its
+  // retention window, typically). Both cases must still fail — an unreadable run
+  // is never evidence of a delivery — but each has to name its own repair, so
+  // this asserts the rename text is ABSENT.
+  const client = jobsClient({ 444: { __missing: true } });
+  await assert.rejects(
+    () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 4, run_id: 444 }]),
+    (e) => {
+      assert.match(e.message, /jobs could not be read/);
+      assert.doesNotMatch(e.message, /has no step named/);
+      assert.doesNotMatch(e.message, /step names have changed/);
+      return true;
+    },
+  );
+});
+
+test('verifyPayloads: asks for a FULL page of jobs, not the default 30', async () => {
+  // The endpoint pages at 30 by default. A run with more jobs than one page
+  // would truncate, the present delivery step would read as absent, and the
+  // audit would stop at exit 2 blaming a rename.
+  const urls = [];
+  const client = {
+    gh: async (url) => {
+      urls.push(url);
+      return jobsWith('success');
+    },
+  };
+  await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 1, run_id: 111 }]);
+  assert.equal(urls.length, 1);
+  assert.match(urls[0], /\/actions\/runs\/111\/jobs\?per_page=100$/);
+});
+
+test('verifyPayloads: a TRUNCATED job list throws instead of reading a present step as absent', () => {
+  // per_page=100 raises the ceiling, it does not remove it. The server's own
+  // total_count is the only way to notice, and the failure it prevents is silent
+  // in the dangerous direction: a delivery step that EXISTS on job 101 would
+  // otherwise look like a rename and take the whole repo to exit 2.
+  const client = jobsClient({
+    555: { total_count: 140, jobs: [{ steps: [{ name: SQS_STEP, conclusion: 'success' }] }] },
+  });
+  return assert.rejects(
+    () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 5, run_id: 555 }]),
+    /reports 140 jobs but only 1 were returned/,
+  );
+});
+
+test('verifyPayloads: total_count matching the returned length is NOT truncation', async () => {
+  // Control for the check above: it must not fire on the normal single-page
+  // case, or every run would fail as truncated.
+  const client = jobsClient({
+    666: { total_count: 1, jobs: [{ steps: [{ name: SQS_STEP, conclusion: 'skipped' }] }] },
+  });
+  const v = await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [
+    { number: 6, run_id: 666 },
+  ]);
+  assert.equal(v.get(666), 'not_sent');
 });
 
 test('applyPayloadVerdicts: demotes only the unsent runs and leaves the rest delivered', () => {
@@ -1522,4 +1621,133 @@ test('renderMarkdown: the header does not claim a delivery it only inferred from
   );
   const md = renderMarkdown(report, { owner: 'praetorian-inc' });
   assert.match(md, /verified to have actually\s+enqueued a payload/);
+});
+
+// ── Transport-failure retry, and the exit-code discipline ────────────────────
+//
+// These two areas are the one place this file stubs `fetch`. The header's stance
+// still holds — mocking the API to re-assert the API's own semantics would test
+// the mock — but the ATTEMPT CAP and "a rejection is retried rather than
+// propagated" are this script's control flow, and their failure mode is losing a
+// whole repo's audit to one dropped socket.
+
+const withFetch = async (impl, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = impl;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+};
+
+const okRes = (body) => ({
+  status: 200,
+  ok: true,
+  headers: new Headers(),
+  json: async () => body,
+});
+
+test('makeClient: a REJECTED fetch is retried, not propagated as an audit failure', async () => {
+  // A dropped socket / DNS blip / TLS reset makes fetch REJECT, which used to
+  // bypass the attempt loop entirely and abort the audit as exit-2 UNKNOWN over
+  // the whole repo — the same consequence the 5xx retries exist to prevent, and
+  // likelier across the ~880 calls a wide guard window now makes.
+  let attempts = 0;
+  const body = await withFetch(
+    async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('fetch failed');
+      return okRes({ ok: true });
+    },
+    () => makeClient('t').gh('/repos/praetorian-inc/guard'),
+  );
+  assert.equal(attempts, 2, 'must retry once and then succeed');
+  assert.deepEqual(body, { ok: true });
+});
+
+test('makeClient: a fetch rejecting on every attempt fails after exactly 4 attempts', async () => {
+  // Bounded by the same cap as the status retries: retrying a genuinely broken
+  // endpoint must not spin, and the final error has to carry the transport cause
+  // rather than surfacing as a bare "unreachable".
+  let attempts = 0;
+  await withFetch(
+    async () => {
+      attempts++;
+      throw new TypeError('ECONNRESET');
+    },
+    () =>
+      assert.rejects(
+        () => makeClient('t').gh('/repos/praetorian-inc/guard'),
+        /fetch failed on .* after 4 attempts: ECONNRESET/,
+      ),
+  );
+  assert.equal(attempts, 4, 'exactly the 4-attempt cap, no more and no fewer');
+});
+
+test('makeClient: counts a rejected attempt in api_calls', async () => {
+  // api_calls is reported to the operator as what the audit cost. A retried
+  // transport failure consumed a request whether or not it produced a response,
+  // so omitting it would understate the real load.
+  let attempts = 0;
+  const client = makeClient('t');
+  await withFetch(
+    async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('fetch failed');
+      return okRes({});
+    },
+    () => client.gh('/repos/praetorian-inc/guard'),
+  );
+  assert.equal(client.state.calls, 2);
+});
+
+test('the script sets process.exitCode and never calls process.exit', async () => {
+  // process.exit() terminates without flushing stdout, which under the Actions
+  // runner is a PIPE and therefore asynchronous. Measured on node 22 against a
+  // slow consumer: process.exit(1) delivered 56 of 2001 written lines and lost
+  // the final one — here that is the `mode=… payload_missing=N` summary and the
+  // GAP lines, i.e. precisely the evidence explaining the exit code. Pinned at
+  // the source level because the failure is invisible in a fast-reader test:
+  // `node … | wc -l` drains the pipe as fast as it fills, so nothing ever queues
+  // and the bug cannot reproduce.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./audit-delivery.mjs', import.meta.url), 'utf8');
+  const offenders = src
+    .split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => !line.trim().startsWith('//'))
+    .filter(([, line]) => /process\.exit\s*\(/.test(line));
+  assert.deepEqual(
+    offenders,
+    [],
+    `process.exit() truncates buffered stdout; use process.exitCode (+ return). Offending lines: ${JSON.stringify(offenders)}`,
+  );
+  // And the replacement is actually present, so this cannot pass by the calls
+  // simply having been deleted.
+  assert.match(src, /process\.exitCode = report\.repos_with_gaps\.length \? 1 : 0;/);
+  assert.match(src, /process\.exitCode = 2;/);
+});
+
+test('the early-abort paths RETURN after setting exitCode', async () => {
+  // Setting exitCode does not stop execution. The token check and the zero-fleet
+  // check are guards INSIDE main(), so exitCode alone would fall through — the
+  // token path into makeClient(undefined) and a full unauthenticated audit,
+  // which is the exact failure that check exists to prevent. The `return` is
+  // load-bearing, and a literal reading of "replace process.exit with exitCode"
+  // would have removed it.
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./audit-delivery.mjs', import.meta.url), 'utf8');
+  for (const guard of ['GITHUB_TOKEN (or GH_TOKEN) is unset', 'resolved ZERO caller repos']) {
+    const at = src.indexOf(guard);
+    assert.ok(at > 0, `guard not found: ${guard}`);
+    const after = src.slice(at, at + 700);
+    const exitAt = after.indexOf('process.exitCode = 2;');
+    assert.ok(exitAt > 0, `no exitCode assignment after: ${guard}`);
+    assert.match(
+      after.slice(exitAt, exitAt + 120),
+      /process\.exitCode = 2;\s*\n\s*return;/,
+      `the guard for "${guard}" must return immediately after setting exitCode, or it falls through`,
+    );
+  }
 });

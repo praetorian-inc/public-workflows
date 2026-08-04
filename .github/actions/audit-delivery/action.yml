@@ -77,6 +77,22 @@ runs:
       run: |
         set -euo pipefail
 
+        # `required: true` on an action input is DOCUMENTATION, not enforcement:
+        # the runner happily passes an unset expression through as an empty
+        # string. Validate here, where the value enters, because an empty --repo
+        # made the script drop out of self-audit into an org-wide fleet sweep —
+        # `if (out.repo)` in parseArgs is false for '', so the owner/name check
+        # and the --repo/--repos exclusion were both skipped and `owner` fell
+        # back to its default. With an org-readable token that audits a scope
+        # this action never advertises; with a repo-scoped one it dies with
+        # "resolved ZERO caller repos", blaming the fleet probe for a bad input.
+        # parseArgs now rejects '' too — belt and braces, since the script is
+        # also runnable by hand.
+        if [ -z "$REPO" ]; then
+          echo "::error::repo input is empty — refusing to run. An empty value would audit the whole org instead of one repo."
+          exit 1
+        fi
+
         json="${RUNNER_TEMP:-/tmp}/audit-delivery.json"
         md="${RUNNER_TEMP:-/tmp}/audit-delivery.md"
 
