@@ -53,6 +53,7 @@ import {
   API_CAP,
   SLICE_MAX,
   COMMIT_FILES_CAP,
+  auditRepo,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -2971,4 +2972,383 @@ test('action.yml: --until is appended outside the since/days branch', () => {
     args.indexOf('--until=$UNTIL') > fiClosing,
     '--until must be appended after the since/days branch closes',
   );
+});
+
+// ── round 8: the empty --repos hole, and the attempt walk that stopped early ──
+
+test('parseArgs: an EMPTY --repos is rejected, not silently promoted to an org-wide audit', () => {
+  // The plural half of the round-4 empty-`--repo` fix, which was left open: the
+  // cited instance got fixed, the class did not. `--repos=` left out.repos as '',
+  // the split below it was skipped for being falsy, and resolveFleet's
+  // `if (!names)` is true for '' — so `--repos="$REPOS"` with REPOS unset audited
+  // the WHOLE ORG. The control for this assertion is two lines down: resolveFleet
+  // still org-enumerates for '', so this guard is the only thing standing between
+  // a caller bug and the wrong subject.
+  assert.throws(() => parseArgs(['--repos='], NOW), /--repos was passed with an empty value/);
+  assert.throws(() => parseArgs(['--repos', ''], NOW), /--repos was passed with an empty value/);
+  // And it fires even alongside --repo, where the mutual-exclusion check could not
+  // see it: `if (out.repos)` is false for '', so that check was skipped too.
+  assert.throws(
+    () => parseArgs(['--repo=praetorian-inc/guard', '--repos='], NOW),
+    /--repos was passed with an empty value/,
+  );
+});
+
+test('resolveFleet DOES org-enumerate for an empty repos string — the behaviour parseArgs now prevents', () => {
+  // Not a test of resolveFleet's correctness: a demonstration that the parseArgs
+  // guard above is load-bearing rather than defensive. If someone deletes it,
+  // this test still documents what the deletion costs. `''` is falsy, so the
+  // named-subject branch is skipped entirely and discovery runs.
+  const asked = [];
+  const client = {
+    gh: async (p) => {
+      asked.push(p);
+      return { __missing: true };
+    },
+    ghPaged: async (p) => {
+      asked.push(p);
+      return [{ name: 'a', archived: false, disabled: false }];
+    },
+  };
+  return resolveFleet(client, { owner: 'praetorian-inc', repos: '', callerPath: 'x.yml' }).then(
+    () => {
+      assert.ok(
+        asked.some((p) => p.startsWith('/orgs/praetorian-inc/repos')),
+        `expected an org enumeration, got ${JSON.stringify(asked)}`,
+      );
+    },
+  );
+});
+
+test('parseArgs: a --repos of only separators blames the caller, not the org', () => {
+  // `--repos=,,` survives the '' check and reaches resolveFleet as [], which is
+  // TRUTHY — so it does not org-enumerate, it resolves an empty fleet and
+  // main()'s zero-fleet guard exits 2. Safe, but that guard's message blames the
+  // fleet probe or the token for what is a caller's own flag value: the
+  // wrong-cause class from round 4, one layer up.
+  for (const bad of ['--repos=,,', '--repos=,', '--repos= , ']) {
+    assert.throws(
+      () => parseArgs([bad], NOW),
+      /--repos contained no repository names/,
+      `expected ${bad} to be rejected`,
+    );
+  }
+  // The message quotes what was actually passed, so the operator can see the
+  // difference between their variable and their intent.
+  assert.throws(() => parseArgs(['--repos=,,'], NOW), /got ",,"/);
+  // A real list still parses — the guard is about emptiness, not about commas.
+  assert.deepEqual(parseArgs(['--repos=guard, palatine ,'], NOW).repos, ['guard', 'palatine']);
+});
+
+test('recoverHiddenDeliveries: the attempt walk does NOT stop at a success that sent nothing', () => {
+  // Attempt 2 succeeded without sending; attempt 1 succeeded AND sent. The
+  // consumer already has this PR's message. Before the fix the descending walk
+  // stopped at the first successful attempt and read its verdict as final, so
+  // this record went to `payload_missing` — a FALSE gap whose remediation is a
+  // prod replay of a message already in the queue.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 3 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(900),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2/jobs?per_page=100': jobsWithStep('skipped'),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1/jobs?per_page=100': jobsWithStep('success'),
+  });
+
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.payload_missing, [], 'a sent attempt must not be a payload gap');
+    assert.deepEqual(classes.delivered.map((r) => r.number), [5]);
+    // Stamped with the attempt that SENT, not the latest one that succeeded.
+    assert.equal(classes.delivered[0].recovered_attempt, 1);
+    assert.deepEqual(classes.failed, []);
+    // And off the replay list, which is the consequence that writes.
+    assert.equal(
+      replayList({ ...classes, never_fired: [], skipped_anomaly: [] }).includes(5),
+      false,
+    );
+  });
+});
+
+test('recoverHiddenDeliveries: payload_missing only after EVERY successful attempt was probed', () => {
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 3 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(900),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2/jobs?per_page=100': jobsWithStep('skipped'),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1/jobs?per_page=100': jobsWithStep('skipped'),
+  });
+
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.delivered, []);
+    assert.deepEqual(classes.payload_missing.map((r) => r.number), [5]);
+    assert.equal(classes.payload_missing[0].payload, 'missing');
+    // Stamped with the LATEST success, because that is the attempt an operator
+    // will open to see the missing send.
+    assert.equal(classes.payload_missing[0].recovered_attempt, 2);
+    // Both attempts' job lists were actually read — this is what distinguishes
+    // the fix from the old early return, which produced the same verdict here.
+    for (const n of [1, 2]) {
+      assert.ok(
+        client.asked.includes(
+          `/repos/praetorian-inc/guard/actions/runs/900/attempts/${n}/jobs?per_page=100`,
+        ),
+        `attempt ${n} jobs were never probed; asked=${JSON.stringify(client.asked)}`,
+      );
+    }
+  });
+});
+
+test('recoverHiddenDeliveries: the walk stops as soon as an attempt DID send', () => {
+  // The exhaustive walk must not become an unconditional one: once a send is
+  // found the verdict cannot change, so no further attempt is worth an API call.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 3 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+  };
+  const client = attemptClient({
+    ...CURRENT(900),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/2/jobs?per_page=100': jobsWithStep('success'),
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/900/attempts/1/jobs?per_page=100': jobsWithStep('success'),
+  });
+
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.equal(classes.delivered[0].recovered_attempt, 2);
+    assert.equal(
+      client.asked.some((p) => p.includes('/attempts/1')),
+      false,
+      `attempt 1 must not be probed once attempt 2 sent; asked=${JSON.stringify(client.asked)}`,
+    );
+  });
+});
+
+test('verifyPayloads: a prior ATTEMPT that sent rescues a SUCCESS row from payload_missing', () => {
+  // recoverHiddenDeliveries walks attempts only for failed/skipped rows. A run
+  // re-run to SUCCESS whose re-run did not send never enters it and arrives here
+  // instead, where only siblings were checked — so attempt 1's real send was
+  // invisible and the PR was demoted to payload_missing.
+  const recs = [{ number: 5, run_id: 700, run_attempt: 2 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('skipped'),
+    '/repos/praetorian-inc/guard/actions/runs/700/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/700/attempts/1/jobs?per_page=100': jobsWithStep('success'),
+  });
+
+  return verifyPayloads(client, ACFG, 'guard', recs, null).then((v) => {
+    assert.equal(v.get(700), 'sent');
+    assert.equal(recs[0].sent_by_attempt, 1);
+  });
+});
+
+test('verifyPayloads: attempts are only probed when the winner did not send', () => {
+  const recs = [{ number: 5, run_id: 700, run_attempt: 2 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('success'),
+    '/repos/praetorian-inc/guard/actions/runs/700/attempts/1': { conclusion: 'success' },
+    '/repos/praetorian-inc/guard/actions/runs/700/attempts/1/jobs?per_page=100': jobsWithStep('success'),
+  });
+
+  return verifyPayloads(client, ACFG, 'guard', recs, null).then((v) => {
+    assert.equal(v.get(700), 'sent');
+    assert.deepEqual(client.asked, [
+      '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100',
+    ]);
+  });
+});
+
+test('verifyPayloads: an unreadable attempt leaves the replayable verdict rather than inventing a send', () => {
+  const recs = [{ number: 5, run_id: 700, run_attempt: 2 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('skipped'),
+    // attempts/1 is absent from the map, so attemptClient answers __missing.
+  });
+
+  return verifyPayloads(client, ACFG, 'guard', recs, null).then((v) => {
+    assert.equal(v.get(700), 'not_sent');
+    assert.equal('sent_by_attempt' in recs[0], false);
+  });
+});
+
+test('verifyPayloads: a run on attempt 1 triggers no attempt probe at all', () => {
+  // The control for the loop bound: `(run_attempt || 1) - 1` is 0, so the walk
+  // body never executes and no /attempts/ path is ever built.
+  const recs = [{ number: 5, run_id: 700, run_attempt: 1 }];
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/700/jobs?per_page=100': jobsWithStep('skipped'),
+  });
+
+  return verifyPayloads(client, ACFG, 'guard', recs, null).then((v) => {
+    assert.equal(v.get(700), 'not_sent');
+    assert.equal(
+      client.asked.some((p) => p.includes('/attempts/')),
+      false,
+    );
+  });
+});
+
+test('renderMarkdown: the replay list warns that an earlier repair is invisible to this report', () => {
+  const md = renderMarkdown(gapReport({ replay: [9, 10] }), CFG);
+
+  assert.match(md, /This report cannot see previous repairs/);
+  assert.match(md, /a PR already repaired there still appears above/);
+  assert.match(md, /writes a second copy/);
+  // The warning names the backfill caller from cfg, and — the reason this
+  // assertion exists — must NOT render the literal `undefined` for a field that
+  // renderMarkdown's callers do not supply.
+  assert.match(md, /`leaderboard-backfill-caller\.yml`/);
+  assert.doesNotMatch(md, /undefined/);
+});
+
+test('renderMarkdown: a clean repo gets no repair warning, because it gets no replay list', () => {
+  const clean = {
+    mode: 'fleet',
+    generated_at: '2026-08-04T12:00:00Z',
+    window: { since: '2026-07-05', until: '2026-08-04' },
+    api_calls: 10,
+    totals: {
+      merged_prs: 3,
+      delivered: 3,
+      failed: 0,
+      never_fired: 0,
+      skipped_anomaly: 0,
+      payload_missing: 0,
+      pre_onboarding: 0,
+      in_flight: 0,
+      unverifiable: 0,
+    },
+    repos: [],
+    repos_with_gaps: [],
+  };
+  const md = renderMarkdown(clean, CFG);
+  assert.doesNotMatch(md, /This report cannot see previous repairs/);
+});
+
+// ── round 8: the collision the WINDOW hid ────────────────────────────────────
+//
+// The head-SHA collision guard counted SHAs within the audited window only, while
+// runsInRange deliberately over-fetches past --until. So a merged PR excluded by
+// the window, sharing a head SHA with an included one, had its run credited to the
+// included PR — and the guard saw a count of one and allowed it. Silent direction:
+// the excluded PR's success speaks for the included PR's absent delivery.
+
+test('classify: a head-SHA collision whose other half is OUTSIDE the window still refuses', () => {
+  const prs = [pr(10, '2026-06-01T00:00:00Z', 'straddlesha')];
+  // Merged after --until, so never classified — but its run is on the shared SHA.
+  const outside = [pr(11, '2026-07-20T00:00:00Z', 'straddlesha')];
+  const byHead = dedupeByHead([run(5, 'straddlesha', 'success', '2026-07-20T00:00:10Z')]);
+  assert.throws(
+    () => classify(prs, byHead, null, NOW, outside),
+    /share head_sha straddle/,
+  );
+  // Both numbers named, and which side of the boundary each is on — an operator
+  // told only "#10 has a collision" cannot find the collider, since it is not in
+  // the report at all.
+  assert.throws(() => classify(prs, byHead, null, NOW, outside), /#10 \(in window\)/);
+  assert.throws(() => classify(prs, byHead, null, NOW, outside), /#11 .*OUTSIDE the audited/);
+  // The remediation differs from the in-window case and must not be copied from
+  // it: narrowing the window is what excluded the collider in the first place.
+  assert.throws(
+    () => classify(prs, byHead, null, NOW, outside),
+    /Narrowing the window cannot fix this/,
+  );
+});
+
+test('classify: the SAME input without the outside-window list is credited delivered', () => {
+  // The control that makes the test above load-bearing rather than decorative:
+  // this is the pre-fix behaviour, reachable today by omitting the argument. If the
+  // guard were counting something it already had, this would throw too.
+  const prs = [pr(10, '2026-06-01T00:00:00Z', 'straddlesha')];
+  const byHead = dedupeByHead([run(5, 'straddlesha', 'success', '2026-07-20T00:00:10Z')]);
+  const out = classify(prs, byHead, null, NOW);
+  assert.equal(out.delivered.length, 1);
+  assert.equal(out.delivered[0].number, 10);
+});
+
+test('classify: an outside-window collision with NO run on the shared SHA is allowed', () => {
+  // Same predicate as the in-window guard, and for the same reason: with no run to
+  // credit, each PR is classified from its own merged_at and no verdict crosses
+  // between them. This is guard's real Aug-2025 shape (both SHAs total_count 0),
+  // and throwing here would break the wide historical audit ENG-5775 needs — the
+  // exact regression the in-window version of this guard already caused once.
+  const prs = [pr(10, '2026-06-01T00:00:00Z', 'straddlesha')];
+  const outside = [pr(11, '2026-07-20T00:00:00Z', 'straddlesha')];
+  const out = classify(prs, new Map(), null, NOW, outside);
+  assert.equal(out.never_fired.length, 1);
+});
+
+test('classify: outside-window PRs on OTHER SHAs are ignored', () => {
+  // Without this control the guard could throw whenever `outsideWindow` is
+  // non-empty — which is almost every real --until audit — and every assertion
+  // above would still pass.
+  const prs = [pr(10, '2026-06-01T00:00:00Z', 'shaten')];
+  const outside = [pr(11, '2026-07-20T00:00:00Z', 'shaeleven')];
+  const byHead = dedupeByHead([
+    run(5, 'shaten', 'success', '2026-06-01T00:00:10Z'),
+    run(6, 'shaeleven', 'success', '2026-07-20T00:00:10Z'),
+  ]);
+  const out = classify(prs, byHead, null, NOW, outside);
+  assert.equal(out.delivered.length, 1);
+});
+
+test('classify: an UNMERGED PR outside the window is not a collider', () => {
+  // A closed-unmerged PR fired no delivery, so its head SHA cannot be credited to
+  // anyone. auditRepo filters on merged_at before passing the list; this pins the
+  // consequence rather than the filter, so moving the check does not lose it.
+  const prs = [pr(10, '2026-06-01T00:00:00Z', 'straddlesha')];
+  const byHead = dedupeByHead([run(5, 'straddlesha', 'success', '2026-06-01T00:00:10Z')]);
+  const out = classify(prs, byHead, null, NOW, [pr(11, null, 'straddlesha')]);
+  assert.equal(out.delivered.length, 1);
+});
+
+test('auditRepo: the --until boundary collision reaches the guard end-to-end', async () => {
+  // The wiring, which no classify() test can reach: the guard is only as good as
+  // auditRepo actually collecting the PRs its own window threw away. Pre-fix this
+  // audit returned a clean `delivered: 1`.
+  const shared = 'straddlesha0000';
+  const calls = [];
+  const client = {
+    ghPaged: async (path) => {
+      calls.push(path);
+      if (path.includes('/pulls?'))
+        return [
+          // Merged 2026-07-20, excluded by --until 2026-07-01. Newest first, which
+          // is the order `sort=updated&direction=desc` returns and the reason this
+          // PR is in the fetch set at zero extra cost.
+          { ...pr(11, '2026-07-20T00:00:00Z', shared), updated_at: '2026-07-20T00:00:00Z' },
+          { ...pr(10, '2026-06-01T00:00:00Z', shared), updated_at: '2026-06-01T00:00:00Z' },
+        ];
+      if (path.includes('/commits?')) return []; // no caller history -> onboardedAt null
+      if (path.includes('/runs?')) return [run(5, shared, 'success', '2026-07-20T00:00:10Z')];
+      throw new Error(`unexpected ghPaged ${path}`);
+    },
+    gh: async (path) => {
+      calls.push(path);
+      if (path.includes('per_page=1&created=')) return { total_count: 1 };
+      throw new Error(`unexpected gh ${path}`);
+    },
+  };
+  await assert.rejects(
+    () =>
+      auditRepo(client, { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: '2026-07-01' }, 'guard'),
+    /#10 \(in window\).*#11 .*OUTSIDE/s,
+  );
+  // And it refused BEFORE spending the payload probes — the throw is in classify,
+  // which runs ahead of recoverHiddenDeliveries and verifyPayloads. A guard that
+  // fired only after the probes would still be correct but would burn a wide
+  // audit's API budget on a verdict it was about to discard.
+  assert.equal(calls.filter((p) => p.includes('/jobs')).length, 0);
 });

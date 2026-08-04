@@ -99,6 +99,20 @@ export function parseArgs(argv, now = Date.now()) {
     );
   }
 
+  // The SAME defect on the plural flag, which the round-4 fix above left open —
+  // the cited instance got fixed, the class did not. `--repos=` leaves out.repos
+  // as '', the `if (out.repos)` split below is skipped, and resolveFleet's
+  // `if (!names)` is true for '' — so it enumerates the whole org. Measured, not
+  // reasoned: `parseArgs(['--repos='])` then resolveFleet issued
+  // `GET /orgs/praetorian-inc/repos?per_page=100&type=all`. A caller doing
+  // `--repos="$REPOS"` with REPOS unset therefore turns a targeted audit into an
+  // org-wide sweep, which is both the wrong subject and ~20x the API budget.
+  if (out.repos === '') {
+    throw new Error(
+      '--repos was passed with an empty value — refusing to fall back to an org-wide fleet audit',
+    );
+  }
+
   if (out.repo) {
     if (!/^[^/\s]+\/[^/\s]+$/.test(out.repo)) {
       throw new Error(`--repo must be owner/name, got ${out.repo}`);
@@ -110,7 +124,22 @@ export function parseArgs(argv, now = Date.now()) {
     out.selfAudit = true;
   } else {
     out.selfAudit = false;
-    if (out.repos) out.repos = out.repos.split(',').map((s) => s.trim()).filter(Boolean);
+    if (out.repos) {
+      const raw = out.repos;
+      out.repos = out.repos.split(',').map((s) => s.trim()).filter(Boolean);
+      // `--repos=,,` survives the '' check above and reaches here as []. That is
+      // TRUTHY, so resolveFleet does not org-enumerate — it iterates nothing and
+      // returns an empty fleet, which main()'s zero-fleet guard catches at exit 2.
+      // Safe, but it reports the WRONG CAUSE: that guard's message blames the
+      // fleet probe or the token, when the actual fault is the caller's own flag
+      // value. Same class as the round-4 empty-`repo` diagnostic.
+      if (!out.repos.length) {
+        throw new Error(
+          `--repos contained no repository names (got ${JSON.stringify(raw)}) — this is a caller ` +
+            'bug in the flag value, not an unreadable org',
+        );
+      }
+    }
   }
 
   if (out.since) {
@@ -278,7 +307,11 @@ export const RUN_HISTORY_DAYS = 400;
 // `byHead` is the already-deduplicated head_sha -> run map. `now` is a parameter
 // so the grace window is testable against a fixed clock rather than by sleeping;
 // every production caller keeps the real clock.
-export function classify(prs, byHead, onboardedTs, now = Date.now()) {
+// `outsideWindow` is merged PRs the caller's date window EXCLUDED. They are never
+// classified — they only widen the collision guard below, which is blind to a
+// collision whose other half sits outside the window. Defaults to empty so every
+// existing caller and test keeps its current behaviour.
+export function classify(prs, byHead, onboardedTs, now = Date.now(), outsideWindow = []) {
   // The whole join is head_sha -> run, and `dedupeByHead` collapses every run on
   // a SHA to one winner with success taking precedence. That is right for a
   // re-run of the same PR and wrong the moment two merged PRs share a commit,
@@ -348,6 +381,33 @@ export function classify(prs, byHead, onboardedTs, now = Date.now()) {
           'before trusting this repo.',
       );
     }
+  }
+  // Same unsoundness, other half outside the window. The remediation is DIFFERENT
+  // and that is why this is a separate message rather than a wider count: for an
+  // in-window pair the advice is "narrow the window so only one is in range", and
+  // here narrowing is what created the problem — the collider is already excluded
+  // and its run is still being credited. Only attributing the runs on that SHA by
+  // hand settles it.
+  for (const pr of outsideWindow) {
+    // A closed-unmerged PR fired no delivery, so nothing on its head SHA can be
+    // credited to anyone and refusing over it would be a false alarm. auditRepo
+    // already filters on merged_at; this is here because classify is pure and
+    // exported, and the version without it printed "merged null" into an
+    // operator-facing refusal — a message whose own text shows it is wrong.
+    if (!pr.merged_at) continue;
+    if (!byShaCount.has(pr.head.sha) || !byHead.get(pr.head.sha)) continue;
+    const inWin = prs
+      .filter((p) => p.head.sha === pr.head.sha)
+      .map((p) => `#${p.number}`)
+      .join(', ');
+    throw new Error(
+      `${inWin} (in window) and #${pr.number} (merged ${pr.merged_at}, OUTSIDE the audited ` +
+        `window) share head_sha ${pr.head.sha.slice(0, 8)} — delivery is joined by head SHA, ` +
+        `so a run belonging to #${pr.number} would be credited to ${inWin} and a real gap ` +
+        'would read as delivered. Narrowing the window cannot fix this, because the colliding ' +
+        `PR is already excluded by it: attribute the runs on that SHA by hand ` +
+        `(gh run list --commit ${pr.head.sha}) before trusting this repo.`,
+    );
   }
 
   const classes = {
@@ -667,6 +727,40 @@ export async function verifyPayloads(client, cfg, repo, recs, altSuccessRunIds =
         }
       }
     }
+    // Prior ATTEMPTS of this same run, the third hiding place and the one no
+    // branch covered. recoverHiddenDeliveries walks attempts only for rows whose
+    // conclusion is failed/skipped; a row that concluded SUCCESS never enters it
+    // and arrives here instead. So a run re-run to success whose re-run did not
+    // send, over an attempt 1 that succeeded and DID send, was demoted to
+    // payload_missing on the strength of the winning attempt alone — a false gap
+    // in the same direction as the sibling case, from the delivered side.
+    //
+    // Bounded by the payload_missing count (2 in guard's 90-day window), not by
+    // the delivered count, for the same reason the sibling walk is: it runs only
+    // after the winner has already said `not_sent`.
+    if (verdict === 'not_sent') {
+      for (let n = (rec.run_attempt || 1) - 1; n >= 1; n--) {
+        const path = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/attempts/${n}`;
+        const att = await client.gh(path);
+        // Same asymmetry as in recoverHiddenDeliveries: an unreadable attempt
+        // leaves the existing (replayable) verdict rather than inventing a
+        // delivery.
+        if (!att || att.__missing || att.conclusion !== 'success') continue;
+        if (
+          (await probeSqsStep(
+            client,
+            cfg,
+            repo,
+            `${path}/jobs`,
+            `run ${rec.run_id} attempt ${n}`,
+          )) === 'sent'
+        ) {
+          rec.sent_by_attempt = n;
+          verdict = 'sent';
+          break;
+        }
+      }
+    }
     verdicts.set(rec.run_id, verdict);
   }
   return verdicts;
@@ -688,7 +782,10 @@ export async function verifyPayloads(client, cfg, repo, recs, altSuccessRunIds =
 //      runs-list row rather than adding one, so that success is invisible to
 //      every ranking rule dedupeByHead could apply.
 //   3. A SIBLING run on the same head succeeded — handled in verifyPayloads,
-//      which is the same class approached from the delivered side.
+//      which is the same class approached from the delivered side. That function
+//      also walks prior ATTEMPTS, because (2) below is gated on a non-success
+//      conclusion: a row that concluded SUCCESS having sent nothing never reaches
+//      this function at all, so its own earlier attempts have to be checked there.
 //
 // Measured before writing (1): across all 101 non-success leaderboard-metrics
 // runs guard has, ZERO carry a successful SQS step — every one dies at `Set up
@@ -730,9 +827,27 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes) {
         continue; // NOT kept, and no attempt walk: this head already delivered.
       }
 
-      // (2) Descending: the LATEST successful attempt is the one whose payload
-      // verdict describes the final state of this head.
-      for (let n = (rec.run_attempt || 1) - 1; n >= 1 && !moved; n--) {
+      // (2) Descending over EVERY successful attempt, not down to the first one.
+      // The question this audit answers is "was the payload ever delivered", and
+      // an earlier attempt's send is as real as a later one's — the consumer
+      // already has the message. Stopping at the latest successful attempt asked
+      // a different question ("what does the final state say") and answered this
+      // one wrongly whenever attempt 2 succeeded without sending while attempt 1
+      // succeeded AND sent: the record went to `payload_missing`, a FALSE gap
+      // pointing at a prod replay of a message already in the queue.
+      //
+      // The file already implemented the right rule one screen up and this branch
+      // contradicted it: verifyPayloads walks EVERY sibling success on the head
+      // rather than trusting the winner. Sibling runs and prior attempts are the
+      // same hiding place reached two ways, so they get the same exhaustive walk.
+      //
+      // Cost stays bounded by what would be replayed: attempts are only probed
+      // for records past attempt 1 (guard: 5 of 1537 runs, 2 of them non-success),
+      // and the extra probes here happen only when the latest success says
+      // nothing was sent.
+      let sentAttempt = null;
+      let latestSuccess = null;
+      for (let n = (rec.run_attempt || 1) - 1; n >= 1 && sentAttempt === null; n--) {
         const path = `/repos/${cfg.owner}/${repo}/actions/runs/${rec.run_id}/attempts/${n}`;
         const att = await client.gh(path);
         // A reaped or unreadable ATTEMPT is not fatal here, unlike an unreadable
@@ -740,7 +855,7 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes) {
         // audit still has a verdict. Skipping leaves the existing `failed` —
         // over-reporting, never a silent double-delivery.
         if (!att || att.__missing || att.conclusion !== 'success') continue;
-        rec.recovered_attempt = n;
+        if (latestSuccess === null) latestSuccess = n;
         const verdict = await probeSqsStep(
           client,
           cfg,
@@ -748,11 +863,20 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes) {
           `${path}/jobs`,
           `run ${rec.run_id} attempt ${n}`,
         );
-        if (verdict === 'sent') classes.delivered.push(rec);
-        else {
-          rec.payload = 'missing';
-          classes.payload_missing.push(rec);
-        }
+        if (verdict === 'sent') sentAttempt = n;
+      }
+      if (sentAttempt !== null) {
+        rec.recovered_attempt = sentAttempt;
+        classes.delivered.push(rec);
+        moved = true;
+      } else if (latestSuccess !== null) {
+        // Every successful attempt was probed and none sent. Only now is
+        // payload_missing the honest verdict; it is stamped with the LATEST
+        // success because that is the attempt whose absence of a send an operator
+        // will go and look at.
+        rec.recovered_attempt = latestSuccess;
+        rec.payload = 'missing';
+        classes.payload_missing.push(rec);
         moved = true;
       }
       if (!moved) kept.push(rec);
@@ -1010,9 +1134,13 @@ export async function runsInRange(client, cfg, repo) {
   // at 23:59:59 on the day before `--until` has its run created on the excluded
   // side of that boundary. Clamping runs to --until would drop it, and a PR whose
   // run was dropped classifies as never_fired — onto the replay list, which
-  // writes. Over-fetching runs cannot produce the mirror error: the join is by
-  // head SHA against an already-bounded PR list, so a run with no PR in the
-  // window is simply never looked up.
+  // writes. Over-fetching runs is very nearly free of the mirror error: the join
+  // is by head SHA against an already-bounded PR list, so a run whose own PR is
+  // outside the window is normally never looked up. The one exception is a head
+  // SHA shared by an in-window and an out-of-window PR, where the excluded PR's
+  // run IS looked up and credited — auditRepo therefore feeds the excluded merged
+  // PRs to classify's collision guard, which refuses that case rather than
+  // clamping runs and reintroducing the false never_fired described above.
   const stack = [[Date.parse(`${cfg.since}T00:00:00Z`), Date.now()]];
 
   while (stack.length) {
@@ -1311,7 +1439,11 @@ export async function onboardedAt(client, cfg, repo) {
   return dates[0] || null;
 }
 
-async function auditRepo(client, cfg, repo) {
+// Exported for the boundary-collision test. The wiring is the load-bearing half
+// of that guard — classify() cannot see an out-of-window PR unless auditRepo
+// hands it one — and a pure classify() test passes whether or not this function
+// actually does.
+export async function auditRepo(client, cfg, repo) {
   const sinceTs = Date.parse(`${cfg.since}T00:00:00Z`);
   const untilTs = cfg.until ? Date.parse(`${cfg.until}T00:00:00Z`) : null;
 
@@ -1319,13 +1451,12 @@ async function auditRepo(client, cfg, repo) {
   // that bites the runs endpoint (guard returned all 1419). Sorted by
   // updated_at desc, we can stop as soon as updated_at falls below the window:
   // updated_at >= merged_at always, so nothing in the window is skipped.
-  const prs = (
-    await client.ghPaged(
-      `/repos/${cfg.owner}/${repo}/pulls?state=closed&per_page=100&sort=updated&direction=desc`,
-      null,
-      (last) => Date.parse(last.updated_at) < sinceTs,
-    )
-  ).filter((p) => {
+  const fetched = await client.ghPaged(
+    `/repos/${cfg.owner}/${repo}/pulls?state=closed&per_page=100&sort=updated&direction=desc`,
+    null,
+    (last) => Date.parse(last.updated_at) < sinceTs,
+  );
+  const inWindow = (p) => {
     if (!p.merged_at) return false;
     const ts = Date.parse(p.merged_at);
     // Upper bound is EXCLUSIVE at midnight UTC, so `--until 2026-06-10` means
@@ -1336,11 +1467,44 @@ async function auditRepo(client, cfg, repo) {
     // different caller paths and getting two different verdicts for them.
     if (untilTs !== null && ts >= untilTs) return false;
     return ts >= sinceTs;
-  });
+  };
+  const prs = fetched.filter(inWindow);
+  // Merged PRs the window EXCLUDED, kept only so the head-SHA collision guard in
+  // classify() can see them. runsInRange deliberately over-fetches past --until,
+  // and its comment claims that is harmless because "a run with no PR in the
+  // window is simply never looked up". That claim is false in exactly one case:
+  // if an EXCLUDED merged PR shares a head SHA with an INCLUDED one, the excluded
+  // PR's run is looked up — under the included PR's SHA — and credited to it. The
+  // in-window guard cannot see it, because from inside the window that SHA has a
+  // count of one. So a collision straddling the boundary is the one collision that
+  // reads as a clean delivery, which is the failure direction this whole guard
+  // exists to refuse.
+  //
+  // Reachability is not hypothetical on either half. Collisions are OBSERVED (two
+  // pairs in guard's 5291 merged PRs, one branch opened against two bases), and
+  // the two-window partition is the DESIGNED workflow for the caller rename above
+  // — `--since A --until cut` then `--since cut` — so the boundary is something
+  // operators are told to place, not an accident.
+  //
+  // Coverage is honestly partial, and the asymmetry is not arbitrary. The upper
+  // side is complete: pagination walks from newest, so every PR merged after
+  // --until is already in `fetched`, at zero extra API cost. The lower side is
+  // best-effort: pagination stops once updated_at falls below --since, so a PR
+  // merged before the window is here only if it was touched since. Closing that
+  // properly means paging further back on every audit — a real cost for the
+  // rarer half of a latent defect — so it stays uncovered rather than covered by
+  // a page count that would look principled and not be.
+  const outsideWindow = fetched.filter((p) => p.merged_at && !inWindow(p));
 
   const runs = await runsInRange(client, cfg, repo);
   const onboarded = await onboardedAt(client, cfg, repo);
-  const classes = classify(prs, dedupeByHead(runs), onboarded ? Date.parse(onboarded) : null);
+  const classes = classify(
+    prs,
+    dedupeByHead(runs),
+    onboarded ? Date.parse(onboarded) : null,
+    Date.now(),
+    outsideWindow,
+  );
   // Recover BEFORE the payload probe, not after: a record rescued from a prior
   // attempt joins `delivered` or `payload_missing` with its verdict already
   // determined by the attempt it was rescued from, so running it through
@@ -1567,6 +1731,30 @@ export function renderMarkdown(report, cfg) {
     L.push(
       '> Replaying writes to the production metrics queue. It is idempotent only ' +
         'while author resolution is unchanged (ENG-5693) — confirm before dispatching.',
+    );
+    L.push('>');
+    // This list does not shrink when a repair succeeds, and saying so is the
+    // difference between a stale entry and a second score row. Delivery is joined
+    // through `cfg.callerFile` only, while a repair is dispatched through
+    // `cfg.backfillCaller` — a separate workflow whose runs carry the default
+    // branch's SHA, not the PR's, so no head-SHA join can see them and the audit
+    // is structurally unable to observe its own remediation (ENG-5790). The
+    // onboarding boundary can also land early on a merge-commit-introduced caller,
+    // adding an entry that was never a gap. Both err toward listing too much, so
+    // the check belongs at DISPATCH time, where the write happens.
+    // `cfg.callerFile` is deliberately NOT interpolated here. renderMarkdown is
+    // called in tests and by buildReport consumers with a cfg carrying only
+    // `owner` and `backfillCaller` — the fields the replay command needs — so
+    // naming callerFile would render the literal string `undefined` into an
+    // operator-facing warning. `backfillCaller` is safe because the command
+    // directly above already depends on it.
+    L.push(
+      '> This report cannot see previous repairs: a gap is joined to its delivery through ' +
+        `the metrics caller's runs, while a repair is dispatched through \`${cfg.backfillCaller}\` ` +
+        "— a different workflow, whose runs carry the default branch's SHA rather than the " +
+        "PR's, so no head-SHA join can find them. Check the repo's backfill-caller run history " +
+        'before dispatching: a PR already repaired there still appears above, and replaying it ' +
+        'writes a second copy.',
     );
     L.push('');
   }
