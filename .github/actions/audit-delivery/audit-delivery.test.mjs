@@ -34,6 +34,7 @@ import {
   runsInRange,
   onboardedAt,
   assertReadable,
+  resolveFleet,
   verifyPayloads,
   applyPayloadVerdicts,
   SQS_STEP,
@@ -126,6 +127,52 @@ test('parseArgs: rejects a --since that is not YYYY-MM-DD', () => {
   // The valid shape must NOT throw, or the test above would pass vacuously
   // against a parser that rejects everything.
   assert.equal(parseArgs(['--since=2026-01-01'], NOW).since, '2026-01-01');
+});
+
+test('parseArgs: rejects a --since that is shaped like a date but is not one', () => {
+  // Shape is not a date, and the roll-over family is the dangerous half: V8 does
+  // NOT reject 2026-02-31, it silently returns 2026-03-03. The audit would then
+  // cover a window nobody asked for while still printing the requested date, so
+  // every PR merged in the skipped days is invisible. Expectations are
+  // independently computed: Feb 2026 has 28 days, so the 31st is 3 days past the
+  // end (Mar 3), and April has 30, so the 31st is 1 day past (May 1).
+  assert.throws(
+    () => parseArgs(['--since=2026-02-31'], NOW),
+    /normalizes to 2026-03-03/,
+  );
+  assert.throws(
+    () => parseArgs(['--since=2026-04-31'], NOW),
+    /normalizes to 2026-05-01/,
+  );
+  // The not-a-date family yields NaN. It already failed SAFE before this guard
+  // (exit 2 via "Invalid time value"), so what is pinned here is only that the
+  // message now names the flag and the value instead of neither.
+  for (const bad of ['2026-13-01', '2026-00-10']) {
+    assert.throws(
+      () => parseArgs([`--since=${bad}`], NOW),
+      /--since is not a real date: /,
+      `expected --since=${bad} to be rejected by name`,
+    );
+  }
+  // Real calendar edges must survive, or the round-trip check would be a blanket
+  // rejection: a leap day in a leap year, and the last day of a 31-day month.
+  assert.equal(parseArgs(['--since=2024-02-29'], NOW).since, '2024-02-29');
+  assert.equal(parseArgs(['--since=2026-01-31'], NOW).since, '2026-01-31');
+});
+
+test('parseArgs: rejects a --since in the future rather than reporting a clean empty window', () => {
+  // The worst of the three, because it is a perfectly valid date and the failure
+  // is a CLEAN verdict. Measured before the fix: `--repo praetorian-inc/caeruleus
+  // --since 2027-01-01` printed `merged=0 ... FAILED=0` and exited 0 — the
+  // detector reporting all-clear having examined nothing, which is precisely the
+  // failure class it exists to catch.
+  assert.throws(() => parseArgs(['--since=2027-01-01'], NOW), /is in the future/);
+  // The boundary, computed from NOW = 2026-08-04T12:00:00Z. Today's date parses
+  // to midnight UTC, which is in the PAST relative to noon, so it is allowed —
+  // an audit of "since this morning" is legitimate and must not be refused.
+  assert.equal(parseArgs(['--since=2026-08-04'], NOW).since, '2026-08-04');
+  // Tomorrow is not.
+  assert.throws(() => parseArgs(['--since=2026-08-05'], NOW), /is in the future/);
 });
 
 test('parseArgs: rejects --days=0, negatives, and non-integers', () => {
@@ -1156,9 +1203,9 @@ test('renderMarkdown: a clean report with a run still in flight does NOT claim e
 
   const md = renderMarkdown(cleanButRunning, CFG);
 
-  assert.match(md, /No gaps\./);
-  assert.match(md, /\*\*2\*\* merged PR\(s\) are not yet decided/);
-  assert.match(md, /Re-run the audit once they settle/);
+  assert.match(md, /No gaps among the PRs this audit can decide/);
+  assert.match(md, /Of \*\*12\*\* merged PR\(s\), \*\*2\*\* are not yet decided/);
+  assert.match(md, /re-run the\s+audit once they settle/);
   // in_flight has TWO causes and the prose must name both, or a reader takes
   // "still running" literally and treats a just-merged PR with no run row as
   // something other than the undecided case it is.
@@ -1168,6 +1215,74 @@ test('renderMarkdown: a clean report with a run still in flight does NOT claim e
   assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
   // Still no replay is offered: an in-flight delivery is not replayable.
   assert.doesNotMatch(md, /gh workflow run/);
+});
+
+test('renderMarkdown: a clean report with pre-onboarding PRs does NOT claim every PR delivered', () => {
+  // The live wording defect, pinned to the numbers that exposed it. These are
+  // caeruleus's real figures for `--since 2026-05-06`: 31 merged, 2 delivered, 29
+  // pre-onboarding, no gaps, exit 0 — and the report printed "Every merged PR in
+  // the window has a successful metrics delivery." False for 29 of the 31, and
+  // false in the reassuring direction, about exactly the PRs a backfill still
+  // owes. `in_flight` had this caveat from round 1; `pre_onboarding` was missed.
+  const cleanButPreOnboarding = {
+    since: '2026-05-06',
+    totals: { merged_prs: 31, delivered: 2, in_flight: 0, pre_onboarding: 29 },
+    repos_with_gaps: [],
+    repos: [{ repo: 'caeruleus', has_caller: true }],
+  };
+
+  const md = renderMarkdown(cleanButPreOnboarding, CFG);
+
+  // The unqualified claim must be absent — this is the assertion the bug fails.
+  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.match(md, /No gaps among the PRs this audit can decide/);
+  assert.match(md, /Of \*\*31\*\* merged PR\(s\), \*\*29\*\* merged before this repo had a caller/);
+  // Both halves of the pre-onboarding truth, because either alone misleads:
+  // "not a gap" without "did not deliver" reads as delivered, and "did not
+  // deliver" without "not a gap" reads as a failure to chase.
+  assert.match(md, /they are not gaps/);
+  assert.match(md, /did NOT deliver/);
+  // And it must point at the only thing that resolves them.
+  assert.match(md, /only a backfill will score them/);
+});
+
+test('renderMarkdown: in_flight and pre_onboarding caveats COMBINE rather than one masking the other', () => {
+  // The reason the sentence is built from the totals instead of written per
+  // case: with both classes non-zero, an if/else-if would name one and silently
+  // drop the other, which is how pre_onboarding went unreported in the first
+  // place. Both counts must survive.
+  const both = {
+    since: '2026-05-06',
+    totals: { merged_prs: 40, delivered: 30, in_flight: 3, pre_onboarding: 7 },
+    repos_with_gaps: [],
+    repos: [{ repo: 'guard', has_caller: true }],
+  };
+
+  const md = renderMarkdown(both, CFG);
+
+  assert.match(md, /\*\*3\*\* are not yet decided/);
+  assert.match(md, /\*\*7\*\* merged before this repo had a caller/);
+  assert.match(md, /Of \*\*40\*\* merged PR\(s\)/);
+  assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+});
+
+test('renderMarkdown: with NOTHING undecided the unqualified clean sentence is still used', () => {
+  // The control that stops the two tests above from passing against a version
+  // that simply never emits the clean sentence. A genuinely fully-verified
+  // window must still say so plainly — hedging every report would train readers
+  // to ignore the hedge.
+  const fullyClean = {
+    since: '2026-07-05',
+    totals: { merged_prs: 12, delivered: 12, in_flight: 0, pre_onboarding: 0 },
+    repos_with_gaps: [],
+    repos: [{ repo: 'guard', has_caller: true }],
+  };
+
+  const md = renderMarkdown(fullyClean, CFG);
+
+  assert.match(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
+  assert.doesNotMatch(md, /No gaps among the PRs this audit can decide/);
+  assert.doesNotMatch(md, /merged before this repo had a caller/);
 });
 
 // ── buildReport ──────────────────────────────────────────────────────────────
@@ -1401,6 +1516,120 @@ test('assertReadable: a null body is treated as unreadable, not as readable', ()
   return assert.rejects(
     () => assertReadable(client, { owner: 'praetorian-inc' }, 'guard'),
     /refusing to audit it/,
+  );
+});
+
+// ── resolveFleet: an explicitly named repo must not be silently dropped ───────
+
+const FLEET_CFG = {
+  owner: 'praetorian-inc',
+  callerPath: '.github/workflows/leaderboard-metrics.yml',
+  reusable: 'public-workflows/.github/workflows/leaderboard-metrics.yml@',
+};
+
+// Mirrors the two endpoints resolveFleet reaches through, keyed by repo name so a
+// mixed list can have per-repo behaviour. `readable` false makes EVERY path 404
+// for that repo, which is what a typo or an invisible private repo actually looks
+// like — not a special-cased contents 404.
+const fleetClient = (repos) => {
+  const calls = [];
+  return {
+    calls,
+    gh: async (url) => {
+      calls.push(url);
+      const m = url.match(/^\/repos\/[^/]+\/([^/?]+)(\/contents\/.*)?$/);
+      const state = repos[m[1]];
+      if (!state || !state.readable) return { __missing: true };
+      if (!m[2]) return { name: m[1] };
+      if (!state.caller) return { __missing: true };
+      return {
+        content: Buffer.from(
+          `jobs:\n  m:\n    uses: ${FLEET_CFG.reusable}v1\n`,
+        ).toString('base64'),
+      };
+    },
+  };
+};
+
+test('resolveFleet: one unreadable entry in an explicit --repos list REFUSES the audit', async () => {
+  // The live regression, measured before the fix: `--repos
+  // caeruleus,nonexistent-repo-xyz --since 2026-05-06` printed
+  // `mode=fleet repos=1 ... FAILED=0` and exited 0. The typo'd repo was struck by
+  // hasCaller's 404 -> false, the zero-fleet guard did not fire because one repo
+  // survived, and the report read clean over a fleet missing a requested subject.
+  const client = fleetClient({
+    caeruleus: { readable: true, caller: true },
+    'nonexistent-repo-xyz': { readable: false },
+  });
+
+  await assert.rejects(
+    () => resolveFleet(client, { ...FLEET_CFG, repos: ['caeruleus', 'nonexistent-repo-xyz'] }),
+    /praetorian-inc\/nonexistent-repo-xyz: repository not found/,
+  );
+});
+
+test('resolveFleet: the readability probe runs BEFORE the caller probe', async () => {
+  // Ordering IS the fix — assertReadable already existed in main(), which runs
+  // after this filtering and therefore only ever saw the survivors. A version
+  // that asserted afterwards would still drop the repo first, so only call order
+  // distinguishes the fixed code from the broken code.
+  const client = fleetClient({ typo: { readable: false } });
+
+  await assert.rejects(() => resolveFleet(client, { ...FLEET_CFG, repos: ['typo'] }), /not found/);
+  // The repo-level probe must be the first thing asked about this repo. If a
+  // /contents/ URL appears first, the caller probe got there before the guard.
+  assert.equal(client.calls[0], '/repos/praetorian-inc/typo');
+  assert.doesNotMatch(client.calls[0], /\/contents\//);
+});
+
+test('resolveFleet: a READABLE repo with no caller is still dropped, not an error', async () => {
+  // The control, and the distinction the fix rests on: "not onboarded" is a real
+  // answer and must stay a silent drop, while "cannot read it" must throw. Before
+  // the fix both produced the same silent drop, which is exactly why a typo was
+  // undetectable. Without this test the guard could pass by throwing on every
+  // repo that fails the caller probe.
+  const client = fleetClient({
+    caeruleus: { readable: true, caller: true },
+    'not-onboarded': { readable: true, caller: false },
+  });
+
+  const fleet = await resolveFleet(client, {
+    ...FLEET_CFG,
+    repos: ['caeruleus', 'not-onboarded'],
+  });
+
+  assert.deepEqual(fleet, ['caeruleus']);
+});
+
+test('resolveFleet: org-wide discovery does NOT assert readability per repo', async () => {
+  // Deliberate asymmetry. In org mode the names come from an enumeration the
+  // token can already see, and a repo it cannot read was never a requested
+  // subject — so skipping it is correct rather than a lost subject. Asserting
+  // here would also turn every archived-or-restricted org repo into a hard
+  // failure of the whole fleet audit.
+  const client = {
+    calls: [],
+    ghPaged: async () => [
+      { name: 'caeruleus', archived: false, disabled: false },
+      { name: 'locked-down', archived: false, disabled: false },
+    ],
+    gh: async (url) => {
+      client.calls.push(url);
+      if (url.includes('locked-down')) return { __missing: true };
+      return {
+        content: Buffer.from(`uses: ${FLEET_CFG.reusable}v1`).toString('base64'),
+      };
+    },
+  };
+
+  const fleet = await resolveFleet(client, { ...FLEET_CFG, repos: null });
+
+  assert.deepEqual(fleet, ['caeruleus']);
+  // And it never made a bare repo-metadata call, which is what would prove the
+  // explicit-list guard had leaked into discovery mode.
+  assert.equal(
+    client.calls.filter((u) => !u.includes('/contents/')).length,
+    0,
   );
 });
 

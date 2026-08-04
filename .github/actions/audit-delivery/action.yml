@@ -2,9 +2,14 @@ name: Audit Leaderboard Delivery
 description: >-
   Audit whether every merged PR in a window produced a successful
   leaderboard-metrics delivery, and write a JSON + markdown report to
-  $RUNNER_TEMP. Preconditions: `github-token` can read the audited repo's
-  contents AND actions (the audit reads merged PRs and workflow runs), and
-  node 18+ is on PATH (the script uses global fetch). Failure policy: finding
+  $RUNNER_TEMP. Preconditions: `github-token` has `contents: read`,
+  `actions: read` AND `pull-requests: read` on the audited repo — all three are
+  load-bearing, one per endpoint the audit reads (the caller file, the workflow
+  runs, and the merged PR list). A caller granting only the first two gets a 403
+  on `GET /repos/{owner}/{repo}/pulls` and the audit exits UNKNOWN, which is why
+  the third is named here rather than left implied: in a caller a `permissions:`
+  block is a CEILING, so an under-documented scope becomes an under-granted one.
+  Also: node 18+ is on PATH (the script uses global fetch). Failure policy: finding
   gaps is NOT an action failure — the action succeeds with `has-gaps=true` and
   leaves it to the caller to decide what to do (file an issue, then fail). The
   action fails only when the audit could not be trusted to have run at all
@@ -14,7 +19,10 @@ description: >-
 
 inputs:
   github-token:
-    description: Token with contents:read and actions:read on the audited repo
+    description: >-
+      Token with contents:read, actions:read AND pull-requests:read on the
+      audited repo. All three are required; pull-requests:read is what the
+      merged-PR listing needs, and omitting it fails the audit at 403.
     required: true
   repo:
     description: "owner/repo to audit"
@@ -188,7 +196,7 @@ runs:
             echo "::warning::Leaderboard delivery gaps detected for ${REPO}: ${gap_count} affected PR(s). See the report for the replay command."
             ;;
           *)
-            echo "::error::audit-delivery could not complete (exit ${rc}) — treat this as an UNKNOWN result, not a clean one. Common causes: token cannot read contents+actions, API rate limit, truncated run list."
+            echo "::error::audit-delivery could not complete (exit ${rc}) — treat this as an UNKNOWN result, not a clean one. Common causes: token is missing one of contents:read / actions:read / pull-requests:read, API rate limit, truncated run list."
             exit 1
             ;;
         esac

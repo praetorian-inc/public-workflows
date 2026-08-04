@@ -110,6 +110,40 @@ export function parseArgs(argv, now = Date.now()) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(out.since)) {
       throw new Error(`--since must be YYYY-MM-DD, got ${out.since}`);
     }
+    // Shape is not a date, and three families get past that regex. They fail in
+    // different ways, so each is named rather than left to `Date` — measured
+    // against V8, not read off the spec.
+    const ts = Date.parse(`${out.since}T00:00:00Z`);
+    // NOT A DATE: `2026-13-01` and `2026-00-10` yield NaN. This family already
+    // failed SAFE — every `merged_at >= NaN` is false, and the window formatter
+    // throws `Invalid time value`, which main() maps to exit 2 — so the fix here
+    // is diagnostic only: the bare message named neither the flag nor the value.
+    if (Number.isNaN(ts)) {
+      throw new Error(`--since is not a real date: ${out.since}`);
+    }
+    // ROLL-OVER: `2026-02-31` does NOT yield NaN — it silently becomes
+    // 2026-03-03 (and `2026-04-31` becomes 2026-05-01). The audit then covers a
+    // window the operator never asked for, and every PR merged in the skipped
+    // days is invisible to it while the report still prints the requested date.
+    // Round-tripping through the same formatter the --days path uses is the
+    // whole test: a real calendar date survives it unchanged.
+    if (ymd(ts) !== out.since) {
+      throw new Error(
+        `--since ${out.since} is not a calendar date — it silently normalizes to ${ymd(ts)}, ` +
+          'so the audit would cover a different window than the one requested',
+      );
+    }
+    // FUTURE: `2027-01-01` is a perfectly good date and the worst of the three.
+    // No merged PR can satisfy it, so the audit reports 0 merged / 0 gaps and
+    // exits 0 — a CLEAN verdict reached by examining nothing, which is the exact
+    // failure class this detector exists to catch, produced by the detector
+    // itself. Refuse (exit 2, "could not run") rather than emit it.
+    if (ts > now) {
+      throw new Error(
+        `--since ${out.since} is in the future — the window can contain no merged PRs, so the ` +
+          'audit would report a clean result having examined nothing',
+      );
+    }
   } else {
     // Match plain decimal digits only. `Number()` alone would accept `1e2`,
     // `0x1E`, `030` and " 30" — a cron passing `1e2` would silently audit a
@@ -757,9 +791,16 @@ async function hasCaller(client, cfg, repo) {
 // private one would all report the fleet as healthy, which is precisely the
 // silent-success failure class this detector exists to catch.
 //
-// Fleet mode is already covered incidentally, since `hasCaller` cannot return
-// true for a repo the token cannot read. The check runs in both modes anyway so
-// the two cannot drift apart, and one call per repo is not worth optimising away.
+// This function is necessary but was NOT sufficient where it was first placed.
+// The original note here claimed fleet mode was "covered incidentally, since
+// `hasCaller` cannot return true for a repo the token cannot read" — true, and
+// beside the point. `hasCaller` cannot invent a caller, but it can LOSE a
+// subject: it answers a repo-level 404 with `false`, so an explicitly requested
+// repo is silently struck from the fleet and never reaches the loop in main()
+// that calls this. Guarding against a false caller is a different property from
+// guarding against a missing subject, and only the first one followed from that
+// reasoning. resolveFleet now asserts explicitly named repos up front; see the
+// comment there for the measurement.
 export async function assertReadable(client, cfg, repo) {
   const meta = await client.gh(`/repos/${cfg.owner}/${repo}`);
   if (!meta || meta.__missing) {
@@ -770,11 +811,39 @@ export async function assertReadable(client, cfg, repo) {
   return meta;
 }
 
-async function resolveFleet(client, cfg) {
+// Exported for its tests: the ORDER of the two probes in here is the whole
+// correctness property, and it is not observable from any caller's return value —
+// a dropped subject and a repo that legitimately has no caller produce the same
+// fleet list.
+export async function resolveFleet(client, cfg) {
   let names = cfg.repos;
   if (!names) {
     const repos = await client.ghPaged(`/orgs/${cfg.owner}/repos?per_page=100&type=all`);
     names = repos.filter((r) => !r.archived && !r.disabled).map((r) => r.name);
+  } else {
+    // An explicitly named repo is a SUBJECT, and has to be proven readable
+    // BEFORE the caller probe can drop it. `hasCaller` answers a repo-level 404
+    // with `false`, which is byte-identical to "readable, but not onboarded" — so
+    // one typo'd or token-invisible entry in `--repos good,typo` is quietly
+    // removed and the surviving repos still report clean.
+    //
+    // The zero-fleet guard in main() does not cover this: it fires only when
+    // EVERY entry drops, which is the case an operator will never hit, because
+    // you mistype one name in a list, not the only name. Measured — `--repos
+    // caeruleus,nonexistent-repo-xyz` printed `repos=1` and exited 0, while
+    // `--repos nonexistent-repo-xyz` alone exited 2.
+    //
+    // This is the half of the round-4 fix that was left open: `assertReadable`
+    // was added to main(), which runs AFTER this filtering, so it only ever saw
+    // the survivors. Auditing the same repo twice costs one `GET /repos/:o/:r`
+    // per named repo; both call sites stay because they answer different
+    // questions — this one guards discovery, main()'s guards self-audit mode and
+    // the org-enumerated fleet, and dropping either would leave a mode uncovered.
+    //
+    // Org-wide discovery deliberately does NOT get this treatment. There an
+    // unreadable repo was never requested, so skipping it is the correct answer
+    // rather than a lost subject.
+    for (const name of names) await assertReadable(client, cfg, name);
   }
   const fleet = [];
   for (const name of names) if (await hasCaller(client, cfg, name)) fleet.push(name);
@@ -923,15 +992,39 @@ export function renderMarkdown(report, cfg) {
   );
   L.push('');
   if (!report.repos_with_gaps.length) {
-    // Do not claim every PR delivered while some are still undetermined — that
-    // sentence would be false, and falsely reassuring, exactly when a delivery
-    // is mid-flight.
+    // "No gaps" is a claim about the PRs this audit could DECIDE, and two
+    // classes are deliberately left undecided. Naming them is not hedging — it
+    // is what keeps the sentence true.
+    //
+    // `in_flight` was covered from round 1. `pre_onboarding` was NOT, and that
+    // omission was live rather than theoretical: caeruleus audits 31 merged PRs,
+    // 2 delivered, 29 pre-onboarding, and printed "Every merged PR in the window
+    // has a successful metrics delivery." False for 29 of 31 — and those 29 are
+    // precisely the population a backfill still owes, so the one reader who most
+    // needs to act on this report was being told there was nothing to do.
+    //
+    // Built from the totals rather than written as prose per case, so a class
+    // added later cannot silently fall out of the sentence again.
+    const caveats = [];
     if (report.totals.in_flight) {
+      caveats.push(
+        `**${report.totals.in_flight}** are not yet decided either way — the delivery is still ` +
+          'running, or the PR merged too recently for its run to exist yet, so re-run the ' +
+          'audit once they settle',
+      );
+    }
+    if (report.totals.pre_onboarding) {
+      caveats.push(
+        `**${report.totals.pre_onboarding}** merged before this repo had a caller, so no ` +
+          'delivery was ever expected and they are not gaps — but they did NOT deliver, and ' +
+          'only a backfill will score them',
+      );
+    }
+    if (caveats.length) {
       L.push(
-        `No gaps. **${report.totals.in_flight}** merged PR(s) are not yet decided ` +
-          'either way — the delivery is still running, or merged too recently for ' +
-          'its run to exist yet. Re-run the audit once they settle. Every other ' +
-          'merged PR in the window delivered successfully.',
+        `No gaps among the PRs this audit can decide. Of **${report.totals.merged_prs}** ` +
+          `merged PR(s), ${caveats.join('; and ')}. Every other merged PR in the window ` +
+          'delivered successfully.',
       );
     } else {
       L.push('No gaps. Every merged PR in the window has a successful metrics delivery.');
