@@ -878,8 +878,31 @@ export async function probeSqsStep(
     );
   }
 
+  // Steps are flattened across EVERY job in the run, so more than one can carry
+  // this name — a matrix over the delivery job produces one per shard, and
+  // `.find()` would silently let whichever job the API happens to return first
+  // decide delivery for the whole run. That guess is wrong in BOTH directions:
+  // pick the shard that succeeded while another failed and a missing delivery
+  // reads as clean; pick the failed one and a real delivery reads as a gap.
+  // Unanimous matches carry no ambiguity and still decide. A disagreement means
+  // the one-send-step-per-run assumption this function is built on no longer
+  // holds, which is the same class of violation as the missing-step arm below
+  // and gets the same answer: refuse, rather than resolve it by array order.
   const steps = list.flatMap((j) => j.steps || []);
-  const step = steps.find((s) => s.name === SQS_STEP);
+  const matches = steps.filter((s) => s.name === SQS_STEP);
+  const step = matches[0];
+  if (matches.length > 1) {
+    const sent = matches.filter((s) => s.conclusion === 'success').length;
+    if (sent !== 0 && sent !== matches.length) {
+      throw new Error(
+        `${repo}: ${label} has ${matches.length} steps named "${SQS_STEP}" and they ` +
+          `DISAGREE (${sent} succeeded, ${matches.length - sent} did not) — delivery for ` +
+          'this run cannot be decided from a step name alone. Whichever job the API ' +
+          'returned first would otherwise have decided it. Narrow the probe to the ' +
+          'delivering job before trusting this repo.',
+      );
+    }
+  }
   if (!step && !requireStep) {
     // The run did not reach the send. It never delivered, so its existing
     // replayable verdict stands — see the requireStep note above for why this is
@@ -1373,7 +1396,14 @@ export function makeClient(token) {
   // choice rather than as the same coincidence. Fail CLOSED on a missing
   // declaration: an undeclared key throws, which surfaces as exit 2 /
   // `status=unknown`, never as a quietly shorter list.
-  async function ghPaged(path, pluck, { identity, stopWhen } = {}) {
+  // There is deliberately NO early-stop hook. One existed, unused by all five
+  // callers, and an unused early stop in this particular function is worse than
+  // dead code: truncating a walk is the exact mechanism behind every false clean
+  // this script exists to refuse, so shipping the lever invites a future
+  // "optimization" to reintroduce it in one line. A caller that genuinely needs
+  // to stop early must add it back and argue for it here, against the note on the
+  // closed-PR fetch in auditRepo explaining why ordering makes it unsafe there.
+  async function ghPaged(path, pluck, { identity } = {}) {
     if (typeof identity !== 'function') {
       throw new Error(
         `ghPaged(${path}): an explicit \`identity\` function is required — the row key ` +
@@ -1383,7 +1413,6 @@ export function makeClient(token) {
     let url = path;
     const items = [];
     const seen = new Set();
-    let stop = false;
     while (url) {
       const res = await request(url);
       if (res.status === 404) break;
@@ -1434,7 +1463,6 @@ export function makeClient(token) {
         }
         items.push(it);
       }
-      if (stopWhen && batch.length && stopWhen(batch[batch.length - 1])) stop = true;
       // Extracted by REGEX, not by splitting on ',': a URL carrying a comma in a
       // query parameter splits the `rel="next"` entry in two, and the half that
       // matches `rel="next"` is then missing its opening `<`, so the slice below
@@ -1445,7 +1473,7 @@ export function makeClient(token) {
       // one this whole script exists to refuse.
       const link = res.headers.get('link') || '';
       const next = /<([^>]+)>\s*;\s*rel="next"/.exec(link);
-      url = stop ? null : next ? next[1] : null;
+      url = next ? next[1] : null;
     }
     return items;
   }

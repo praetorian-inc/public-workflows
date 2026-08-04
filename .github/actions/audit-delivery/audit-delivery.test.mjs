@@ -4758,6 +4758,13 @@ test('auditRepo: the closed-PR walk has NO early stop — the whole history is r
   // early stopping — an assertion that reds on an unrelated change stops being
   // read. The hazard was never "an option is present", it is "a stop condition is
   // present", which is what this now says.
+  //
+  // Round 15 removed ghPaged's early-stop parameter entirely, so this assertion no
+  // longer has behavior underneath it at THIS call site — a declared `stopWhen` is
+  // now simply ignored. It is kept as a cheap statement of intent about the
+  // closed-PR walk; the load-bearing guarantee moved to "a caller-supplied stop
+  // condition is IGNORED", which drives the real paginator across two pages. Read
+  // this one as documentation and that one as the check.
   assert.equal(
     pulls[2]?.stopWhen,
     undefined,
@@ -5265,5 +5272,94 @@ test('classify: the collision refusal does not promise that narrowing --since se
   assert.throws(
     () => classify([inWindow], byHead, onboarded, now, [collider]),
     /Narrowing the window cannot fix this/,
+  );
+});
+
+// ── Round 15: one name, several jobs — and a paginator with no stop lever ─────
+//
+// Both came from Gemini on `a27c368d`, and both are the same shape as the rest of
+// this file: a mechanism that RESOLVES AN AMBIGUITY BY ARRAY ORDER, and a lever
+// that only ever truncates. Neither reviewer called them critical; the first is
+// nonetheless a false-clean path, so it is measured here rather than argued about.
+
+test('probeSqsStep: two jobs carrying the SAME step name and DISAGREEING is refused, not resolved by order', async () => {
+  // The pre-fix code did `steps.find(...)`, so the verdict was whichever job the
+  // API listed first. This drives both orders through the real function: if order
+  // decided, exactly one of the two would come back 'sent'.
+  const mk = (conclusion) => ({ name: SQS_STEP, conclusion });
+  const jobsFor = (order) => ({
+    total_count: 2,
+    jobs: [{ steps: [mk(order[0])] }, { steps: [mk(order[1])] }],
+  });
+
+  for (const order of [
+    ['success', 'failure'],
+    ['failure', 'success'],
+  ]) {
+    await assert.rejects(
+      () =>
+        probeSqsStep(
+          { gh: async () => jobsFor(order) },
+          { owner: 'o' },
+          'guard',
+          '/repos/o/guard/actions/runs/1/jobs',
+          'run 1',
+        ),
+      /DISAGREE \(1 succeeded, 1 did not\)/,
+      `order ${order.join(',')} must refuse — not let the first job decide`,
+    );
+  }
+
+  // The refusal is specific to DISAGREEMENT. A matrix whose shards agree carries
+  // no ambiguity, and turning that into an audit-stopping error would be a
+  // phantom failure — the other direction this script has to avoid.
+  assert.equal(
+    await probeSqsStep(
+      { gh: async () => jobsFor(['success', 'success']) },
+      { owner: 'o' },
+      'guard',
+      '/repos/o/guard/actions/runs/1/jobs',
+      'run 1',
+    ),
+    'sent',
+    'unanimous success must still decide',
+  );
+  assert.equal(
+    await probeSqsStep(
+      { gh: async () => jobsFor(['failure', 'failure']) },
+      { owner: 'o' },
+      'guard',
+      '/repos/o/guard/actions/runs/1/jobs',
+      'run 1',
+    ),
+    'not_sent',
+    'unanimous non-success must still decide',
+  );
+});
+
+test('ghPaged: a caller-supplied stop condition is IGNORED — the walk always completes', async () => {
+  // The old assertion for this pinned `pulls[2]?.stopWhen === undefined` at one
+  // CALL SITE. Once the parameter was removed that assertion pins a key nothing
+  // reads — it would pass against a paginator that honored a stop, so long as
+  // auditRepo did not ask for one. This tests the property that actually keeps
+  // every walk complete: even handed a stop condition that is true immediately,
+  // ghPaged follows the Link header to the end.
+  const p1 = 'https://api.github.com/x?page=1';
+  const p2 = 'https://api.github.com/x?page=2';
+  const rows = await withFetch(
+    async (url) =>
+      String(url) === p1
+        ? paged([{ id: 1 }], { link: `<${p2}>; rel="next"` })
+        : paged([{ id: 2 }]),
+    () =>
+      makeClient('t').ghPaged(p1, undefined, {
+        identity: (r) => r.id,
+        stopWhen: () => true,
+      }),
+  );
+  assert.deepEqual(
+    rows.map((r) => r.id),
+    [1, 2],
+    'a stop condition must not truncate the walk — page 2 has to be fetched',
   );
 });
