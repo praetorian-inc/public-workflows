@@ -112,6 +112,32 @@ export function parseArgs(argv, now = Date.now()) {
   // --caller-path rather than being hardcoded alongside it.
   out.callerFile = out.callerPath.split('/').pop();
   if (!out.callerFile) throw new Error(`--caller-path has no filename: ${out.callerPath}`);
+
+  // Both of these are workflow filenames, and both leave this process as text
+  // that something else interprets — so both are validated, not just the one a
+  // reviewer happened to cite:
+  //   - `callerFile` is interpolated into an API URL PATH. Unvalidated, a value
+  //     containing `/` or `..` re-targets the request at a different endpoint.
+  //   - `backfillCaller` is interpolated into the `gh workflow run` command the
+  //     report tells a HUMAN to paste into a shell. Shell metacharacters there
+  //     turn the remediation instructions into command injection — the report is
+  //     read by someone responding to an alert, which is the worst moment to be
+  //     handed a hostile command.
+  // Neither is attacker-controlled today (both come from repo-committed caller
+  // workflows), so this is hardening rather than a live hole. It is also the
+  // cheapest possible hardening: a workflow file is a flat filename ending in
+  // .yml/.yaml, so anything else is a misconfiguration worth failing loudly on.
+  const WORKFLOW_FILE = /^[A-Za-z0-9._-]+\.ya?ml$/;
+  if (!WORKFLOW_FILE.test(out.callerFile)) {
+    throw new Error(
+      `--caller-path must name a workflow file (letters, digits, . _ - and a .yml/.yaml suffix), got ${out.callerFile}`,
+    );
+  }
+  if (!WORKFLOW_FILE.test(out.backfillCaller)) {
+    throw new Error(
+      `--backfill-caller must be a workflow filename (letters, digits, . _ - and a .yml/.yaml suffix), got ${out.backfillCaller}`,
+    );
+  }
   return out;
 }
 
@@ -123,21 +149,34 @@ export const FAILED = new Set([
   'action_required',
 ]);
 
+// How recently a PR must have merged for "no run exists" to mean "not yet"
+// rather than "never". Generous on purpose: a run normally appears within
+// seconds, and the cost of being generous is that a genuine never_fired merged
+// inside the window waits one audit cycle to be reported, whereas the cost of
+// being stingy is a replay of a delivery that was about to happen. Those are not
+// symmetric — one delays a report, the other double-writes to prod.
+export const GRACE_MS = 15 * 60 * 1000;
+
 // Classification is pure so it can be unit-tested without touching the network.
-// `runs` is the already-deduplicated head_sha -> run map.
-export function classify(prs, byHead, onboardedTs) {
+// `byHead` is the already-deduplicated head_sha -> run map. `now` is a parameter
+// so the grace window is testable against a fixed clock rather than by sleeping;
+// every production caller keeps the real clock.
+export function classify(prs, byHead, onboardedTs, now = Date.now()) {
   const classes = {
     delivered: [],
     failed: [],
     skipped_anomaly: [],
     never_fired: [],
     pre_onboarding: [],
-    // A run exists but has not concluded yet (`conclusion === null`). NOT a gap
-    // and NOT a delivery — the honest answer is "not known yet", so it is
-    // neither replayed nor counted as delivered. It resolves itself on the next
-    // audit, which is what makes withholding a verdict safe here; a *concluded*
-    // run we do not recognize does NOT belong in this bucket, because nothing
-    // would ever resolve it.
+    // The verdict is not knowable YET. Two ways that happens, and both must be
+    // here or the other one becomes a false gap:
+    //   1. a run exists but has not concluded (`conclusion === null`);
+    //   2. the PR merged moments ago and its run row does not exist yet.
+    // Neither is a gap nor a delivery — the honest answer is "not known yet", so
+    // it is neither replayed nor counted as delivered, and it resolves itself on
+    // the next audit. That self-resolution is what makes withholding a verdict
+    // safe. A *concluded* run we do not recognize does NOT belong here, because
+    // nothing would ever resolve it and it would be invisible forever.
     in_flight: [],
   };
   for (const pr of prs) {
@@ -153,6 +192,18 @@ export function classify(prs, byHead, onboardedTs) {
       // Conflating the two is what makes a naive count unactionable.
       if (onboardedTs && Date.parse(pr.merged_at) < onboardedTs) {
         classes.pre_onboarding.push(rec);
+      } else if (now - Date.parse(pr.merged_at) < GRACE_MS) {
+        // The OTHER half of the in_flight problem, and the half the original
+        // in_flight fix missed: that one covered "a run exists but has not
+        // concluded", while this covers "the run row does not exist YET".
+        // GitHub creates and indexes a workflow run a moment after the merge, so
+        // a PR merged seconds ago legitimately has no run visible — identical
+        // symptom to never_fired, opposite meaning. Calling it never_fired puts
+        // a delivery that is about to happen on the replay list, which
+        // double-delivers, and consumer-side idempotency is not established
+        // (ENG-5789). Withholding is safe for the same reason as in_flight: the
+        // window counts back from now, so the next audit sees the settled truth.
+        classes.in_flight.push(rec);
       } else {
         classes.never_fired.push(rec);
       }
@@ -278,6 +329,14 @@ export function retryDelayMs(headers, now = Date.now()) {
   return MIN;
 }
 
+// Rate limits (403/429) plus the server-error family. 501 is deliberately
+// absent: "not implemented" is a deterministic answer about the request, so
+// retrying it only delays the same failure. Everything else in the 5xx range is
+// worth another attempt because the alternative is discarding a whole audit.
+// Exported so a test asserts the set rather than restating the literals, which
+// would pass no matter what ships.
+export const RETRY_STATUS = new Set([403, 429, 500, 502, 503, 504]);
+
 function makeClient(token) {
   const state = { calls: 0 };
   const headers = {
@@ -298,8 +357,19 @@ function makeClient(token) {
     for (let attempt = 0; attempt < 4; attempt++) {
       const res = await fetch(url, { headers });
       state.calls++;
-      if (res.status === 403 || res.status === 429) {
-        if (attempt === 3) throw new Error(`rate limited on ${url} after 4 attempts`);
+      // 403/429 are the rate limits; the 5xx entries are the ephemeral server
+      // errors the API emits under load. Both are worth retrying, and both are
+      // FATAL to an audit if they are not, because an aborted audit is an exit-2
+      // UNKNOWN over the whole repo — one bad gateway on page 30 of 40 discards
+      // the other 39 pages of work. The failure mode of retrying a genuinely
+      // broken endpoint is bounded by the same 4-attempt cap.
+      if (RETRY_STATUS.has(res.status)) {
+        if (attempt === 3) {
+          throw new Error(`${res.status} on ${url} after 4 attempts`);
+        }
+        // A 5xx carries no rate-limit headers, so retryDelayMs falls through to
+        // its floor. That is the right answer for a transient server error
+        // anyway: wait a beat, do not wait a rate-limit window.
         await new Promise((r) => setTimeout(r, retryDelayMs(res.headers)));
         continue;
       }
@@ -352,9 +422,36 @@ function makeClient(token) {
 // So the range is SLICED until every slice fits under the cap, and each slice
 // asserts that what it fetched equals what the API said existed. Truncation can
 // no longer be silent — it either subdivides or it throws.
+//
+// ── Why the slice threshold is BELOW the hard cap ────────────────────────────
+//
+// The shortfall check (`got.length < total`) cannot see truncation for a slice
+// sitting at or near the cap, because `got.length` is itself CLAMPED to the cap
+// and can never exceed it. Concretely, with a threshold at the cap: `total`
+// probes as 1000, one more run arrives before the fetch, the fetch returns a
+// clamped 1000, and `1000 < 1000` is false — the extra run is silently dropped,
+// which is the exact failure class this whole mechanism exists to prevent.
+//
+// And the blind spot is wider than the boundary itself: at `total = 999`, two
+// arrivals make the true count 1001, the fetch still returns 1000, and
+// `1000 < 999` is false too. ANY slice close enough to the cap that in-flight
+// growth can cross it is unverifiable.
+//
+// So slices are kept a margin below the cap. Subdividing is cheap (a couple more
+// probe calls), the margin is ~30x guard's observed ~30 runs/day, and the
+// property recovered is the one that matters: for any slice we actually fetch,
+// growth between probe and fetch is OBSERVABLE rather than clamped away.
+export const API_CAP = 1000;
+export const SLICE_MAX = 900;
+
 // Exported for tests: `client` is already the only way this reaches the network,
 // so a stub client exercises the slicing and the truncation guard directly —
 // no fetch mocking, and nothing about the real transport is faked.
+//
+// API_CAP and SLICE_MAX are exported too, so a test can assert the RELATIONSHIP
+// between them (margin wider than a plausible day of churn, SLICE_MAX strictly
+// below API_CAP) instead of restating the literals, which would pass no matter
+// what ships.
 export async function runsInRange(client, cfg, repo) {
   const base = `/repos/${cfg.owner}/${repo}/actions/workflows/${cfg.callerFile}/runs`;
   const out = [];
@@ -367,13 +464,13 @@ export async function runsInRange(client, cfg, repo) {
     const total = probe?.total_count ?? 0;
     if (total === 0) continue;
 
-    if (total > 1000) {
+    if (total > SLICE_MAX) {
       // Subdivide by date. Day granularity is the floor the `created` filter
       // supports, so a single day over the cap is unrepresentable — throw
       // rather than report a gap we cannot actually see.
       if (ymd(a) === ymd(b)) {
         throw new Error(
-          `${repo}: ${total} runs on the single day ${ymd(a)} exceeds the API's 1000-result cap and cannot be subdivided further`,
+          `${repo}: ${total} runs on the single day ${ymd(a)} exceeds the safe slice size of ${SLICE_MAX} (the API's hard cap is ${API_CAP}) and cannot be subdivided further`,
         );
       }
       const mid = a + Math.floor((b - a) / 2 / DAY) * DAY;
@@ -398,6 +495,17 @@ export async function runsInRange(client, cfg, repo) {
     if (got.length < total) {
       throw new Error(
         `${repo}: slice ${range} reported total_count=${total} but only ${got.length} runs were retrievable — refusing to classify against a truncated run list`,
+      );
+    }
+    // The other end of the same property. A slice is only fetched when it probed
+    // at or below SLICE_MAX, so reaching the hard cap means it grew by at least
+    // API_CAP - SLICE_MAX since the probe — and a result set sitting exactly on
+    // the cap is indistinguishable from one clamped BY the cap. Growth is
+    // normally harmless, but not once it reaches the point where it stops being
+    // observable, so this is the one kind of growth that must not pass.
+    if (got.length >= API_CAP) {
+      throw new Error(
+        `${repo}: slice ${range} probed at total_count=${total} but fetched ${got.length} runs, reaching the API's ${API_CAP}-result cap — the result set may be clamped and cannot be trusted`,
       );
     }
     out.push(...got);
@@ -481,9 +589,10 @@ export function renderMarkdown(report, cfg) {
     // is mid-flight.
     if (report.totals.in_flight) {
       L.push(
-        `No gaps. **${report.totals.in_flight}** merged PR(s) have a delivery still ` +
-          'running and are not yet decided either way — re-run the audit once they ' +
-          'conclude. Every other merged PR in the window delivered successfully.',
+        `No gaps. **${report.totals.in_flight}** merged PR(s) are not yet decided ` +
+          'either way — the delivery is still running, or merged too recently for ' +
+          'its run to exist yet. Re-run the audit once they settle. Every other ' +
+          'merged PR in the window delivered successfully.',
       );
     } else {
       L.push('No gaps. Every merged PR in the window has a successful metrics delivery.');
@@ -516,7 +625,7 @@ export function renderMarkdown(report, cfg) {
       L.push(`| pre-onboarding (not a gap) | ${g.pre_onboarding} |`);
     }
     if (g.in_flight) {
-      L.push(`| still running (not a gap, not replayed) | ${g.in_flight} |`);
+      L.push(`| not yet decided (not a gap, not replayed) | ${g.in_flight} |`);
     }
     L.push('');
     L.push(`Affected PRs (${g.replay.length}): ${g.replay.map((n) => `#${n}`).join(', ')}`);

