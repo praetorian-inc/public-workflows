@@ -3,8 +3,12 @@ name: Test audit-delivery
 # Node built-in test runner only — no npm install, no network beyond the
 # checkout. Guards the pure logic (flag parsing, the eight-way delivery
 # classification, head_sha dedupe, replay ordering, report rendering) against
-# regression. The networking layer is not covered here: it was validated
-# against the live API, and mocking fetch would only test the mock.
+# regression. The API's own semantics are NOT mocked — those were validated
+# against the live API, and re-asserting them against a mock would only test
+# the mock. What IS stubbed is this script's own control flow over the
+# transport — retry caps, pagination completeness, fail-closed refusals — and
+# that is covered here: its failure modes are losing a whole repo's audit to
+# one dropped socket, or silently returning a short list.
 
 on:
   # The escape hatch. Both real triggers below are `paths:`-filtered, and this

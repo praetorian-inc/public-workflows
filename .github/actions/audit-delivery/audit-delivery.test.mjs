@@ -754,7 +754,27 @@ test('classify: the onboarding boundary splits pre_onboarding from never_fired',
 
   // Exactly equal is NOT "before" — the comparison is strict, so a PR merged
   // at the onboarding instant is a real gap.
-  const exact = classify(prs, new Map(), Date.parse(merged));
+  //
+  // NOW is passed explicitly, and that is not cosmetic symmetry with the two
+  // calls above. `classify`'s 4th parameter defaults to `Date.now()`, so omitting
+  // it wired this assertion to the WALL CLOCK. Measured against a faked clock, the
+  // pre-fix form (no 4th argument) is clock-sensitive in BOTH directions:
+  //
+  //   2026-07-10T00:05Z  in_flight     FAILS  (within GRACE_MS of the merge)
+  //   2026-08-04T12:00Z  never_fired   passes (the frozen NOW — why it was green)
+  //   2027-08-14T00:00Z  never_fired   passes (the horizon EXACTLY; `>` is strict)
+  //   2027-08-15T00:00Z  unverifiable  FAILS  (past merged + RUN_HISTORY_DAYS)
+  //
+  // So it was a time bomb due just after 2027-08-14T00:00:00Z, which would have
+  // reddened CI on a date rather than on a change — and for a reason having
+  // nothing to do with the onboarding boundary this test exists to pin.
+  //
+  // Swept rather than spot-fixed: this was the suite's ONLY real-clock
+  // dependency. `Date.now` appears zero times in this file, `NOW` is a frozen
+  // instant, every other `classify(` call passes an explicit 4th argument, and
+  // the one that does not — CLASS_KEYS at the top — passes an empty `prs`, so no
+  // branch reads the clock at all.
+  const exact = classify(prs, new Map(), Date.parse(merged), NOW);
   assert.deepEqual(exact.never_fired.map((r) => r.number), [77]);
   assert.deepEqual(exact.pre_onboarding, []);
 });
@@ -2205,13 +2225,22 @@ test('renderMarkdown: the header does not claim a delivery it only inferred from
   assert.match(md, /verified to have actually\s+enqueued a payload/);
 });
 
-// ── Transport-failure retry, and the exit-code discipline ────────────────────
+// ── The fetch stub: what it is for, and what it is not for ───────────────────
 //
-// These two areas are the one place this file stubs `fetch`. The header's stance
-// still holds — mocking the API to re-assert the API's own semantics would test
-// the mock — but the ATTEMPT CAP and "a rejection is retried rather than
-// propagated" are this script's control flow, and their failure mode is losing a
-// whole repo's audit to one dropped socket.
+// `withFetch` below is this file's only `fetch` stub. Deliberately stated as a
+// CRITERION and not as a count of sites or areas — an enumeration here goes
+// stale the moment a case is added, which is exactly the defect this note
+// replaced.
+//
+// The header's stance still holds: mocking the API to re-assert the API's own
+// semantics would only test the mock, and that is not what any use below does.
+// What they stub is this script's OWN control flow over the transport —
+// makeClient's retry and its exact attempt cap, ghPaged's Link walk and
+// declared-key dedupe, ghCount's row-count probe, and the fail-closed refusals
+// in each. Those failure modes are losing a whole repo's audit to one dropped
+// socket, or silently returning a short list, and a live-API test cannot
+// provoke either on demand — which is precisely why they are stubbed here
+// rather than left to the live validation.
 
 const withFetch = async (impl, fn) => {
   const real = globalThis.fetch;
@@ -4204,6 +4233,9 @@ test('auditRepo: the --until boundary collision reaches the guard end-to-end', a
       if (path.includes('per_page=1&created=')) return { total_count: 1 };
       throw new Error(`unexpected gh ${path}`);
     },
+    // A stable count: nothing was reopened under this walk, which is the case
+    // every other assertion here is about.
+    ghCount: async () => 2,
   };
   await assert.rejects(
     () =>
@@ -4246,6 +4278,7 @@ test('auditRepo: a sibling run that sent rescues a FAILED row end-to-end', async
       if (path.includes('/contents/')) return { type: 'file' };
       throw new Error(`unexpected gh ${path}`);
     },
+    ghCount: async () => 1,
   };
 
   const res = await auditRepo(
@@ -4887,13 +4920,17 @@ test('auditRepo: the closed-PR walk is ordered by an IMMUTABLE key', async () =>
       return [];
     },
     gh: async (path) => (path.includes('per_page=1&created=') ? { total_count: 0 } : {}),
+    ghCount: async (path) => {
+      paths.push(path);
+      return 0;
+    },
   };
   await auditRepo(
     client,
     { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
     'guard',
   );
-  const pulls = paths.find((p) => p.includes('/pulls?'));
+  const pulls = paths.find((p) => p.includes('/pulls?') && p.includes('per_page='));
   assert.ok(pulls, 'auditRepo must fetch closed PRs');
   assert.match(pulls, /sort=created/, 'must order by an immutable key');
   assert.match(pulls, /direction=asc/, 'asc is load-bearing: desc puts new rows at position 1');
@@ -4977,6 +5014,7 @@ test('auditRepo: the closed-PR walk has NO early stop — the whole history is r
         return [];
       },
       gh: async () => ({ total_count: 0 }),
+      ghCount: async () => 0,
     },
     { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: '2026-06-01' },
     'guard',
@@ -5777,4 +5815,323 @@ test('REPLAY_CAVEATS: EVERY caveat reaches BOTH channels, not just the prose one
   const clean = buildReport([repoResult('guard', { merged: 1, delivered: [rec(1)] })], CFG, 1);
   assert.equal(clean.repos_with_gaps.length, 0);
   assert.equal('replay_caveats' in clean, false);
+});
+
+// ── Round 18 ─────────────────────────────────────────────────────────────────
+//
+// Seven tests for the seven fixes adjudicated in round 18. Each is written to
+// fail against the round-17 code specifically, and the two one-sided checks
+// (the closed-PR count bracket, the caveat gate) carry their opposite-direction
+// control in the same block, because a one-sided check with only one test
+// pinned is indistinguishable from a check that always fires.
+
+test('hasCaller: `uses` must be a mapping KEY at a node position — 16 shapes, both directions', async () => {
+  // Round 17 shipped `/(^|\s)uses:\s/` — any `uses:` at a word boundary anywhere
+  // on the line. Wrong in BOTH directions, and the two call sites do opposite
+  // harm: over-detect at auditRepo fabricates a PROD replay list (no caller ->
+  // no runs -> every merged PR never_fired), under-detect at resolveFleet drops
+  // the repo from an org-enumerated fleet, which is unaudited yet reports clean.
+  //
+  // Driven off a table rather than three hand-picked cases so the two rejected
+  // candidate predicates can be scored against the SAME ground truth below.
+  const cfg = callerCfg();
+  const R = `${cfg.reusable}@abc123`;
+  const SHAPES = [
+    // Real fleet shapes. Every live caller in the org is the first one.
+    { want: true, label: 'block mapping (every real fleet caller)', line: `    uses: ${R}` },
+    { want: true, label: 'block, sequence dash on the same line', line: `  - uses: ${R}` },
+    { want: true, label: 'block, single-quoted value', line: `    uses: '${R}'` },
+    { want: true, label: 'block, double-quoted value', line: `    uses: "${R}"` },
+    { want: true, label: 'block, extra space before the value', line: `    uses:   ${R}` },
+    // Flow / JSON. No live occurrence, but valid Actions YAML — and dropping a
+    // repo that writes one is the silent direction.
+    { want: true, label: 'flow mapping in a sequence', line: `    - {uses: ${R}}` },
+    { want: true, label: 'flow mapping, uses as the SECOND key', line: `    - {name: x, uses: ${R}}` },
+    { want: true, label: 'JSON-formatted workflow', line: `        {"uses": "${R}"}` },
+    { want: true, label: 'JSON, quoted key mid-object', line: `        "name": "x", "uses": "${R}"` },
+    // Not callers. Matching any of these fabricates a prod replay list.
+    { want: false, label: 'one-line run: echoing a caller template', line: `        run: echo uses: ${R}` },
+    { want: false, label: 'one-line run: grepping for it', line: `        run: grep uses: ${R} x.yml` },
+    { want: false, label: 'prose value naming the reusable', line: `        description: calls uses: ${R}` },
+    { want: false, label: 'a one-line QUOTED scalar', line: `        name: "uses: ${R}"` },
+    { want: false, label: 'a DIFFERENT key ending in uses', line: `    reuses: ${R}` },
+    { want: false, label: 'a key whose name CONTAINS uses', line: `    always-uses: ${R}` },
+    // A 16th shape, added because the mutation run showed the comment strip had
+    // become unpinned. The node-position anchor rejects a fully COMMENTED
+    // `uses:` line on its own, so the round-12 commented-template test survived
+    // a mutant that disabled stripComment entirely — the test passed for the new
+    // reason instead of the one it was written for. This is the shape where the
+    // strip is still the ONLY thing standing: a real `uses:` key calling
+    // something else, with the reusable named in a TRAILING comment. Unstripped,
+    // `code.includes(cfg.reusable)` is true and the repo joins the fleet with a
+    // caller it does not have.
+    {
+      want: false,
+      label: 'a uses: key calling something ELSE, reusable only in a trailing comment',
+      line: `    uses: actions/checkout@v4  # replaces ${R}`,
+    },
+  ];
+  assert.equal(SHAPES.length, 16, 'the shape table is the measurement this fix was chosen on');
+
+  for (const s of SHAPES) {
+    const text = ['name: x', 'jobs:', '  call:', s.line, ''].join('\n');
+    assert.equal(
+      await hasCaller(contentClient(text), cfg, 'guard'),
+      s.want,
+      `${s.label}: expected has_caller=${s.want} for\n  ${s.line}`,
+    );
+  }
+
+  // ANTI-VACUOUS, and the reason the table is here at all: a table that every
+  // plausible predicate satisfies proves nothing about the one that shipped.
+  // Both REJECTED candidates are restated (not the shipped one — that would
+  // assert X === X) and each must get at least one row wrong.
+  const r17 = (l) => /(^|\s)uses:\s/.test(l);
+  const blockOnly = (l) => /^\s*(?:-\s+)?uses:\s/.test(l);
+  const score = (p) => SHAPES.filter((s) => (p(s.line) && s.line.includes(R)) !== s.want);
+
+  assert.ok(
+    score(r17).length > 0,
+    'the round-17 predicate must FAIL this table, or these rows do not describe the defect',
+  );
+  // The specific reason a line-start-only anchor was not the fix. Round 18's
+  // plan asserted key-anchoring would close the over-detections and cost
+  // nothing; measurement refuted it, because the old predicate matched this
+  // shape by accident on the space after the comma.
+  const flowSecondKey = SHAPES.find((s) => s.label.includes('SECOND key'));
+  assert.equal(
+    blockOnly(flowSecondKey.line),
+    false,
+    'a line-start-only anchor must be shown to LOSE `- {name: x, uses: <ref>}` — that ' +
+      'regression is why the shipped matcher also anchors after `{` and `,`',
+  );
+  assert.ok(
+    score(blockOnly).some((s) => s.want === true),
+    'the block-only anchor must be shown to UNDER-detect, which is the silent direction',
+  );
+
+  // The residual, stated rather than left to imply it is closed: no line-oriented
+  // rule can tell `{uses: x}` as YAML from the same text inside a one-line shell
+  // string. Deliberately NOT asserted either way — pinning the current answer
+  // would freeze the defect, and pinning the desired one would red the suite for
+  // a limitation the file documents. Closing it needs a real parser, which this
+  // zero-dependency action does not build.
+});
+
+test('ghCount: reads the row count from rel="last" at per_page=1, and fails closed', async () => {
+  // The probe that makes auditRepo's removal residual OBSERVABLE. Round 17 argued
+  // in prose that a mid-walk reopen could drop a row, and shipped nothing that
+  // could see it happen.
+  //
+  // per_page=1 is load-bearing, not tidiness: rel="last" reports a PAGE number,
+  // so the same header at per_page=100 means "somewhere in 9901..10000 rows" and
+  // the bracket would compare two numbers that are not row counts at all.
+  const seen = [];
+  const n = await withFetch(
+    async (url) => {
+      seen.push(String(url));
+      return paged([{ number: 1 }], {
+        link: '<https://api.github.com/x?per_page=1&page=250>; rel="last"',
+      });
+    },
+    () => makeClient('t').ghCount('/repos/o/r/pulls?state=closed'),
+  );
+  assert.equal(n, 250, 'the last PAGE number IS the row count when per_page=1');
+  assert.equal(seen.length, 1, 'a count probe is one request, not a walk');
+  assert.match(seen[0], /[?&]per_page=1(&|$)/, 'the probe must pin per_page=1');
+  assert.match(seen[0], /state=closed/, 'and must not drop the query it was handed');
+  assert.match(seen[0], /state=closed&per_page=1/, 'an existing query joins with &, not ?');
+
+  // No rel="last" means a single page, so the row count is the body length. Not
+  // "0" and not "unknown": one page of 7 rows is a list of 7.
+  const single = await withFetch(
+    async () => paged([1, 2, 3, 4, 5, 6, 7]),
+    () => makeClient('t').ghCount('/repos/o/r/pulls'),
+  );
+  assert.equal(single, 7);
+  // A path with no query joins with `?`.
+  const noQuery = [];
+  await withFetch(
+    async (url) => {
+      noQuery.push(String(url));
+      return paged([]);
+    },
+    () => makeClient('t').ghCount('/repos/o/r/pulls'),
+  );
+  assert.match(noQuery[0], /\/pulls\?per_page=1$/);
+
+  // A caller that sets per_page itself gets a throw, BEFORE any request. The
+  // alternative is the silent one: two `per_page=100` probes compare page counts,
+  // agree, and the bracket reports "no removal" for a list that lost a row.
+  const spent = [];
+  await withFetch(
+    async (url) => {
+      spent.push(String(url));
+      return paged([]);
+    },
+    () =>
+      assert.rejects(
+        () => makeClient('t').ghCount('/repos/o/r/pulls?per_page=100'),
+        /must not set per_page/,
+      ),
+  );
+  assert.equal(spent.length, 0, 'the refusal must precede the request, not follow it');
+
+  // And a 404 is an UNREAD subject, never "0 rows" — the same false-clean
+  // direction ghPaged's 404 fix closed. A 404 answered as 0 would make every
+  // bracket trivially satisfied (0 -> 0) on a repo nobody can read.
+  //
+  // Matched on the phrase that only the EXPLICIT 404 arm emits, not on "404".
+  // The mutation run caught this: disabling that arm falls through to the generic
+  // `${res.status} on the count probe` throw, whose text ALSO starts "404 on the
+  // count probe", so a looser regex was satisfied by the branch it was written to
+  // prove was taken — a check that cannot fail for the reason it claims.
+  await withFetch(
+    async () => notFound(),
+    () =>
+      assert.rejects(
+        () => makeClient('t').ghCount('/repos/o/r/pulls'),
+        /404 on the count probe.*subject could not be read/,
+      ),
+  );
+});
+
+test('auditRepo: a closed-PR list that SHRANK mid-walk is refused, not reported', async () => {
+  // The worked example, which is also why comparing the walk's own length against
+  // the FINAL count is vacuous:
+  //
+  //   250 rows, per_page=100. Page 1 reads positions 1..100. Row 50 is reopened.
+  //   The list is now 249, so page 2 reads positions 101..200 of the NEW list =
+  //   old rows 102..201. OLD ROW 101 IS NEVER RETURNED — and the walk returns 249
+  //   rows while the collection now holds 249, so fetched-vs-final agrees
+  //   perfectly. Only before-vs-after sees it.
+  //
+  // A merged PR that is never read cannot be classified, so it cannot be
+  // reported as a gap: the loss direction is a FALSE CLEAN, and this refuses
+  // rather than emit one.
+  const counts = [250, 249];
+  let i = 0;
+  const client = {
+    ghPaged: async () => [],
+    gh: async () => ({ total_count: 0 }),
+    ghCount: async () => counts[i++],
+  };
+  await assert.rejects(
+    () =>
+      auditRepo(
+        client,
+        { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+        'guard',
+      ),
+    /SHRANK during the walk \(250 -> 249\)/,
+  );
+  assert.equal(i, 2, 'the walk must be BRACKETED — one probe before and one after');
+});
+
+test('auditRepo: CONTROL — a closed-PR list that GREW mid-walk is NOT refused', async () => {
+  // The opposite direction, and the one that makes the check above meaningful
+  // rather than a tripwire that fires on any mutation. With direction=asc a PR
+  // closing mid-walk joins at its CREATION position, which is at or after the
+  // cursor, so nothing already read shifts out of reach — at worst a row is
+  // served twice and ghPaged dedupes it. Refusing on that would turn every busy
+  // repo's audit into an exit-2 unknown for an event that loses nothing.
+  const counts = [250, 251];
+  let i = 0;
+  const client = {
+    ghPaged: async () => [],
+    gh: async () => ({ total_count: 0 }),
+    ghCount: async () => counts[i++],
+  };
+  const res = await auditRepo(
+    client,
+    { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+    'guard',
+  );
+  assert.equal(res.repo, 'guard');
+  assert.equal(i, 2);
+});
+
+test('buildReport: duplicate_rows is always reported, so the insertion branch is observable', () => {
+  // The soundness argument for the closed-PR walk says an insertion is benign
+  // because a re-served row is deduped "and counted as state.dupes". Round 17
+  // counted them and reported them NOWHERE, which makes the claim unfalsifiable:
+  // there was no output in which a mid-walk insertion left any trace at all.
+  const results = [repoResult('guard', { merged: 1, delivered: [rec(1)] })];
+  assert.equal(buildReport(results, CFG, 7, 3).duplicate_rows, 3);
+
+  // UNCONDITIONAL, not omitted-when-zero. A consumer cannot distinguish "no
+  // duplicates" from "this field is not emitted by that version" if the key
+  // disappears, which is the same reasoning that keeps api_calls always present.
+  const zero = buildReport(results, CFG, 7, 0);
+  assert.equal('duplicate_rows' in zero, true);
+  assert.equal(zero.duplicate_rows, 0);
+  // And a caller that has not been updated yet reports 0 rather than undefined,
+  // which would render as `null` in the JSON document.
+  assert.equal(buildReport(results, CFG, 7).duplicate_rows, 0);
+});
+
+test('buildReport: replay_caveats are gated on an actual REPLAY, in parity with the markdown', () => {
+  // Round 17's own fix, reviewed: it unified the caveat TEXT across the two
+  // channels and left the GATES divergent. renderMarkdown skips them per repo on
+  // `!g.replay.length`; the JSON emitted them whenever `gaps.length` — so a
+  // report whose only defect is `payload_missing` (a gap, but never replayable,
+  // since replayList excludes it) printed no caveat in markdown while emitting
+  // all three in JSON beside an empty `replay: []`. Every caveat is about the
+  // consequences of replaying, so attaching them to a document that asks for no
+  // replay trains a machine consumer to ignore them.
+  const onlyPayloadMissing = buildReport(
+    [repoResult('guard', { merged: 1, payload_missing: [rec(42)] })],
+    CFG,
+    1,
+  );
+  // Fixture guard: this must genuinely be a GAP with an EMPTY replay, or the
+  // assertion below passes for the wrong reason.
+  assert.equal(onlyPayloadMissing.repos_with_gaps.length, 1);
+  assert.deepEqual(onlyPayloadMissing.repos_with_gaps[0].replay, []);
+  assert.equal('replay_caveats' in onlyPayloadMissing, false);
+  // Parity asserted against the OTHER channel derived from the same document,
+  // not restated by hand — that is the property the round-17 fix claimed.
+  assert.equal(
+    renderMarkdown(onlyPayloadMissing, CFG).includes(`> ${REPLAY_CAVEATS[0].text}`),
+    false,
+  );
+
+  // CONTROL: a gap that IS replayable still carries them, in both channels. A
+  // gate tightened until it never fires suppresses the prod-write warning
+  // entirely, which is worse than the drift being fixed.
+  const replayable = buildReport(
+    [repoResult('guard', { merged: 1, never_fired: [rec(42)] })],
+    CFG,
+    1,
+  );
+  assert.deepEqual(replayable.repos_with_gaps[0].replay, [42]);
+  assert.deepEqual(
+    replayable.replay_caveats.map((c) => c.id),
+    REPLAY_CAVEATS.map((c) => c.id),
+  );
+  assert.ok(renderMarkdown(replayable, CFG).includes(`> ${REPLAY_CAVEATS[0].text}`));
+});
+
+test('classify: an UNMERGED pull request is skipped, never classified never_fired', () => {
+  // Latent rather than live — auditRepo filters on merged_at before calling — but
+  // classify is exported, pure, and reused, and the harm is asymmetric: an
+  // unmerged PR has no delivery to look for, so it lands in never_fired, and
+  // never_fired IS the replay list. A closed-unmerged PR would be replayed into
+  // the prod metrics queue as if it had merged.
+  const NOWISH = Date.UTC(2026, 6, 1, 0, 0, 0);
+  const unmerged = [{ number: 5, merged_at: null, head: { sha: 'unmergedsha0000' } }];
+  const c = classify(unmerged, new Map(), null, NOWISH);
+  for (const k of CLASS_KEYS) {
+    assert.deepEqual(c[k], [], `an unmerged PR must not appear in "${k}"`);
+  }
+
+  // ANTI-VACUOUS control: the SAME fixture with a merge date does reach the
+  // classifier and does land in never_fired, so the empty result above is the
+  // skip and not a fixture that classify was never going to see.
+  const merged = [{ ...unmerged[0], merged_at: '2026-06-01T00:00:00Z' }];
+  const c2 = classify(merged, new Map(), null, NOWISH);
+  assert.deepEqual(
+    c2.never_fired.map((r) => r.number),
+    [5],
+  );
 });

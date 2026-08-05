@@ -667,6 +667,23 @@ export function classify(
     unverifiable: [],
   };
   for (const pr of prs) {
+    // The same guard the outsideWindow loop above carries, and for a sharper
+    // reason: there, a missing `merged_at` produced a wrong REFUSAL MESSAGE; here
+    // it produces a wrong VERDICT, in the writing direction. Every branch below
+    // that could rescue an unmerged PR compares a `Date.parse(null)` — NaN, so
+    // `NaN < onboardedTs`, `fetchedAt - NaN < GRACE_MS` and
+    // `now - NaN > RUN_HISTORY_DAYS * DAY` are ALL false — and the fall-through is
+    // `never_fired`, which is the replay list. So a closed-unmerged PR reaching
+    // classify becomes a prod write for a PR that never merged and never had a
+    // delivery path to begin with.
+    //
+    // Latent today, not live: auditRepo's window filter requires `merged_at`, so
+    // no unmerged PR reaches here through main(). It is guarded anyway because
+    // classify is pure and exported — it is the unit under test and the reusable
+    // piece — and because the harm is asymmetric: skipping a PR that is not part
+    // of this audit's population costs nothing, while classifying one costs a
+    // duplicate delivery.
+    if (!pr.merged_at) continue;
     const run = byHead.get(pr.head.sha);
     const rec = {
       number: pr.number,
@@ -1672,7 +1689,43 @@ export function makeClient(token) {
     return items;
   }
 
-  return { gh, ghPaged, state };
+  // The SIZE of a paginated collection without walking it. `per_page=1` makes the
+  // `rel="last"` page number equal the ROW COUNT, so this costs one call whatever
+  // the collection's size — which is what makes it affordable to run twice around
+  // a 65-page walk.
+  //
+  // `page` is read off the returned URL rather than counted, and coerced through
+  // Number with an integer check: the Link header is response data, and the whole
+  // value of this probe is that a malformed one FAILS rather than silently
+  // producing a count that happens to compare equal.
+  //
+  // Caller must pass a path with NO per_page of its own — two per_page parameters
+  // leave which one wins to the server, and this probe is only sound at 1.
+  async function ghCount(path) {
+    if (/[?&]per_page=/.test(path)) {
+      throw new Error(`ghCount(${path}): path must not set per_page — the probe requires 1.`);
+    }
+    const res = await request(`${path}${path.includes('?') ? '&' : '?'}per_page=1`);
+    if (res.status === 404) {
+      throw new Error(`404 on the count probe for ${path} — the subject could not be read.`);
+    }
+    if (!res.ok) throw new Error(`${res.status} on the count probe for ${path}`);
+    const link = res.headers.get('link') || '';
+    const last = /<([^>]+)>\s*;\s*rel="last"/.exec(link);
+    if (last) {
+      const n = Number(new URL(last[1]).searchParams.get('page'));
+      if (!Number.isInteger(n) || n < 1) {
+        throw new Error(`unreadable rel="last" page in Link header for ${path}: ${last[1]}`);
+      }
+      return n;
+    }
+    // No `rel="last"` means the first page is the only page: 0 or 1 rows.
+    const body = await res.json();
+    if (!Array.isArray(body)) throw new Error(`count probe for ${path} did not return a list`);
+    return body.length;
+  }
+
+  return { gh, ghPaged, ghCount, state };
 }
 
 // ── The 1000-result cap, and why this is not a simple paginated fetch ────────
@@ -1826,6 +1879,32 @@ const stripComment = (l) => l.replace(/(^|\s)#.*$/, '$1');
 // agree on every real workflow, and no test here distinguishes them.
 const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$/;
 
+// `uses` as a mapping KEY, which is not the same as the text `uses:` appearing
+// somewhere on the line. The predicate this replaces was `/(^|\s)uses:\s/` — any
+// `uses:` at a word boundary — and it was wrong in BOTH directions, at two call
+// sites whose errors do opposite harm:
+//
+//   over-detect -> hasCaller true for a repo with no caller -> the reusable
+//     accrues no runs of its own -> every merged PR classifies never_fired ->
+//     the report prints a PROD replay command for deliveries that succeeded.
+//   under-detect -> hasCaller false for a repo that does call -> resolveFleet
+//     silently drops it from an org-enumerated fleet -> unaudited, reports clean.
+//
+// The second is the silent-success class this whole detector exists to catch, so
+// neither direction is the "safe" one to leave open. Measured, the old predicate
+// missed 3 of 16 shapes and falsely matched 3 more; this one gets all 16. A
+// key sits at a node position: start of line (block mapping, optionally after a
+// `- ` sequence dash) or just after `{` or `,` (flow mapping). The optional
+// backreferenced quote admits a JSON-formatted workflow's `"uses":` while still
+// requiring the SAME quote on both sides, and the trailing class accepts either
+// whitespace or a quote after the colon because JSON writes `"uses":"x"` with no
+// space. Anchoring on the position is what rejects `run: echo uses: <ref>`,
+// `description: calls uses: <ref>` and `name: "uses: <ref>"` — three shapes the
+// old predicate read as calls — without a line-start-only rule, which would have
+// REGRESSED `- {name: x, uses: <ref>}` (the old one matched that by accident, on
+// the space after the comma).
+const USES_KEY = /(?:^\s*(?:-\s+)?|[{,]\s*)(["']?)uses\1\s*:(?:\s|["'])/;
+
 // The lines of a workflow that are YAML STRUCTURE, with block-scalar content
 // blanked out. Exported because it is the part worth pinning on its own.
 //
@@ -1833,6 +1912,21 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 // not a call" — a commented-out template. It is a class, and the other member of
 // it defeats both halves at once: a `uses:` line inside a `run: |` block is
 // uncommented and does contain `uses:`, yet it is shell text, not a call.
+//
+// The strip is still uniquely load-bearing, and for a DIFFERENT shape than the
+// one it was added for. Once USES_KEY anchored on a node position, a fully
+// commented `uses:` line stopped matching on its own — so the original
+// commented-template case no longer needs the strip, and a mutation run caught
+// the strip surviving its own removal. What still needs it is a REAL `uses:`
+// key calling something else with the reusable named only in a trailing
+// comment:
+//
+//   uses: actions/checkout@v4  # replaces <reusable>
+//
+// Unstripped, `code.includes(cfg.reusable)` is true and the repo joins the
+// fleet with a caller it does not have. Measured against the 16-shape table:
+// the shipped predicate scores 16/16 with the strip and falsely matches
+// exactly that one shape without it.
 //
 //   - run: |
 //       echo "uses: praetorian-inc/public-workflows/.../leaderboard-metrics.yml@sha"
@@ -1852,11 +1946,24 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 // be wrong than the two-line rule it replaces. Blanked rather than dropped so a
 // line number still means something to anyone debugging it.
 //
-// What this does NOT cover, stated rather than implied: a `uses:` inside a
-// quoted flow scalar on one line (`name: "uses: x@sha"`), a JSON-formatted
-// workflow (legal YAML, no line structure to read), and a multi-line quoted
-// scalar. All three are far rarer than a `run:` block, and all three fail in the
-// same direction as the bug being fixed, so they remain a known residual.
+// What this does NOT cover, stated rather than implied. Two of the three shapes
+// listed here previously — a one-line quoted scalar (`name: "uses: x@sha"`) and a
+// JSON-formatted workflow — are now handled by USES_KEY's node-position anchor
+// rather than by this function, the first rejected and the second accepted. Two
+// residuals remain, and they fail in OPPOSITE directions:
+//
+//   - a MULTI-LINE quoted scalar whose continuation line happens to begin with
+//     `uses:`. Read as structure, so it over-detects, same direction as the
+//     `run:` block this function fixes.
+//   - a ONE-LINE `run:` whose shell text contains a flow-mapping brace naming
+//     the reusable (`run: echo '{uses: <ref>}'`). This one is NEW, and it is the
+//     price of accepting flow mappings at all: no line-oriented rule can tell
+//     `{uses: x}` as YAML from `{uses: x}` inside a one-line shell string. It is
+//     strictly narrower than the shape it replaces — the old predicate matched a
+//     bare `run: echo uses: <ref>`, no brace required.
+//
+// Both are far rarer than a `run:` block, and closing either needs a real parser,
+// which is the layer this file deliberately does not build (see above).
 export function yamlStructureLines(text) {
   const out = [];
   let keyIndent = null; // indentation of the open block's key, or null
@@ -1925,7 +2032,7 @@ export async function hasCaller(client, cfg, repo) {
   // for why that is the same defect class and not a second special case.
   return yamlStructureLines(b64(f.content)).some((l) => {
     const code = stripComment(l);
-    return /(^|\s)uses:\s/.test(code) && code.includes(cfg.reusable);
+    return USES_KEY.test(code) && code.includes(cfg.reusable);
   });
 }
 
@@ -2257,7 +2364,8 @@ export async function auditRepo(client, cfg, repo) {
   //     signal it. This is the one residual, and it is not closed here: it needs a
   //     mutation-free snapshot the REST API does not offer. It is bounded by "a
   //     reopen must land inside the seconds this loop is running", against a
-  //     merged-PR field that cannot itself be reopened.
+  //     merged-PR field that cannot itself be reopened. DETECTED, though not
+  //     prevented, by the count probe bracketing the walk below.
   // Descending would invert this — new closes would land at position 1 and shift
   // the whole list — so the direction is as load-bearing as the sort key.
   //
@@ -2265,11 +2373,45 @@ export async function auditRepo(client, cfg, repo) {
   // no valid early stop (measured: guard 65 pages, public-workflows 2,
   // caeruleus 1, at 100/page). That buys back more than it spends — see the
   // boundary-coverage note below, which the old early stop is what made partial.
-  const fetched = await client.ghPaged(
-    `/repos/${cfg.owner}/${repo}/pulls?state=closed&per_page=100&sort=created&direction=asc`,
-    undefined,
-    { identity: (p) => p.number },
-  );
+  //
+  // ── Detecting the removal residual instead of only documenting it ────────────
+  //
+  // The reasoning above concludes that INSERTION is benign and REMOVAL can drop a
+  // row with no duplicate to signal it. Round 17 left that as prose, which means
+  // the audit's soundness argument rested on an event it could not observe: a
+  // reopen mid-walk produces a report that is short one merged PR and looks
+  // exactly like a clean one.
+  //
+  // Bracketing the walk with a row-count probe observes it. Only a DECREASE is
+  // actionable — an insertion raises the count and loses nothing — so the check is
+  // one-sided, and it fails CLOSED because the alternative is the false clean:
+  //
+  //   250 rows, per_page=100. Page 1 reads positions 1..100. Row 50 is reopened.
+  //   The list is now 249, so page 2 reads positions 101..200 of the NEW list =
+  //   old rows 102..201. OLD ROW 101 IS NEVER RETURNED. Note what this defeats:
+  //   the walk returns 249 rows and the collection now holds 249, so comparing
+  //   the fetched length against the FINAL count agrees perfectly while a row is
+  //   missing. Only before-vs-after catches it.
+  //
+  // Residual of the detector itself, stated rather than implied closed: a removal
+  // and an insertion inside the same walk net to an unchanged count, and this
+  // check would pass. That needs both a reopen and a close within the same seconds
+  // in one repo — strictly narrower than the single-event case it does catch.
+  const closedPath = `/repos/${cfg.owner}/${repo}/pulls?state=closed&sort=created&direction=asc`;
+  const closedBefore = await client.ghCount(closedPath);
+  const fetched = await client.ghPaged(`${closedPath}&per_page=100`, undefined, {
+    identity: (p) => p.number,
+  });
+  const closedAfter = await client.ghCount(closedPath);
+  if (closedAfter < closedBefore) {
+    throw new Error(
+      `${repo}: the closed-PR list SHRANK during the walk (${closedBefore} -> ${closedAfter}) — ` +
+        'a PR was reopened while it was being paginated. Offset pagination reads positions, so a ' +
+        'removal shifts the tail forward and can carry a row past the cursor without ever ' +
+        'returning it, and a merged PR that is never read is never reported as a gap. Refusing ' +
+        'rather than reporting a list that may be short by one: re-run the audit.',
+    );
+  }
   const inWindow = (p) => {
     if (!p.merged_at) return false;
     const ts = Date.parse(p.merged_at);
@@ -2682,7 +2824,21 @@ export function renderMarkdown(report, cfg) {
   return L.join('\n');
 }
 
-export function buildReport(results, cfg, apiCalls) {
+// `dupes` is the count of rows ghPaged served twice and suppressed. It is
+// REPORTED rather than merely counted because the closed-PR walk's soundness
+// argument rests on it: that note concludes insertion is the benign direction
+// because "at worst one row is served twice, and ghPaged dedupes it (counted as
+// state.dupes)". A counter nothing reads makes that claim unfalsifiable — the
+// audit asserted the benign event had happened without ever showing it. With this
+// surfaced, a nonzero count in a report is the insertion evidence, and the
+// count-probe refusal above is the removal evidence, so both branches of the
+// argument are observable in the artifact.
+//
+// Defaulted rather than required, unlike ghPaged's `identity`: the two failure
+// modes are not comparable. An unstated row key silently SHORTENS a list, which is
+// the false clean this file exists to refuse, so it throws; an unpassed dupes
+// count understates a diagnostic and cannot change a verdict.
+export function buildReport(results, cfg, apiCalls, dupes = 0) {
   const sum = (f) => results.reduce((n, r) => n + f(r), 0);
   // in_flight is deliberately NOT a gap condition: an unconcluded run is an
   // unknown, and raising on it would make the audit's verdict depend on how
@@ -2699,12 +2855,34 @@ export function buildReport(results, cfg, apiCalls) {
       r.classes.skipped_anomaly.length ||
       r.classes.payload_missing.length,
   );
+  // Hoisted out of the literal below so the caveat gate can read the SAME replay
+  // lists the document carries, rather than recomputing them from `gaps` and
+  // trusting the two derivations to agree.
+  const reposWithGaps = gaps.map((r) => ({
+    repo: r.repo,
+    failed: r.classes.failed.length,
+    never_fired: r.classes.never_fired.length,
+    skipped_anomaly: r.classes.skipped_anomaly.length,
+    pre_onboarding: r.classes.pre_onboarding.length,
+    in_flight: r.classes.in_flight.length,
+    payload_missing: r.classes.payload_missing.length,
+    unverifiable: r.classes.unverifiable.length,
+    // Carried as numbers, not folded into `replay`: this list is what a human
+    // must fix in ENGINEER_EMAIL_MAP before any replay of them is productive.
+    payload_missing_prs: r.classes.payload_missing.map((p) => p.number).sort((a, b) => a - b),
+    // Same reasoning, opposite remediation: these need a consumer-side lookup,
+    // and a replay of them would re-deliver whatever already succeeded.
+    unverifiable_prs: r.classes.unverifiable.map((p) => p.number).sort((a, b) => a - b),
+    unverifiable_reasons: unverifiableReasons(r.classes.unverifiable),
+    replay: replayList(r.classes),
+  }));
   return {
     since: cfg.since,
     until: cfg.until,
     mode: cfg.selfAudit ? 'self' : 'fleet',
     fleet_size: results.length,
     api_calls: apiCalls,
+    duplicate_rows: dupes,
     totals: {
       merged_prs: sum((r) => r.merged_prs),
       delivered: sum((r) => r.classes.delivered.length),
@@ -2720,33 +2898,24 @@ export function buildReport(results, cfg, apiCalls) {
     // key there is a count and code that sums totals would trip over a string
     // array; the per-repo tables get their own copy below.
     unverifiable_reasons: unverifiableReasons(results.flatMap((r) => r.classes.unverifiable)),
-    repos_with_gaps: gaps.map((r) => ({
-      repo: r.repo,
-      failed: r.classes.failed.length,
-      never_fired: r.classes.never_fired.length,
-      skipped_anomaly: r.classes.skipped_anomaly.length,
-      pre_onboarding: r.classes.pre_onboarding.length,
-      in_flight: r.classes.in_flight.length,
-      payload_missing: r.classes.payload_missing.length,
-      unverifiable: r.classes.unverifiable.length,
-      // Carried as numbers, not folded into `replay`: this list is what a human
-      // must fix in ENGINEER_EMAIL_MAP before any replay of them is productive.
-      payload_missing_prs: r.classes.payload_missing.map((p) => p.number).sort((a, b) => a - b),
-      // Same reasoning, opposite remediation: these need a consumer-side lookup,
-      // and a replay of them would re-deliver whatever already succeeded.
-      unverifiable_prs: r.classes.unverifiable.map((p) => p.number).sort((a, b) => a - b),
-      unverifiable_reasons: unverifiableReasons(r.classes.unverifiable),
-      replay: replayList(r.classes),
-    })),
+    repos_with_gaps: reposWithGaps,
     // What the `replay` arrays above do NOT prove, carried in the MACHINE channel
     // and not only in the rendered prose. A `replay` list read from this document
     // is a list of PR numbers with no qualification attached to it, and the
     // planned auto-dispatch (ENG-5789) reads exactly this document — so a caveat
     // that lives only in `renderMarkdown` warns the one consumer who was already
-    // being warned and misses the one that writes to prod unattended. Present
-    // only when there is something to replay, matching the markdown, so a clean
-    // report carries no warning about a list it does not contain.
-    ...(gaps.length ? { replay_caveats: REPLAY_CAVEATS } : {}),
+    // being warned and misses the one that writes to prod unattended.
+    //
+    // Gated on an actual REPLAY, not on `gaps.length`. Round 17 unified the caveat
+    // TEXT across the two channels and left the GATES divergent, which is a
+    // narrower version of the same defect: `renderMarkdown` skips the caveats per
+    // repo on `!g.replay.length`, so a report whose only defect is
+    // `payload_missing` — a gap, but never replayable, since replayList excludes
+    // it — printed no caveat in markdown while emitting all three in JSON beside
+    // an empty `replay: []`. Every caveat here is about the consequences of
+    // replaying, so attaching them to a document that asks for no replay trains a
+    // machine consumer to ignore them.
+    ...(reposWithGaps.some((r) => r.replay.length) ? { replay_caveats: REPLAY_CAVEATS } : {}),
     repos: results,
   };
 }
@@ -2873,7 +3042,7 @@ async function main() {
 
   const results = [];
   for (const repo of fleet) results.push(await auditRepo(client, cfg, repo));
-  const report = buildReport(results, cfg, client.state.calls);
+  const report = buildReport(results, cfg, client.state.calls, client.state.dupes);
 
   const { writeFileSync } = await import('node:fs');
   if (cfg.json) writeFileSync(cfg.json, JSON.stringify(report, null, 2));

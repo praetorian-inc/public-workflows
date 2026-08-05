@@ -105,7 +105,25 @@ outputs:
       clean one. That is the same trap as the empty string, with a written value.
     value: ${{ steps.audit.outputs.has_gaps }}
   gap-count:
-    description: Number of affected PRs across all audited repos (0 when has-gaps is false)
+    description: >-
+      Number of affected PRs across all audited repos — `replay` plus
+      `payload_missing`, which is why it is not simply the replay list's length.
+      `0` on `clean` and on `undecided` (no gap was found in either case; on
+      `undecided` the records that were not decided are NOT counted here — read
+      `status`). THE EMPTY STRING on every `unknown` path, and — unlike `has-gaps`,
+      which is unwritten if and only if `status` is `unknown` — ALSO EMPTY ON A
+      `gaps` STATUS: the gaps arm publishes `status=gaps has_gaps=true` first, on
+      purpose, so that a confirmed gap set is never downgraded to an
+      infrastructure complaint, and only then counts. If the JSON report is absent
+      or the count cannot be read out of it, that arm errors and exits with this
+      output never written. So `status=gaps`, `has-gaps=true`, `gap-count=''` is a
+      REACHABLE combination and means "gaps confirmed, quantity unknown".
+      Consequence for a caller: an empty string is not zero but compares like it
+      in a GitHub expression — `gap-count > 5` is false for '' exactly as it is
+      for 0 — so a threshold read straight off this output silently treats a
+      confirmed-but-uncounted gap set as below any threshold. Gate on `status`,
+      and treat an empty `gap-count` under `status=gaps` as unknown-and-nonzero,
+      never as none.
     value: ${{ steps.audit.outputs.gap_count }}
   report-markdown:
     description: >-
