@@ -776,7 +776,9 @@ export function classify(
 }
 
 export function dedupeByHead(runs) {
-  // A SUCCESS outranks everything, and only then does the latest run win.
+  // A SUCCESS outranks everything, an UNCONCLUDED run outranks a concluded
+  // non-success, and only then does the latest run win. (The middle tier was
+  // added in round 17 — see the `rank` comment below for what it fixes.)
   //
   // Recency alone was wrong in one direction. The question this audit asks is
   // "did a successful delivery ever happen for this head", and a delivery that
@@ -794,12 +796,35 @@ export function dedupeByHead(runs) {
   // presents here as a single failed row with no trace of the success. No
   // ranking rule over these rows can recover it; `recoverHiddenDeliveries` reads
   // `/attempts/{n}` for that, and this function does not pretend to.
+  // Success-first fixed one direction and left the other open, in the SAME error
+  // direction it was written to close. Success-vs-success and failure-vs-failure
+  // both fall through to recency correctly, but an UNCONCLUDED run is neither:
+  //
+  //   older run, conclusion null (queued / in_progress) — may yet deliver
+  //   newer run, conclusion failure
+  //
+  // Neither is a success, so the old two-way test made this a plain recency
+  // question, the newer FAILURE won, and the PR classified `failed` — onto the
+  // replay list, while a sibling run is at that moment still delivering. That is
+  // a double write for a PR that was about to be fine on its own, which is the
+  // exact harm the success-first rule exists to prevent; it just did not cover
+  // the case where the delivering run has not finished yet.
+  //
+  // Three tiers, because the question is what the head's delivery state IS:
+  //   2 success     — decided, and no later row can undecide it.
+  //   1 unconcluded — UNKNOWN. Outranks a failure so the head classifies
+  //                   in_flight, i.e. `undecided` (exit 3), and a later audit
+  //                   settles it. Deliberately not a gap: not-yet is not never.
+  //   0 concluded non-success — the only tier that may reach the replay list.
+  // Recency still breaks ties WITHIN a tier, so the case recency was added for
+  // (two failures, report the newer) is unchanged.
+  const rank = (r) => (r.conclusion === 'success' ? 2 : r.conclusion === null ? 1 : 0);
   const byHead = new Map();
   const won = (r, prev) => {
     if (!prev) return true;
-    const a = r.conclusion === 'success';
-    const b = prev.conclusion === 'success';
-    if (a !== b) return a;
+    const a = rank(r);
+    const b = rank(prev);
+    if (a !== b) return a > b;
     return Date.parse(r.created_at) > Date.parse(prev.created_at);
   };
   for (const r of runs) {
@@ -1311,18 +1336,39 @@ export function applyPayloadVerdicts(classes, verdicts) {
 // actually trips. Keying only off `x-ratelimit-reset` — which secondary-limit
 // responses need not carry — made every secondary-limit retry wait the 1s floor
 // and burn all four attempts in about three seconds.
+//
+// The two ceilings are DIFFERENT, and a single MAX was the wrong shape. Four
+// attempts means three waits, so one shared 60s ceiling bounded the total wait
+// at 180s: a `retry-after: 300` — a value GitHub documents and sends — was
+// clamped to 60s three times, all three retries landed back inside the same
+// still-open window, and the audit exited 2 UNKNOWN over a repo that would have
+// succeeded had the header simply been obeyed. Giving up EARLY is the failure
+// here, not waiting too long.
+//
+// `retry-after` gets the higher ceiling because it is a SECONDARY-limit signal
+// and those windows are documented in the tens of seconds to a few minutes, so
+// the server's ask is nearly always affordable. `x-ratelimit-reset` keeps 60s
+// because it is a PRIMARY-limit instant that can be most of an hour out; parking
+// a runner for 50 minutes to maybe finish is worse than an exit-2 UNKNOWN, which
+// is an honest "could not determine" the next scheduled audit resolves. Exported
+// so tests assert the ceilings that ship rather than restating the literals.
+export const RETRY_WAIT_MS = Object.freeze({
+  floor: 1000,
+  retryAfterCeiling: 300000,
+  rateLimitResetCeiling: 60000,
+});
 export function retryDelayMs(headers, now = Date.now()) {
-  const MIN = 1000;
-  const MAX = 60000;
-  const clamp = (ms) => Math.max(MIN, Math.min(MAX, ms));
+  const MIN = RETRY_WAIT_MS.floor;
+  const clamp = (ms, max) => Math.max(MIN, Math.min(max, ms));
 
   // Documented as either delta-seconds or an HTTP date; GitHub sends seconds.
   const ra = headers.get('retry-after');
   if (ra) {
+    const MAX = RETRY_WAIT_MS.retryAfterCeiling;
     const secs = Number(ra);
-    if (Number.isFinite(secs) && secs > 0) return clamp(secs * 1000);
+    if (Number.isFinite(secs) && secs > 0) return clamp(secs * 1000, MAX);
     const when = Date.parse(ra);
-    if (Number.isFinite(when)) return clamp(when - now);
+    if (Number.isFinite(when)) return clamp(when - now, MAX);
   }
 
   // Primary limit: an epoch-seconds instant. Only usable if it is actually in
@@ -1334,7 +1380,7 @@ export function retryDelayMs(headers, now = Date.now()) {
   const reset = Number(headers.get('x-ratelimit-reset'));
   if (Number.isFinite(reset) && reset > 0) {
     const delta = reset * 1000 - now;
-    if (delta > 0) return clamp(delta);
+    if (delta > 0) return clamp(delta, RETRY_WAIT_MS.rateLimitResetCeiling);
   }
 
   // Nothing usable: a 403 can also mean "no permission", which no wait fixes.
@@ -1349,6 +1395,68 @@ export function retryDelayMs(headers, now = Date.now()) {
 // Exported so a test asserts the set rather than restating the literals, which
 // would pass no matter what ships.
 export const RETRY_STATUS = new Set([403, 429, 500, 502, 503, 504]);
+
+// The retry-exhaustion message said only "after 4 attempts", which reads as "the
+// API stayed broken for four tries" — and that is one of two very different
+// causes. The other is that the waits are CEILINGED, so the audit gave up while
+// the server's own window was still open, and no operator triaging an exit-2
+// UNKNOWN can tell those apart from the message alone. The headers that drove
+// the waiting therefore go into it: a bare message means no rate-limit headers
+// were present, i.e. a genuine server-side failure rather than a limit.
+export function rateLimitAsk(headers) {
+  const parts = [];
+  for (const h of ['retry-after', 'x-ratelimit-reset', 'x-ratelimit-remaining']) {
+    const v = headers.get(h);
+    if (v) parts.push(`${h}: ${v}`);
+  }
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
+// Resolves what `request` was handed into the URL it will actually fetch, and
+// REFUSES anything that is not GitHub's API.
+//
+// Absolute URLs reach `request` from exactly one place: the `rel="next"` target
+// in a Link header, i.e. a value out of a response envelope rather than out of
+// this script — and every request carries `authorization: Bearer <token>`
+// unconditionally. The old test was `rawUrl.startsWith('http')`, which is two
+// distinct holes, and the narrower one is not the cross-origin case:
+//
+//   http://api.github.com/...      the SAME host, so even a hostname comparison
+//     passes it — and `startsWith('http')` matches `http://` before it matches
+//     `https://`. A cleartext downgrade puts the Bearer token on the wire.
+//   https://attacker.test/...      the token goes to a third party outright.
+//
+// Compared as a parsed ORIGIN and not as a string prefix, because a prefix test
+// against the base is itself bypassable: `https://api.github.com.evil.test/` and
+// `https://api.github.com@evil.test/` both start with `https://api.github.com`
+// while resolving elsewhere. `URL.origin` normalizes both to the real host
+// (`https://evil.test`), and folds `:443` away so a legitimate explicit-port URL
+// still matches.
+//
+// Stated honestly: this is hardening, not a live exploit. The Link header is
+// served by api.github.com over TLS, so no reachable path produces a foreign
+// origin today. It ships anyway because the asset at risk is the audit's own
+// credential, the check is one comparison, and "our upstream would never send
+// that" is precisely the premise whose failure this would otherwise make silent.
+// Relative is defined as a LEADING SLASH rather than "not absolute", so a value
+// that is neither — a bare word, an empty string — is refused rather than
+// concatenated into a URL that happens to resolve.
+export function resolveApiUrl(rawUrl, base = API) {
+  const s = String(rawUrl);
+  if (s.startsWith('/')) return `${base}${s}`;
+  let parsed;
+  try {
+    parsed = new URL(s);
+  } catch {
+    throw new Error(`not an API path or URL: ${s} — paths must start with "/"`);
+  }
+  if (parsed.origin !== base) {
+    throw new Error(
+      `refusing to send credentials to ${parsed.origin} (expected ${base}): ${s}`,
+    );
+  }
+  return parsed.href;
+}
 
 // Exported for the retry tests only. The attempt CAP and the decision to retry
 // a rejected fetch are this script's control flow, not the API's semantics, so
@@ -1369,7 +1477,7 @@ export function makeClient(token) {
   // 40 of guard's 42). A 403/429 mid-pagination therefore aborted the whole
   // audit with no retry at all, on precisely the busiest repos.
   async function request(rawUrl) {
-    const url = rawUrl.startsWith('http') ? rawUrl : `${API}${rawUrl}`;
+    const url = resolveApiUrl(rawUrl);
     for (let attempt = 0; attempt < 4; attempt++) {
       let res;
       try {
@@ -1405,7 +1513,9 @@ export function makeClient(token) {
       // broken endpoint is bounded by the same 4-attempt cap.
       if (RETRY_STATUS.has(res.status)) {
         if (attempt === 3) {
-          throw new Error(`${res.status} on ${url} after 4 attempts`);
+          throw new Error(
+            `${res.status} on ${url} after 4 attempts${rateLimitAsk(res.headers)}`,
+          );
         }
         // A 5xx carries no rate-limit headers, so retryDelayMs falls through to
         // its floor. That is the right answer for a transient server error
@@ -1698,6 +1808,80 @@ export async function runsInRange(client, cfg, repo) {
 
 const b64 = (s) => Buffer.from(s, 'base64').toString('utf8');
 
+// A YAML comment starts at a `#` that begins a line or follows whitespace —
+// `a#b` is not one. Anchored rather than a bare indexOf('#') so that a real
+// caller's trailing ` # v2.16.3` version pin is removed without touching the ref
+// in front of it.
+const stripComment = (l) => l.replace(/(^|\s)#.*$/, '$1');
+
+// A block scalar OPENER: `key: |`, `run: >-`, `script: |2`, with nothing after
+// the indicator but optional chomping/indentation indicators and a comment.
+// `key: > text` is a plain scalar that happens to start with `>` and must not
+// match, which is why the tail is anchored. The captured prefix includes any
+// `- ` sequence dash, so the recorded indentation is that of the KEY rather than
+// of the dash: YAML measures block content against the node's own column, and
+// treating the dash column as the boundary would classify the item's sibling keys
+// as block content. Stated as spec-conformance and not as a fixed bug — a step
+// with both `run:` and `uses:` is not valid Actions YAML, so the two readings
+// agree on every real workflow, and no test here distinguishes them.
+const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$/;
+
+// The lines of a workflow that are YAML STRUCTURE, with block-scalar content
+// blanked out. Exported because it is the part worth pinning on its own.
+//
+// Stripping comments and requiring `uses:` closed ONE instance of "text that is
+// not a call" — a commented-out template. It is a class, and the other member of
+// it defeats both halves at once: a `uses:` line inside a `run: |` block is
+// uncommented and does contain `uses:`, yet it is shell text, not a call.
+//
+//   - run: |
+//       echo "uses: praetorian-inc/public-workflows/.../leaderboard-metrics.yml@sha"
+//
+// A lint step, a generator, a docs snippet or a heredoc that echoes a caller
+// template all produce exactly that. The harm is the one already measured for the
+// commented-template case: hasCaller says true, the repo joins the fleet, the
+// reusable itself accrues no runs, every merged PR classifies never_fired, and
+// the report prints a replay command against the PROD queue for deliveries that
+// succeeded. Same fabricated replay list, different textual disguise — so the
+// fix belongs at the same layer as the comment strip, not as a second special
+// case bolted onto the matcher.
+//
+// Deliberately a TARGETED rule and not a YAML parser. This action ships with
+// zero dependencies and no install step, so a parser would have to be
+// hand-rolled — and a hand-rolled lexer for a format this size is more likely to
+// be wrong than the two-line rule it replaces. Blanked rather than dropped so a
+// line number still means something to anyone debugging it.
+//
+// What this does NOT cover, stated rather than implied: a `uses:` inside a
+// quoted flow scalar on one line (`name: "uses: x@sha"`), a JSON-formatted
+// workflow (legal YAML, no line structure to read), and a multi-line quoted
+// scalar. All three are far rarer than a `run:` block, and all three fail in the
+// same direction as the bug being fixed, so they remain a known residual.
+export function yamlStructureLines(text) {
+  const out = [];
+  let keyIndent = null; // indentation of the open block's key, or null
+  for (const raw of text.split('\n')) {
+    if (keyIndent !== null) {
+      // A blank line inside a block scalar does not end it, and carries no
+      // `uses:` either way.
+      if (raw.trim() === '') {
+        out.push('');
+        continue;
+      }
+      const indent = raw.length - raw.trimStart().length;
+      if (indent > keyIndent) {
+        out.push('');
+        continue;
+      }
+      keyIndent = null; // dedented to the key's level or above: block is closed
+    }
+    const m = raw.match(BLOCK_OPEN);
+    if (m) keyIndent = m[1].length;
+    out.push(raw);
+  }
+  return out;
+}
+
 export async function hasCaller(client, cfg, repo) {
   // Encoded per SEGMENT, never as a whole string: encodeURIComponent turns `/`
   // into `%2F`, which the contents API does not read as a directory separator,
@@ -1733,20 +1917,16 @@ export async function hasCaller(client, cfg, repo) {
   // is the worst output this tool can produce, and a commented example was enough
   // to produce it.
   //
-  // So: strip comments and require the reference to sit on a `uses:` line. A YAML
-  // comment starts at a `#` that begins a line or follows whitespace (`a#b` is
-  // not one), which is why the strip is anchored rather than a bare indexOf('#') —
-  // and why a real caller's trailing ` # v2.16.3` version pin is removed without
-  // touching the ref in front of it. Requiring `uses:` is the half that turns
-  // "mentions" into "calls"; both halves are needed, since a commented line
-  // still contains `uses:`.
-  const stripComment = (l) => l.replace(/(^|\s)#.*$/, '$1');
-  return b64(f.content)
-    .split('\n')
-    .some((l) => {
-      const code = stripComment(l);
-      return /(^|\s)uses:\s/.test(code) && code.includes(cfg.reusable);
-    });
+  // So: discard block-scalar content, strip comments, and require the reference
+  // to sit on a `uses:` line. Requiring `uses:` is the half that turns "mentions"
+  // into "calls"; the comment strip is needed because a commented line still
+  // contains `uses:`; and the block-scalar pass is needed because shell text
+  // inside a `run: |` is neither commented nor a call — see yamlStructureLines
+  // for why that is the same defect class and not a second special case.
+  return yamlStructureLines(b64(f.content)).some((l) => {
+    const code = stripComment(l);
+    return /(^|\s)uses:\s/.test(code) && code.includes(cfg.reusable);
+  });
 }
 
 // A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no runs for
@@ -2245,6 +2425,57 @@ export function unverifiableReasons(recs) {
 // ENG-5689 requires the fix to state what its chosen signal does not cover.
 // undecidedCaveats covers the classes the audit cannot DECIDE; this covers the
 // boundary past which it cannot SEE.
+// Everything the replay list does NOT prove — ONE source, rendered into the
+// markdown and serialized into the JSON, because the two channels had drifted
+// apart and only one of them carried any of this.
+//
+// The drift was the defect, not the prose. Round 16 answered "a deleted run is
+// indistinguishable from a never-fired one" by adding a caveat to
+// renderMarkdown, which is the channel a HUMAN reads before pasting. The JSON
+// report's `replay:` stayed a bare array of PR numbers with no qualification
+// anywhere in the document — and the JSON is precisely the channel the planned
+// auto-dispatch consumes (ENG-5789: "the detector already computes everything
+// the dispatch needs"). So the fix reached the reader who was already being
+// warned and missed the consumer that cannot read prose at all. Same for the
+// other two caveats, which were markdown-only from the start.
+//
+// Deriving both channels from this array is the class fix: a caveat cannot be
+// added to one and forgotten in the other, because neither channel has any text
+// of its own. `id` is the stable machine key — a consumer branches on `id`, not
+// on wording that will be reworded. `text` is cfg-INDEPENDENT for the same
+// reason the note at the render site gives: renderMarkdown and buildReport are
+// called with different cfg shapes in tests and by consumers, so interpolating
+// `cfg.backfillCaller` here would render the literal string `undefined` into one
+// channel or the other. The concrete workflow filename is already in the
+// `gh workflow run` command directly above these lines in the markdown.
+export const REPLAY_CAVEATS = [
+  {
+    id: 'author_resolution',
+    text:
+      'Replaying writes to the production metrics queue. It is idempotent only while author ' +
+      'resolution is unchanged (ENG-5693) — confirm before dispatching.',
+  },
+  {
+    id: 'repairs_invisible',
+    text:
+      'This report cannot see previous repairs: a gap is joined to its delivery through the ' +
+      "metrics caller's runs, while a repair is dispatched through the repo's backfill caller " +
+      "— a different workflow, whose runs carry the default branch's SHA rather than the PR's, " +
+      "so no head-SHA join can find them. Check the repo's backfill-caller run history before " +
+      'dispatching: a PR already repaired there still appears above, and replaying it writes a ' +
+      'second copy (ENG-5797).',
+  },
+  {
+    id: 'deleted_run',
+    text:
+      'A `never_fired` verdict means no workflow run exists for that PR NOW, which is not the ' +
+      'same as none ever having run: a deleted run leaves no trace in the Actions API, so a ' +
+      'delivery whose run was deleted is indistinguishable here from one that never fired. If ' +
+      "these PRs' runs may have been deleted, verify against the consumer before replaying " +
+      '(ENG-5853).',
+  },
+];
+
 const COVERAGE_CEILING =
   '_Coverage: this audit verifies delivery **to the metrics queue** only. A payload that ' +
   'enqueued successfully and was then lost between the queue and the `CodeCommit` table is ' +
@@ -2427,47 +2658,16 @@ export function renderMarkdown(report, cfg) {
     }
     L.push('```');
     L.push('');
-    L.push(
-      '> Replaying writes to the production metrics queue. It is idempotent only ' +
-        'while author resolution is unchanged (ENG-5693) — confirm before dispatching.',
-    );
-    L.push('>');
-    // This list does not shrink when a repair succeeds, and saying so is the
-    // difference between a stale entry and a second score row. Delivery is joined
-    // through `cfg.callerFile` only, while a repair is dispatched through
-    // `cfg.backfillCaller` — a separate workflow whose runs carry the default
-    // branch's SHA, not the PR's, so no head-SHA join can see them and the audit
-    // is structurally unable to observe its own remediation (ENG-5790). The
-    // onboarding boundary can also land early on a merge-commit-introduced caller,
-    // adding an entry that was never a gap. Both err toward listing too much, so
-    // the check belongs at DISPATCH time, where the write happens.
-    // `cfg.callerFile` is deliberately NOT interpolated here. renderMarkdown is
-    // called in tests and by buildReport consumers with a cfg carrying only
-    // `owner` and `backfillCaller` — the fields the replay command needs — so
-    // naming callerFile would render the literal string `undefined` into an
-    // operator-facing warning. `backfillCaller` is safe because the command
-    // directly above already depends on it.
-    L.push(
-      '> This report cannot see previous repairs: a gap is joined to its delivery through ' +
-        `the metrics caller's runs, while a repair is dispatched through \`${cfg.backfillCaller}\` ` +
-        "— a different workflow, whose runs carry the default branch's SHA rather than the " +
-        "PR's, so no head-SHA join can find them. Check the repo's backfill-caller run history " +
-        'before dispatching: a PR already repaired there still appears above, and replaying it ' +
-        'writes a second copy.',
-    );
-    L.push('>');
-    // The `never_fired` half of this list rests on "no run row means no run", and
-    // a DELETED run falsifies that with no tombstone to read — see the note at
-    // the never_fired branch in classify for why no probe available to this token
-    // separates the two. Said HERE, in the paragraph a human reads immediately
-    // before pasting a command that writes to prod, rather than only in a source
-    // comment: the operator is the only party who can check the run history.
-    L.push(
-      '> A `never_fired` verdict means no workflow run exists for that PR NOW, which is not the ' +
-        'same as none ever having run: a deleted run leaves no trace in the Actions API, so a ' +
-        'delivery whose run was deleted is indistinguishable here from one that never fired. If ' +
-        "these PRs' runs may have been deleted, verify against the consumer before replaying.",
-    );
+    // Rendered from REPLAY_CAVEATS rather than written here, so the markdown and
+    // the JSON cannot disagree about what the replay list does not prove — see
+    // that constant for why the split was itself the defect. Said HERE, in the
+    // paragraph a human reads immediately before pasting a command that writes
+    // to prod, rather than only in source comments: the operator is the only
+    // party who can check a repo's run history.
+    for (const [i, c] of REPLAY_CAVEATS.entries()) {
+      if (i) L.push('>');
+      L.push(`> ${c.text}`);
+    }
     L.push('');
   }
   L.push('---');
@@ -2538,6 +2738,15 @@ export function buildReport(results, cfg, apiCalls) {
       unverifiable_reasons: unverifiableReasons(r.classes.unverifiable),
       replay: replayList(r.classes),
     })),
+    // What the `replay` arrays above do NOT prove, carried in the MACHINE channel
+    // and not only in the rendered prose. A `replay` list read from this document
+    // is a list of PR numbers with no qualification attached to it, and the
+    // planned auto-dispatch (ENG-5789) reads exactly this document — so a caveat
+    // that lives only in `renderMarkdown` warns the one consumer who was already
+    // being warned and misses the one that writes to prod unattended. Present
+    // only when there is something to replay, matching the markdown, so a clean
+    // report carries no warning about a list it does not contain.
+    ...(gaps.length ? { replay_caveats: REPLAY_CAVEATS } : {}),
     repos: results,
   };
 }

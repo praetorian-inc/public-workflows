@@ -76,6 +76,11 @@ import {
   shq,
   pickToken,
   TOKEN_SOURCES,
+  RETRY_WAIT_MS,
+  rateLimitAsk,
+  resolveApiUrl,
+  yamlStructureLines,
+  REPLAY_CAVEATS,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -870,6 +875,44 @@ test('dedupeByHead: two successes resolve to the later one', () => {
   assert.equal(dedupeByHead([b, a]).get('samesha').id, 2);
 });
 
+test('dedupeByHead: an UNCONCLUDED run outranks a NEWER failure', () => {
+  // The hole success-first left open, in the SAME error direction it was written
+  // to close. Neither run is a success, so the two-way test made this a plain
+  // recency question: the newer FAILURE won, the PR classified `failed`, and it
+  // reached the replay list — dispatching a second write while the older sibling
+  // run was at that moment still delivering.
+  //
+  // The unconcluded run wins instead, so the head classifies in_flight, i.e.
+  // `undecided`, and a later audit settles it. Not-yet is not never.
+  const pending = run(1, 'samesha', null, '2026-07-01T00:00:00Z');
+  const failed = run(2, 'samesha', 'failure', '2026-07-02T00:00:00Z');
+
+  assert.equal(dedupeByHead([pending, failed]).get('samesha').id, 1);
+  assert.equal(dedupeByHead([failed, pending]).get('samesha').id, 1);
+});
+
+test('dedupeByHead: a SUCCESS still outranks a newer UNCONCLUDED run', () => {
+  // The middle tier must not displace the top one. A delivery that succeeded is
+  // decided, and a re-run that has not finished cannot undecide it — reporting
+  // `undecided` there would turn a settled repo into a permanently unsettled one
+  // every time anybody re-ran a job.
+  const ok = run(1, 'samesha', 'success', '2026-07-01T00:00:00Z');
+  const pending = run(2, 'samesha', null, '2026-07-09T00:00:00Z');
+
+  assert.equal(dedupeByHead([ok, pending]).get('samesha').id, 1);
+  assert.equal(dedupeByHead([pending, ok]).get('samesha').id, 1);
+});
+
+test('dedupeByHead: among two UNCONCLUDED runs recency still decides', () => {
+  // Recency breaks ties WITHIN a tier, so adding the tier must not flatten the
+  // ordering inside it either.
+  const older = run(1, 'samesha', null, '2026-07-01T00:00:00Z');
+  const newer = run(2, 'samesha', null, '2026-07-04T00:00:00Z');
+
+  assert.equal(dedupeByHead([older, newer]).get('samesha').id, 2);
+  assert.equal(dedupeByHead([newer, older]).get('samesha').id, 2);
+});
+
 // ── retryDelayMs ─────────────────────────────────────────────────────────────
 
 // A minimal Headers stand-in: only .get() is used, and a real Headers would
@@ -929,11 +972,99 @@ test('RETRY_STATUS covers the transient failures and NOT the deterministic ones'
   }
 });
 
-test('retryDelayMs: the wait is clamped to [1s, 60s]', () => {
-  // Unbounded, a reset an hour out would hang the job until its timeout.
-  assert.equal(retryDelayMs(hdrs({ 'retry-after': '3600' }), T0), 60000);
-  assert.equal(retryDelayMs(hdrs({ 'x-ratelimit-reset': String(T0 / 1000 + 3600) }), T0), 60000);
-  assert.equal(retryDelayMs(hdrs({ 'retry-after': '0' }), T0), 1000);
+test('retryDelayMs: the two headers have DIFFERENT ceilings', () => {
+  // Unbounded, a reset an hour out would hang the job until its timeout. But a
+  // single 60s ceiling was self-defeating in the other direction: 4 attempts
+  // means 3 waits, so it capped the TOTAL wait at 180s and a documented
+  // `retry-after: 300` burned every attempt inside a window that was still open,
+  // exiting 2 UNKNOWN over a repo that obeying the header would have finished.
+  //
+  // Asserted against RETRY_WAIT_MS rather than restated literals, so a test can
+  // only pass by agreeing with the ceilings that actually ship.
+  assert.equal(RETRY_WAIT_MS.retryAfterCeiling > RETRY_WAIT_MS.rateLimitResetCeiling, true);
+
+  // retry-after: a SECONDARY limit, documented in seconds-to-minutes, so the ask
+  // is affordable and gets honoured up to the higher ceiling.
+  assert.equal(retryDelayMs(hdrs({ 'retry-after': '300' }), T0), 300000);
+  assert.equal(retryDelayMs(hdrs({ 'retry-after': '3600' }), T0), RETRY_WAIT_MS.retryAfterCeiling);
+
+  // x-ratelimit-reset: a PRIMARY-limit instant that can be most of an hour out.
+  // Still 60s — parking a runner for 50 minutes to MAYBE finish is worse than an
+  // honest exit-2 UNKNOWN the next scheduled audit resolves.
+  assert.equal(
+    retryDelayMs(hdrs({ 'x-ratelimit-reset': String(T0 / 1000 + 3600) }), T0),
+    RETRY_WAIT_MS.rateLimitResetCeiling,
+  );
+  assert.equal(retryDelayMs(hdrs({ 'x-ratelimit-reset': String(T0 / 1000 + 300) }), T0), 60000);
+
+  // The floor is shared, and applies to both.
+  assert.equal(retryDelayMs(hdrs({ 'retry-after': '0' }), T0), RETRY_WAIT_MS.floor);
+});
+
+test('rateLimitAsk: the exhaustion message names the headers, or says nothing', () => {
+  // "after 4 attempts" alone conflates two causes an operator must distinguish:
+  // the API stayed broken, versus the audit gave up while the server's window was
+  // still open. A bare message is itself the signal that no rate-limit headers
+  // were present, i.e. a genuine server-side failure.
+  assert.equal(rateLimitAsk(hdrs({})), '');
+  assert.equal(rateLimitAsk(hdrs({ 'retry-after': '300' })), ' (retry-after: 300)');
+  assert.equal(
+    rateLimitAsk(hdrs({ 'retry-after': '300', 'x-ratelimit-remaining': '0' })),
+    ' (retry-after: 300, x-ratelimit-remaining: 0)',
+  );
+});
+
+// ── resolveApiUrl: where the Bearer token is allowed to go ───────────────────
+
+test('resolveApiUrl: a relative path is joined to the API base', () => {
+  assert.equal(
+    resolveApiUrl('/repos/praetorian-inc/guard/pulls?state=closed'),
+    'https://api.github.com/repos/praetorian-inc/guard/pulls?state=closed',
+  );
+  // An absolute api.github.com URL — what a real `rel="next"` target is — passes.
+  assert.equal(
+    resolveApiUrl('https://api.github.com/repositories/1/pulls?page=2'),
+    'https://api.github.com/repositories/1/pulls?page=2',
+  );
+  // An explicit default port is the same origin, and must not be refused.
+  assert.equal(
+    resolveApiUrl('https://api.github.com:443/repos/x/y'),
+    'https://api.github.com/repos/x/y',
+  );
+});
+
+test('resolveApiUrl: refuses to send the token anywhere but the API', () => {
+  // Every request carries `authorization: Bearer <token>` unconditionally, and an
+  // absolute URL reaches here from a response envelope (the Link header), so the
+  // destination is the one thing worth checking.
+  //
+  // The narrower hole is NOT the cross-origin one: `startsWith('http')` matches
+  // `http://` before `https://`, so a downgrade to the SAME host passed — and put
+  // the token on the wire in cleartext.
+  assert.throws(
+    () => resolveApiUrl('http://api.github.com/repos/x/y'),
+    /refusing to send credentials to http:\/\/api\.github\.com/,
+  );
+  assert.throws(
+    () => resolveApiUrl('https://attacker.test/repos/x/y'),
+    /refusing to send credentials to https:\/\/attacker\.test/,
+  );
+
+  // Both of these START WITH the full base string, so a prefix test would admit
+  // them while they resolve elsewhere. Parsing the origin is what closes that.
+  assert.throws(
+    () => resolveApiUrl('https://api.github.com.evil.test/repos/x/y'),
+    /refusing to send credentials to https:\/\/api\.github\.com\.evil\.test/,
+  );
+  assert.throws(
+    () => resolveApiUrl('https://api.github.com@evil.test/repos/x/y'),
+    /refusing to send credentials to https:\/\/evil\.test/,
+  );
+
+  // Neither a path nor a URL. Refused rather than concatenated into something
+  // that happens to resolve.
+  assert.throws(() => resolveApiUrl('repos/x/y'), /must start with "\/"/);
+  assert.throws(() => resolveApiUrl(''), /must start with "\/"/);
 });
 
 // ── runsInRange: slicing and the truncation guard ────────────────────────────
@@ -3932,10 +4063,15 @@ test('renderMarkdown: the replay list warns that an earlier repair is invisible 
   assert.match(md, /This report cannot see previous repairs/);
   assert.match(md, /a PR already repaired there still appears above/);
   assert.match(md, /writes a second copy/);
-  // The warning names the backfill caller from cfg, and — the reason this
-  // assertion exists — must NOT render the literal `undefined` for a field that
-  // renderMarkdown's callers do not supply.
-  assert.match(md, /`leaderboard-backfill-caller\.yml`/);
+
+  // The operator still has to know WHICH workflow's run history to check, and the
+  // dispatch command a few lines above names it — which is why the caveat itself
+  // no longer interpolates `cfg.backfillCaller`. That text is now shared with
+  // buildReport's JSON (see the REPLAY_CAVEATS test), and buildReport's cfg need
+  // not carry the field at all, so interpolating it would render the literal
+  // "undefined" into one channel or the other. Belt and braces on the direction
+  // that actually harms an operator: no `undefined` anywhere in the document.
+  assert.match(md, /gh workflow run leaderboard-backfill-caller\.yml --repo praetorian-inc\/guard/);
   assert.doesNotMatch(md, /undefined/);
 });
 
@@ -4588,6 +4724,93 @@ test('hasCaller: a mention outside a `uses:` line is not a caller', async () => 
   const cfg = callerCfg();
   const text = `name: x\n# see ${cfg.reusable}abc for details\njobs:\n  a:\n    steps:\n      - run: echo "${cfg.reusable}abc"\n`;
   assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), false);
+});
+
+test('hasCaller: a `uses:` line inside a run: BLOCK is shell text, not a call', async () => {
+  // The other member of the class the comment strip closed one instance of. This
+  // line is not commented and it does contain `uses:`, so it defeated BOTH halves
+  // of the previous fix — and lands the same harm: hasCaller true, the reusable
+  // accrues no runs of its own, every merged PR classifies never_fired, and the
+  // report prints a PROD replay command for deliveries that succeeded.
+  const cfg = callerCfg();
+  const text = [
+    'name: lint',
+    'jobs:',
+    '  check:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - name: assert every repo pins the reusable',
+    '        run: |',
+    '          cat > expected <<EOF',
+    `          uses: ${cfg.reusable}@abc123`,
+    '          EOF',
+    '          diff expected actual',
+    '',
+    '          echo done',
+    '',
+  ].join('\n');
+
+  // ANTI-VACUOUS: the trap must be present and must be the exact shape that
+  // defeats the older rule, or a `false` here proves nothing.
+  const trap = text.split('\n').filter((l) => l.includes(cfg.reusable));
+  assert.equal(trap.length, 1, 'fixture must carry exactly one reference to the reusable');
+  assert.ok(!trap[0].trimStart().startsWith('#'), 'the trap must NOT be a comment');
+  assert.match(trap[0], /uses:\s/, 'the trap must sit on a `uses:` line');
+
+  assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), false);
+});
+
+test('hasCaller: CONTROL — a real `uses:` after a run: block IS still a caller', async () => {
+  // The over-skip direction, which the test above cannot see, and the dangerous
+  // one: a block-scalar rule that swallowed too much would drop real callers from
+  // the fleet SILENTLY, and an unaudited repo still reports clean. The dedent has
+  // to CLOSE the block: a rule that opens one and never closes it blanks every
+  // `uses:` from that point on, and this fixture is what says so, because its
+  // reusable reference sits after a `run: |` block rather than before one.
+  const cfg = callerCfg();
+  const text = [
+    'name: metrics',
+    'jobs:',
+    '  pre:',
+    '    steps:',
+    '      - run: |',
+    '          echo hello',
+    '        name: after the block, same step',
+    '  deliver:',
+    `    uses: ${cfg.reusable}@abc123 # v1.2.3`,
+    '    secrets: inherit',
+    '',
+  ].join('\n');
+  assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), true);
+});
+
+test('yamlStructureLines: block content is blanked, structure and line count survive', () => {
+  // Blanked rather than dropped, so a line number still means something to
+  // anyone debugging a probe result; and asserted directly because the matcher
+  // above can pass for the wrong reason if this returns nothing at all.
+  const src = [
+    'a: 1', //            0  kept
+    'b: |', //            1  kept (the opener itself)
+    '  uses: x', //       2  blanked — block content
+    '', //                3  blank inside the block
+    '  still: block', //  4  blanked
+    'c: >-', //           5  kept (folded, with a chomping indicator)
+    '  more text', //     6  blanked
+    'd: > not a block', //7  kept — a plain scalar that starts with '>'
+    'e: 2', //            8  kept
+  ].join('\n');
+
+  assert.deepEqual(yamlStructureLines(src), [
+    'a: 1',
+    'b: |',
+    '',
+    '',
+    '',
+    'c: >-',
+    '',
+    'd: > not a block',
+    'e: 2',
+  ]);
 });
 
 test('ghPaged: a Link URL containing a comma still paginates', async () => {
@@ -5507,4 +5730,51 @@ test('renderMarkdown: the replay caveats admit a never_fired verdict cannot see 
   // caveat about replaying would be advice about a command that is not there.
   const noReplay = renderMarkdown(gapReport({ replay: [] }), CFG);
   assert.doesNotMatch(noReplay, /deleted run leaves no trace/);
+});
+
+test('REPLAY_CAVEATS: EVERY caveat reaches BOTH channels, not just the prose one', () => {
+  // The residual the round-16 fix left. Those caveats were written into
+  // renderMarkdown, which is the channel a HUMAN reads before pasting a command;
+  // buildReport's `replay:` stayed a bare array of PR numbers with nothing
+  // qualifying it anywhere in the document — and the JSON is precisely what the
+  // planned auto-dispatch (ENG-5789) consumes. So the warning reached the reader
+  // who was already being warned and missed the consumer that writes to prod
+  // unattended.
+  //
+  // Iterated rather than spot-checked: a test naming three caveats by hand passes
+  // unchanged when a FOURTH is added to one channel only, which is the exact
+  // drift being fixed.
+  assert.ok(REPLAY_CAVEATS.length >= 3, 'fixture guard: the caveat list must be non-trivial');
+
+  const md = renderMarkdown(gapReport({ replay: [9, 10] }), CFG);
+  const json = buildReport([repoResult('guard', { merged: 2, never_fired: [rec(9), rec(10)] })], CFG, 1);
+
+  assert.deepEqual(
+    json.replay_caveats.map((c) => c.id),
+    REPLAY_CAVEATS.map((c) => c.id),
+    'the JSON must carry every caveat, in the same order, keyed by a stable id',
+  );
+
+  for (const c of REPLAY_CAVEATS) {
+    // Machine channel: the `id` is what a consumer branches on, since wording
+    // will be reworded.
+    const inJson = json.replay_caveats.find((x) => x.id === c.id);
+    assert.ok(inJson, `caveat "${c.id}" missing from the JSON report`);
+    assert.equal(inJson.text, c.text);
+
+    // Human channel: the same text, as a blockquote line.
+    assert.ok(md.includes(`> ${c.text}`), `caveat "${c.id}" missing from the markdown`);
+
+    // cfg-INDEPENDENT, which is what lets one source feed both. renderMarkdown and
+    // buildReport are called with different cfg shapes by tests and consumers, so
+    // an interpolated field absent from one of them renders the literal
+    // "undefined" into an operator-facing warning about a prod write.
+    assert.doesNotMatch(c.text, /undefined/, `caveat "${c.id}" interpolated a missing cfg field`);
+  }
+
+  // Tied to there being something to replay, in BOTH channels, so a clean report
+  // carries no warning about a list it does not contain.
+  const clean = buildReport([repoResult('guard', { merged: 1, delivered: [rec(1)] })], CFG, 1);
+  assert.equal(clean.repos_with_gaps.length, 0);
+  assert.equal('replay_caveats' in clean, false);
 });
