@@ -183,13 +183,20 @@ runs:
           exit 1
         fi
 
-        # Same class, different consequence. The script reads
-        # `process.env.GITHUB_TOKEN || process.env.GH_TOKEN`, and '' is falsy, so
-        # an empty token does not fail — it FALLS THROUGH to whatever GH_TOKEN is
-        # ambient. Measured: empty GITHUB_TOKEN with GH_TOKEN set completed
+        # Same class, different consequence. The script USED TO read
+        # `process.env.GITHUB_TOKEN || process.env.GH_TOKEN`, where '' is falsy, so
+        # an empty token did not fail — it FELL THROUGH to whatever GH_TOKEN was
+        # ambient. Measured then: empty GITHUB_TOKEN with GH_TOKEN set completed
         # normally (api_calls=8, exit 0), auditing under a credential the caller
         # never passed and probably broader than this action advertises. With
-        # BOTH empty the script does refuse, so the fall-through is the whole hole.
+        # BOTH empty the script did refuse, so the fall-through was the whole hole.
+        #
+        # Round 16 closed it inside the script too (`pickToken`), because the CLI is
+        # a supported entry point this guard cannot cover. This check stays, and is
+        # not merely redundant: it runs BEFORE node, it can write `status=unknown`
+        # to $GITHUB_OUTPUT — which the script cannot do for this action's outputs —
+        # and it names the `github-token` INPUT the caller got wrong rather than the
+        # environment variable it happens to be plumbed into.
         if [ -z "$GITHUB_TOKEN" ]; then
           # See the repo guard above for why status is written before the exit.
           echo "status=unknown" >> "$GITHUB_OUTPUT"

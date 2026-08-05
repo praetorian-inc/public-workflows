@@ -139,6 +139,36 @@ export function parseArgs(argv, now = Date.now()) {
             'bug in the flag value, not an unreadable org',
         );
       }
+      // A repo named twice is AUDITED twice, and every number the report prints is
+      // then wrong in the inflating direction: `merged_prs`, each class count and
+      // `api_calls` double, the per-repo table carries two rows for one repo, and
+      // the replay list repeats every gap PR — a paste that dispatches two
+      // backfills per PR, i.e. two writes to the prod metrics queue for one
+      // missing score. Measured: `parseArgs(['--repos=guard,guard'])` yielded
+      // ['guard','guard'] and nothing downstream noticed.
+      //
+      // REFUSED rather than quietly deduped, for the same reason as the two
+      // empty-value checks above: there is no reading of "audit guard twice" that
+      // is what the caller meant, so collapsing it silently hides a broken flag
+      // value — a shell loop or a matrix that appended the same name twice — which
+      // will keep producing it. Same class, same answer: name the caller's bug.
+      //
+      // Compared CASE-INSENSITIVELY because GitHub resolves repo names that way:
+      // `--repos=guard,Guard` is two spellings of ONE repo and double-counts
+      // identically, so a case-sensitive check would close the cited instance and
+      // leave the class open.
+      const seenName = new Map();
+      for (const n of out.repos) {
+        const k = n.toLowerCase();
+        seenName.set(k, (seenName.get(k) || 0) + 1);
+      }
+      const repeated = [...seenName].filter(([, c]) => c > 1).map(([k]) => k);
+      if (repeated.length) {
+        throw new Error(
+          `--repos names the same repository more than once (${repeated.join(', ')}) — each ` +
+            'would be audited twice and every count, the replay list included, would double',
+        );
+      }
     }
   }
 
@@ -677,6 +707,27 @@ export function classify(
         rec.unverifiable_reason = UNVERIFIABLE_REAPED;
         classes.unverifiable.push(rec);
       } else {
+        // The residual under this verdict, stated because it feeds the WRITING
+        // path: `never_fired` reads "no run row" as "no run ever existed", and a
+        // DELETED run breaks that. A run removed by `gh run delete`, by a repo
+        // admin, or by a history purge leaves no tombstone — the runs list simply
+        // omits it and `total_count` drops with it — so inside the
+        // RUN_HISTORY_DAYS horizon a deleted-but-successful delivery is
+        // indistinguishable from one that never fired, and it lands on the replay
+        // list. Direction: a second write for a PR already delivered, and
+        // consumer-side idempotency is not established (ENG-5789).
+        //
+        // Not repaired here because the Actions API exposes no signal that
+        // separates the two from a repo-scoped token: no deleted-run row, and the
+        // org audit log that does record the deletion needs a grant this action
+        // does not ask for. Widening the horizon does not help — it converts the
+        // false replay into an `unverifiable` for every genuinely never-fired PR
+        // beyond it, which is the other error direction wholesale. The candidate
+        // repair is a NEW evidence source (a check-suite probe on the merge SHA,
+        // which may outlive its run), i.e. new scope rather than a defect in this
+        // branch; filed as an enhancement. What this round does fix is the
+        // operator-facing claim: renderMarkdown's replay caveat now names
+        // deletion, so nobody reads this list as proof.
         classes.never_fired.push(rec);
       }
       continue;
@@ -1413,9 +1464,42 @@ export function makeClient(token) {
     let url = path;
     const items = [];
     const seen = new Set();
+    let page = 0;
     while (url) {
+      page++;
       const res = await request(url);
-      if (res.status === 404) break;
+      // A 404 is NOT an empty list. This used to `break`, returning whatever had
+      // been collected so far as though the walk had run to completion. Both
+      // halves of that are false cleans, and the second one is the worse:
+      //
+      //   page 1     -> `[]`, byte-identical to a genuinely empty collection.
+      //     Measured on the closed-PR walk: `merged_prs=0 gaps=0`, exit 0 — a
+      //     repo reported CLEAN without a single PR having been read. main()'s
+      //     two repo-level probes catch the common causes (a typo'd name, a
+      //     private repo this token cannot see) BEFORE any walk starts, which
+      //     narrows this to a change under the running audit — a repo renamed,
+      //     a caller file deleted, a grant revoked mid-run. Narrow is not
+      //     closed, and the outcome is the one this detector exists to refuse.
+      //   page >= 2  -> a PARTIAL list read as a complete one, which no reading
+      //     of 404 excuses: page 1 returned rows, so the collection provably
+      //     exists. Measured: page 1 with a `rel="next"` then a 404 returned 1
+      //     row of 2 pages, silently. Truncation-read-as-completion is the exact
+      //     mechanism behind the 1000-cap clamp that shipped 420 phantom gaps.
+      //
+      // The one 404 that IS data — "no caller workflow in this repo" — never
+      // reaches here. `gh` answers it with the `__missing` sentinel, and
+      // runsInRange's per-slice probe turns that into `total = 0` and skips the
+      // walk. So there is no call site to grant an exception to, and a
+      // per-caller opt-in would only be a lever aimed at this function's own
+      // failure class — see the note above on why the early-stop hook is gone.
+      if (res.status === 404) {
+        throw new Error(
+          `404 on page ${page} of ${url} — refusing to treat it as an empty list. ` +
+            (page > 1
+              ? 'Page 1 of this walk returned rows, so this is a TRUNCATED list, not an absent one.'
+              : 'An absent collection answers 200 with []; a 404 means the subject itself could not be read.'),
+        );
+      }
       if (!res.ok) throw new Error(`${res.status} on ${url}`);
       const body = await res.json();
       const batch = pluck ? pluck(body) : body;
@@ -1665,9 +1749,12 @@ export async function hasCaller(client, cfg, repo) {
     });
 }
 
-// A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no commits
-// touching that path — which is why `gh` and `ghPaged` deliberately treat one as
-// "absent" and carry on. A 404 on the REPOSITORY is not data: it means the audit
+// A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no runs for
+// a workflow that does not exist — which is why `gh` deliberately answers one
+// with the `__missing` sentinel and lets its caller decide. (`ghPaged` used to
+// treat one as an empty list; round 16 made it throw, because a 404 mid-walk is
+// a truncated list and a 404 on page 1 is an unread subject, never "no rows".)
+// A 404 on the REPOSITORY is not data either: it means the audit
 // read nothing at all, and every downstream "absent" is then an artifact of that
 // rather than a finding. Unchecked, the two are indistinguishable — and the
 // indistinguishable outcome is the dangerous one: zero merged PRs, zero gaps,
@@ -1704,12 +1791,15 @@ export async function assertReadable(client, cfg, repo) {
 // block is a CEILING, so a caller that grants two of the three scopes this
 // action documents produces exactly it.
 //
-// Why it has to fail closed HERE rather than be caught downstream: `ghPaged`
-// answers a 404 by breaking out of pagination and returning an EMPTY list, which
-// is byte-identical to "this repo has no runs". Every eligible PR then classifies
-// `never_fired` and lands on the replay list — the one direction that writes to
-// the prod queue. A 403 is already fail-closed (it is in RETRY_STATUS, so it
-// throws after 4 attempts), so this closes the 404 half.
+// Why it has to fail closed HERE rather than be caught downstream, and why
+// round 16's `ghPaged` throw did NOT make it redundant: with no Actions grant the
+// walk is never reached. `runsInRange` asks a `gh` probe for `total_count` first,
+// `gh` answers a 404 with `__missing`, `total` falls to 0 and the slice is
+// SKIPPED — zero runs, no exception, byte-identical to "this repo has no runs".
+// Every eligible PR then classifies `never_fired` and lands on the replay list —
+// the one direction that writes to the prod queue. A 403 is already fail-closed
+// (it is in RETRY_STATUS, so it throws after 4 attempts), so this closes the 404
+// half, at the only layer that can see it.
 //
 // The probe is deliberately the REPO-LEVEL runs endpoint, not the
 // workflow-specific one `runsInRange` uses. A 404 from
@@ -2365,6 +2455,19 @@ export function renderMarkdown(report, cfg) {
         'before dispatching: a PR already repaired there still appears above, and replaying it ' +
         'writes a second copy.',
     );
+    L.push('>');
+    // The `never_fired` half of this list rests on "no run row means no run", and
+    // a DELETED run falsifies that with no tombstone to read — see the note at
+    // the never_fired branch in classify for why no probe available to this token
+    // separates the two. Said HERE, in the paragraph a human reads immediately
+    // before pasting a command that writes to prod, rather than only in a source
+    // comment: the operator is the only party who can check the run history.
+    L.push(
+      '> A `never_fired` verdict means no workflow run exists for that PR NOW, which is not the ' +
+        'same as none ever having run: a deleted run leaves no trace in the Actions API, so a ' +
+        'delivery whose run was deleted is indistinguishable here from one that never fired. If ' +
+        "these PRs' runs may have been deleted, verify against the consumer before replaying.",
+    );
     L.push('');
   }
   L.push('---');
@@ -2472,15 +2575,60 @@ export const wfEscape = (s) =>
 // interpolated message ends up emitted raw.
 export const wfError = (msg) => console.error(`::error::${wfEscape(msg)}`);
 
+// The credential sources, in precedence order. Named once so the picker below and
+// its refusal message cannot drift apart from each other.
+export const TOKEN_SOURCES = ['GITHUB_TOKEN', 'GH_TOKEN'];
+
+// Returns the token, or null when none is set. THROWS when an earlier source is
+// PRESENT BUT EMPTY, which `a || b` cannot distinguish from unset: it just reaches
+// for the next one. `env: GITHUB_TOKEN: ${{ secrets.X }}` with X absent or empty
+// sets the variable to '' — the variable IS set, to nothing — and the audit then
+// runs under whatever GH_TOKEN is ambient on the runner: a different grant than
+// the caller declared, and usually a broader one. Measured before this check:
+// empty GITHUB_TOKEN with GH_TOKEN set completed normally, api_calls=8, exit 0.
+//
+// action.yml refuses the same thing one layer out and keeps doing so — it can
+// write `status=unknown` to $GITHUB_OUTPUT before exiting, which this script
+// cannot, and it can name the ACTION INPUT the caller actually got wrong. But that
+// guard covers only the action path, and the CLI documented at the top of this
+// file is a supported entry point that had the hole wide open.
+//
+// The refusal is conditioned on a SWAP actually being available, not merely on
+// emptiness, so that every word of the message is true when it is emitted: an
+// empty GITHUB_TOKEN with no usable successor swaps nothing, and returning null
+// routes it to main()'s "unset or empty" refusal instead. Refusing there too
+// would reach the same exit code by a message claiming an ambient credential
+// that does not exist.
+//
+// Exported with TOKEN_SOURCES because main() is not exported and cannot run
+// without a network, so this is the only way the precedence is testable at all.
+export function pickToken(env) {
+  const chain = TOKEN_SOURCES;
+  for (let i = 0; i < chain.length - 1; i++) {
+    const name = chain[i];
+    if (!Object.hasOwn(env, name) || env[name] !== '') continue;
+    const swap = chain.slice(i + 1).find((n) => env[n]);
+    if (swap) {
+      throw new Error(
+        `${name} is set but EMPTY — refusing to fall through to ${swap}. An empty value is ` +
+          'not an unset one: the audit would run under an ambient credential the caller never ' +
+          'passed, and report on whatever that credential happens to be able to see.',
+      );
+    }
+  }
+  for (const name of chain) if (env[name]) return env[name];
+  return null;
+}
+
 async function main() {
   const cfg = parseArgs(process.argv.slice(2));
 
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  const token = pickToken(process.env);
   if (!token) {
     // Fail LOUDLY. A detector that silently reports "0 gaps" because it had no
     // credentials is the exact failure class this script exists to catch.
     wfError(
-      'GITHUB_TOKEN (or GH_TOKEN) is unset — refusing to run. An unauthenticated audit would report a clean fleet it never actually read.',
+      'GITHUB_TOKEN (or GH_TOKEN) is unset or empty — refusing to run. An unauthenticated audit would report a clean fleet it never actually read.',
     );
     // exitCode + return, NOT process.exit: see the note at the end of main().
     // The `return` is load-bearing — setting exitCode does not stop execution,

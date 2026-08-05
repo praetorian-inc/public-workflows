@@ -74,6 +74,8 @@ import {
   wfEscape,
   assertRepoName,
   shq,
+  pickToken,
+  TOKEN_SOURCES,
 } from './audit-delivery.mjs';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -1648,10 +1650,13 @@ test('buildReport output feeds renderMarkdown without shape drift', () => {
 
 test('assertReadable: an unreadable repo THROWS instead of yielding a clean report', () => {
   // The dangerous shape, and the reason this is not merely defensive: gh() maps
-  // 404 -> {__missing:true} and ghPaged() returns [] on 404, both deliberately,
-  // because an absent caller file and an absent commit history are real answers.
-  // With no repo-level check, a typo'd --repo makes EVERY endpoint answer 404:
-  // zero merged PRs, zero gaps, exit 0 CLEAN.
+  // 404 -> {__missing:true} deliberately, because "no caller file here" and "no
+  // runs for a workflow that does not exist" are real answers its callers must be
+  // free to read as absence. With no repo-level check, a typo'd --repo makes EVERY
+  // endpoint answer 404: zero merged PRs, zero gaps, exit 0 CLEAN. (ghPaged used
+  // to return [] on a 404 as well; round 16 made it throw. That closes the
+  // paginated half but not this one — the probes below and runsInRange's
+  // total_count probe both go through gh, where __missing is still a value.)
   const client = { gh: async () => ({ __missing: true }) };
   return assert.rejects(
     () => assertReadable(client, { owner: 'praetorian-inc' }, 'guardd'),
@@ -3084,9 +3089,12 @@ test('recoverHiddenDeliveries: UNREADABLE current jobs throws rather than assumi
 });
 
 test('assertActionsReadable: a 404 on the repo-level runs endpoint throws instead of yielding zero runs', () => {
-  // The whole point: ghPaged answers a 404 by returning [], which is
-  // indistinguishable from "no runs" and turns every merged PR into a
-  // never_fired entry on the replay list.
+  // The whole point, and round 16's ghPaged throw did NOT subsume it: with no
+  // Actions grant the paginated walk is never reached. runsInRange asks a `gh`
+  // probe for total_count first, `gh` answers a 404 with __missing, `total` falls
+  // to 0 and the slice is SKIPPED — zero runs, no exception, indistinguishable
+  // from "no runs", and every merged PR becomes a never_fired entry on the replay
+  // list. This probe is the only layer that can see the difference.
   const client = attemptClient({});
   return assert.rejects(() => assertActionsReadable(client, ACFG, 'guard'), /actions:read|not readable/);
 });
@@ -5362,4 +5370,141 @@ test('ghPaged: a caller-supplied stop condition is IGNORED — the walk always c
     [1, 2],
     'a stop condition must not truncate the walk — page 2 has to be fetched',
   );
+});
+
+// ── Round 16: a 404 is not an empty list ─────────────────────────────────────
+
+const notFound = () => ({
+  status: 404,
+  ok: false,
+  statusText: 'Not Found',
+  headers: new Headers(),
+  json: async () => ({ message: 'Not Found' }),
+});
+
+test('ghPaged: a 404 on page ONE throws instead of returning an empty list', async () => {
+  // The false clean this closes, measured on the real closed-PR walk before the
+  // fix: /pulls answered 404, ghPaged returned [], and the repo reported
+  // `merged_prs=0 gaps=0` at exit 0 — byte-identical to a repo with nothing
+  // merged in the window. An absent collection answers 200 with []; a 404 is a
+  // statement about the SUBJECT, not a fact about the collection.
+  let calls = 0;
+  await withFetch(
+    async () => {
+      calls++;
+      return notFound();
+    },
+    () =>
+      assert.rejects(
+        () =>
+          makeClient('t').ghPaged('https://api.github.com/x?page=1', undefined, {
+            identity: (r) => r.id,
+          }),
+        /404 on page 1 of [\s\S]*refusing to treat it as an empty list/,
+      ),
+  );
+  // Exactly one attempt: 404 is deterministic and deliberately not in
+  // RETRY_STATUS, so four tries would only make the refusal slower to surface.
+  assert.equal(calls, 1, 'a 404 must not be retried');
+});
+
+test('ghPaged: a 404 MID-WALK throws and calls the walk truncated, not absent', async () => {
+  // The instance the page-1 framing misses, and the worse of the two, because no
+  // reading of 404 excuses it: page 1 returned rows and a `rel="next"`, so the
+  // collection provably exists. `break` returned that first page as though the
+  // walk had run to completion — a partial list read as a complete one, the same
+  // mechanism as the 1000-cap clamp that shipped 420 phantom gaps.
+  const p1 = 'https://api.github.com/x?page=1';
+  const p2 = 'https://api.github.com/x?page=2';
+  await withFetch(
+    async (url) =>
+      String(url) === p1 ? paged([{ id: 1 }], { link: `<${p2}>; rel="next"` }) : notFound(),
+    () =>
+      assert.rejects(
+        () => makeClient('t').ghPaged(p1, undefined, { identity: (r) => r.id }),
+        (e) => {
+          assert.match(e.message, /404 on page 2/, 'the message must name WHICH page');
+          assert.match(e.message, /TRUNCATED list, not an absent one/);
+          // And it must NOT offer the page-1 reading, which is false here: an
+          // operator told "the subject could not be read" would go looking for a
+          // permissions problem instead of a lost page.
+          assert.doesNotMatch(e.message, /An absent collection answers 200/);
+          return true;
+        },
+      ),
+  );
+});
+
+test('parseArgs: --repos naming one repository twice is refused, in either casing', () => {
+  // Measured before the fix: parseArgs(['--repos=guard,guard']) yielded
+  // ['guard','guard'] and nothing downstream noticed — the repo is audited twice,
+  // every count doubles, and the replay list repeats every gap PR, i.e. two
+  // writes to the prod queue for one missing score.
+  for (const v of ['guard,guard', 'guard,Guard', 'a,guard,b,GUARD']) {
+    assert.throws(
+      () => parseArgs([`--repos=${v}`, '--since=2026-01-01'], NOW),
+      /names the same repository more than once \(guard\)/,
+      `--repos=${v} must be refused`,
+    );
+  }
+  // Control on the CASE half: GitHub resolves repo names case-insensitively, so
+  // `guard,Guard` is two spellings of one repo. A case-SENSITIVE check passes
+  // that cell, which is why it is in the loop above rather than assumed.
+  //
+  // Control in the other direction: distinct names still pass, and pass
+  // UNCHANGED — the check must not quietly rewrite the caller's list (lowercase
+  // it, sort it, dedupe it) on the way through.
+  const ok = parseArgs(['--repos=guard,Palatine,caeruleus', '--since=2026-01-01'], NOW);
+  assert.deepEqual(ok.repos, ['guard', 'Palatine', 'caeruleus']);
+});
+
+test('pickToken: an EMPTY GITHUB_TOKEN is refused, not silently swapped for GH_TOKEN', () => {
+  // '' is falsy, so `a || b` reads a set-but-empty variable as unset and reaches
+  // for the next source. `env: GITHUB_TOKEN: ${{ secrets.X }}` with X absent or
+  // empty produces exactly that, and the audit then runs under whatever GH_TOKEN
+  // is ambient on the runner — a different grant than the caller declared, and
+  // usually a broader one. Measured before the fix: empty GITHUB_TOKEN with
+  // GH_TOKEN set completed normally, api_calls=8, exit 0.
+  assert.throws(
+    () => pickToken({ GITHUB_TOKEN: '', GH_TOKEN: 'ambient' }),
+    /GITHUB_TOKEN is set but EMPTY — refusing to fall through to GH_TOKEN/,
+  );
+
+  // The refusal is conditioned on a swap being AVAILABLE, so that the message is
+  // true whenever it is emitted. Empty with nothing usable behind it swaps
+  // nothing; it routes to main()'s unset-or-empty refusal, same exit code, honest
+  // message.
+  assert.equal(pickToken({ GITHUB_TOKEN: '', GH_TOKEN: '' }), null);
+  assert.equal(pickToken({ GITHUB_TOKEN: '' }), null);
+  assert.equal(pickToken({}), null);
+
+  // Precedence itself, which the check must not have disturbed: GITHUB_TOKEN wins
+  // when set, GH_TOKEN is the fallback when GITHUB_TOKEN is ABSENT (as opposed to
+  // present-and-empty — that distinction is the whole point).
+  assert.equal(pickToken({ GITHUB_TOKEN: 'a', GH_TOKEN: 'b' }), 'a');
+  assert.equal(pickToken({ GH_TOKEN: 'b' }), 'b');
+  assert.deepEqual(TOKEN_SOURCES, ['GITHUB_TOKEN', 'GH_TOKEN']);
+});
+
+test('renderMarkdown: the replay caveats admit a never_fired verdict cannot see a DELETED run', () => {
+  // `never_fired` reads "no run row" as "no run ever existed", and a deleted run
+  // falsifies that with no tombstone in the Actions API to read. The direction is
+  // a replay of a delivery that may already have happened — a second write to the
+  // prod queue, against consumer idempotency that is not established (ENG-5789).
+  // No probe available to this token separates the two, so what is fixable here
+  // is the CLAIM: the paragraph a human reads immediately before pasting the
+  // dispatch command has to say so, since the operator is the only party who can
+  // check the run history.
+  const md = renderMarkdown(gapReport({ replay: [9, 10] }), CFG);
+  assert.match(md, /deleted run leaves no trace in the Actions API/);
+  assert.match(md, /indistinguishable here from one that never fired/);
+  // In the blockquote with the other pre-dispatch caveats, not stranded in prose
+  // somewhere above the command.
+  assert.match(md, /^> A `never_fired` verdict means/m);
+
+  // And it is tied to the replay block rather than printed unconditionally: a
+  // repo whose only defect is unfixable-by-replay gets no dispatch command, so a
+  // caveat about replaying would be advice about a command that is not there.
+  const noReplay = renderMarkdown(gapReport({ replay: [] }), CFG);
+  assert.doesNotMatch(noReplay, /deleted run leaves no trace/);
 });
