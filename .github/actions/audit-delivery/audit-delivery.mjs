@@ -480,9 +480,53 @@ export const RUN_HISTORY_DAYS = 400;
 export const UNVERIFIABLE_REAPED =
   `merged more than ${RUN_HISTORY_DAYS} days ago and has no workflow-run record — ` +
   'GitHub reaps run history, so "no run" out there is not evidence either way';
-export const UNVERIFIABLE_ATTEMPT_UNREADABLE =
-  'an earlier attempt of its run could not be read (404 or empty body), so whether ' +
-  'that attempt sent the payload is unknown';
+export const UNVERIFIABLE_JOBS_UNREADABLE =
+  'its run — or an earlier attempt of it — could not be read (404 or empty body), so ' +
+  'whether that run sent the payload is unknown';
+// The THIRD cause, and the one the reason-per-record design above was written for.
+//
+// There are TWO reaping horizons, not one, and only the outer was modelled.
+// RUN_HISTORY_DAYS covers the run ROW disappearing from the runs list at ~400
+// days. Inside a run that is still listed, the STEPS are reaped much earlier, and
+// `/runs/{id}/jobs` keeps answering 200 the whole time: same shape, `total_count`
+// intact, one job per job, and `steps` present as an EMPTY ARRAY rather than
+// absent. Measured on praetorian-inc/public-workflows against the day of writing:
+//
+//   run 30974638107   age   0d   jobs 1    steps 10
+//   (successful run)  age 101d   jobs 15   steps present
+//   run 17336557917   age 340d   jobs 1    steps []      <- key present, empty
+//
+// So the horizon sits somewhere in 101..340 days, well inside RUN_HISTORY_DAYS —
+// there is a band where the row is readable and its step history is not. That
+// band is not exotic: the windows this action is built for are operator-chosen
+// (`--since`/`--days`) and the DESIGNED backfill workflow partitions history with
+// `--since A --until B` then `--since B`, so reaching back past a year is a
+// documented use, not an edge case.
+//
+// Before this, a run in that band took the RENAME arm of probeSqsStep: zero steps
+// means no step matches SQS_STEP, and for a successful run absence was fatal. So
+// one aged PR aborted the entire fleet audit at exit 2, told the operator "the
+// reusable's step names have changed — update SQS_STEP", and produced no report
+// for any repo. Every clause of that diagnosis was wrong, and it is the exact
+// misdiagnosis class the 404 arm was already fixed for; that fix keyed on
+// `__missing`, which a 200-with-empty-steps is not.
+export const UNVERIFIABLE_STEPS_REAPED =
+  'its run is readable but carries no step records at all — GitHub reaps step ' +
+  'history well before the run row itself (measured: present at 101 days, empty at ' +
+  '340), so the delivery step being absent is not evidence it never ran. Narrow the ' +
+  'window with --since to stay inside the retained band.';
+
+// Every probeSqsStep verdict that is NOT a decision, mapped to the reason it puts
+// on the record. The mapping is the single decision point ON PURPOSE: the two
+// undecided verdicts behave identically downstream, so a call site that compared
+// against one of them by hand would silently mis-handle the other. A test asserts
+// this map covers every non-'sent'/'not_sent' value the probe can return, so
+// adding a third undecided verdict without a reason reds the suite rather than
+// falling through as a decision.
+export const UNDECIDED_VERDICTS = new Map([
+  ['unknown', UNVERIFIABLE_JOBS_UNREADABLE],
+  ['unknown_no_steps', UNVERIFIABLE_STEPS_REAPED],
+]);
 
 // Classification is pure so it can be unit-tested without touching the network.
 // `byHead` is the already-deduplicated head_sha -> run map. `now` is a parameter
@@ -899,10 +943,11 @@ export const SQS_STEP = 'Send metrics to SQS';
 // checks a current run. Duplicating it would let the two drift, and the
 // truncation and rename guards below are exactly the parts that must not.
 //
-// Returns 'sent' | 'not_sent', or 'unknown' when the jobs cannot be read and the
-// caller passed unreadableIsFatal:false. It NEVER answers 'not_sent' for an
-// unreadable list: a run whose steps cannot be read is not evidence of a delivery,
-// and it is not evidence of the absence of one either.
+// Returns 'sent' | 'not_sent' — a decision — or one of the UNDECIDED_VERDICTS
+// ('unknown', 'unknown_no_steps') when the run's step history cannot be read at
+// all. It NEVER answers 'not_sent' for an unreadable list: a run whose steps
+// cannot be read is not evidence of a delivery, and it is not evidence of the
+// absence of one either.
 //
 // `requireStep` is what makes this reusable for a run that did NOT succeed. For a
 // SUCCESSFUL run, a missing step means the reusable was renamed and the whole
@@ -917,27 +962,23 @@ export const SQS_STEP = 'Send metrics to SQS';
 // ~1054 of those in a 90-day guard window against 181 failures, so the audit
 // exits 2 long before any replay list is published. The success path is the
 // rename detector; this flag does not weaken it.
-// `unreadableIsFatal` is what makes the head-wide walk safe to widen. For the row
-// the audit must DECIDE, an unreadable jobs list has to stop everything: turning
-// it into "nothing was sent" is a replay instruction built on no evidence. But the
-// walk now also probes AUXILIARY evidence — sibling runs on the same head and
-// earlier attempts — and those are old by nature (guard's shared heads date from
-// the dual-trigger era), so their job lists are the ones GitHub reaps first. With
-// a fatal read, one reaped sibling would exit 2 on a whole fleet audit and produce
-// no report at all. Passing false answers 'unknown' instead, which the caller
-// turns into `unverifiable` for that ONE record: undecided, not replayed, and the
-// other repos still get audited.
+// An unreadable step history is UNDECIDED for that one record — never fatal for
+// the audit, and never a decision. It used to be fatal for the row the audit had
+// to decide, on the argument that "turning it into nothing-was-sent is a replay
+// instruction built on no evidence". That argument is sound and it does not reach
+// the conclusion it was used for: it rules out answering `not_sent`, which is a
+// DECISION, while the alternative actually on the table is `unverifiable` — the
+// class this file already has, which replayList excludes and which the report
+// names with a reason. The two were conflated, and the cost of the stronger
+// reading was paid fleet-wide: one aged or deleted run in one repo exited 2 for
+// ALL of them and produced no report at all, discarding every finding the audit
+// had already made. `undecided` (exit 3) is a first-class status here precisely so
+// a partly-decidable audit can still publish what it decided.
 //
-// A rename and a truncated page still throw either way. Those are facts about the
-// probe itself being wrong, not about one record's history being unreadable.
-export async function probeSqsStep(
-  client,
-  cfg,
-  repo,
-  jobsPath,
-  label,
-  { requireStep = true, unreadableIsFatal = true } = {},
-) {
+// A rename and a truncated page still throw. Those are facts about the probe
+// itself being wrong — the step name it looks for is stale, or the list it read is
+// short — not about one record's history being unreadable.
+export async function probeSqsStep(client, cfg, repo, jobsPath, label, { requireStep = true } = {}) {
   // per_page is explicit: this endpoint defaults to 30 jobs, and a truncated
   // list would hide a PRESENT delivery step, which then reads as a rename and
   // stops the whole audit at exit 2 for a cause that is not the real one.
@@ -946,17 +987,9 @@ export async function probeSqsStep(
   // "Could not read the jobs" and "read them, the step is gone" are different
   // facts with different repairs, and they used to collapse into the rename
   // message below: __missing produced steps=[], so a 404 told the operator to
-  // update SQS_STEP. Both still FAIL — a run whose steps cannot be read is
-  // never evidence of a delivery — but the message has to name its own cause.
-  if (!jobs || jobs.__missing) {
-    if (!unreadableIsFatal) return 'unknown';
-    throw new Error(
-      `${repo}: ${label} — its jobs could not be read ` +
-        '(404 or empty body), so delivery cannot be verified either way and this is ' +
-        'UNKNOWN rather than decided. A run past its retention window is the usual ' +
-        'cause; narrow the window with --since.',
-    );
-  }
+  // update SQS_STEP. Neither is a decision now, and each carries its own reason
+  // onto the record via UNDECIDED_VERDICTS.
+  if (!jobs || jobs.__missing) return 'unknown';
 
   const list = jobs.jobs || [];
   // per_page=100 raises the ceiling; it does not remove it. Assert against the
@@ -970,6 +1003,33 @@ export async function probeSqsStep(
         'as absent. This endpoint needs pagination.',
     );
   }
+
+  // The INNER reaping horizon: the run row is still listed and its job list still
+  // answers 200, but every job's step history is gone (see UNVERIFIABLE_STEPS_REAPED
+  // for the measurement). Nothing downstream can distinguish that from a rename,
+  // because both present as "no step matches SQS_STEP" — so this has to be caught
+  // on the shape of the whole list, before the name logic runs at all.
+  //
+  // The predicate is "NO job carries ANY step", not "this job has no steps": a job
+  // legitimately carries zero steps when it was skipped or never started, and a run
+  // that mixes one such job with executed ones has readable history. Only a list
+  // where nothing anywhere has a step record is evidence about retention.
+  //
+  // Placed AFTER the truncation guard on purpose. A truncated page whose returned
+  // slice happens to be step-less is a broken read, not a reaped run, and must keep
+  // the message that names pagination.
+  //
+  // This arm also overrides requireStep, which is the one behaviour change with a
+  // cost: a FAILED run with no step records becomes `unverifiable` instead of
+  // staying `failed` and replayable. That is deliberate. Failures that die early
+  // still carry step records (a run that dies at `Set up job` HAS a `Set up job`
+  // step), so this only fires when retention removed the evidence — and then
+  // "it never delivered" is exactly as unsupported as "it did". The direction of
+  // the error matters: `unverifiable` under-reports a possible gap, while
+  // `not_sent` would put the run on a replay list that WRITES TO PROD. Under-
+  // reporting is visible (status=undecided, exit 3, a reason per record); a
+  // spurious replay is not.
+  if (!list.some((j) => (j.steps || []).length > 0)) return 'unknown_no_steps';
 
   // Steps are flattened across EVERY job in the run, so more than one can carry
   // this name — a matrix over the delivery job produces one per shard, and
@@ -1082,28 +1142,50 @@ export function headRunsByPr(prs, runs) {
 //   ownLatestSuccess — the latest attempt OF THE CALLER'S OWN RUN that concluded
 //                      success and did not send. Own-run-only on purpose: see the
 //                      payload_missing branch in recoverHiddenDeliveries.
-//   unreadable       — some attempt record could not be read, so "nothing sent
-//                      here" is not a fact about this head. Reported alongside
-//                      `sent` rather than instead of it: a send that IS found
-//                      decides the head no matter what else was unreadable.
+//   unreadable       — some record could not be read, so "nothing sent here" is
+//                      not a fact about this head. Reported alongside `sent`
+//                      rather than instead of it: a send that IS found decides
+//                      the head no matter what else was unreadable.
+//   unreadableReason — WHY, in operator-facing words, for the record's
+//                      `unverifiable_reason`. Null when `unreadable` is false.
+//                      There are distinct causes with distinct repairs (a 404 on
+//                      a deleted run vs. reaped step history vs. an unreadable
+//                      attempt), and collapsing them into one boolean is what
+//                      made the earlier version print a reason that named the
+//                      wrong cause. FIRST cause wins: the walk is ordered
+//                      cheapest-and-most-relevant first (the row's own current
+//                      run, then siblings, then attempts), so the earliest
+//                      unreadable thing is the one closest to what the operator
+//                      asked about.
 async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
   let ownLatestSuccess = null;
   let unreadable = false;
+  let unreadableReason = null;
+  // One place that turns a non-decision into the pair, so no call site below can
+  // set the flag and forget the reason — that combination renders as
+  // `unverifiable` with no explanation, which is unactionable.
+  const markUndecided = (verdict) => {
+    unreadable = true;
+    if (unreadableReason === null) {
+      unreadableReason = UNDECIDED_VERDICTS.get(verdict) || UNVERIFIABLE_JOBS_UNREADABLE;
+    }
+  };
   for (const run of runs) {
     const own = run.id === ownRunId;
     const base = `/repos/${cfg.owner}/${repo}/actions/runs/${run.id}`;
     const label = own
       ? `run ${run.id} (conclusion ${run.conclusion})`
       : `run ${run.id} (sibling on the same head, conclusion ${run.conclusion})`;
-    // Only the OWN run's unreadable jobs are fatal — see probeSqsStep.
     const verdict = await probeSqsStep(client, cfg, repo, `${base}/jobs`, label, {
       requireStep: run.conclusion === 'success',
-      unreadableIsFatal: own,
     });
     if (verdict === 'sent') {
-      return { sent: { run_id: run.id, attempt: null }, ownLatestSuccess, unreadable };
+      return { sent: { run_id: run.id, attempt: null }, ownLatestSuccess, unreadable, unreadableReason };
     }
-    if (verdict === 'unknown') unreadable = true;
+    // Membership in the map, not equality against one verdict: the two undecided
+    // verdicts behave identically here, and hand-comparing against `'unknown'`
+    // alone is what let a step-less run fall through as though it were decided.
+    if (UNDECIDED_VERDICTS.has(verdict)) markUndecided(verdict);
     for (let n = (run.run_attempt || 1) - 1; n >= 1; n--) {
       const path = `${base}/attempts/${n}`;
       const att = await client.gh(path);
@@ -1114,21 +1196,17 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
         // `failed` leaves it on the REPLAY list, and replaying is what writes to
         // prod. The caller turns this into `unverifiable`, which replayList
         // excludes.
-        unreadable = true;
+        markUndecided('unknown');
         continue;
       }
       const ok = att.conclusion === 'success';
-      // An attempt is auxiliary evidence on every run, the caller's own included:
-      // its ROW was already read and classified, so an unreadable attempt makes
-      // this head undecided rather than the audit unrunnable.
       const av = await probeSqsStep(client, cfg, repo, `${path}/jobs`, `${label} attempt ${n}`, {
         requireStep: ok,
-        unreadableIsFatal: false,
       });
       if (av === 'sent') {
-        return { sent: { run_id: run.id, attempt: n }, ownLatestSuccess, unreadable };
+        return { sent: { run_id: run.id, attempt: n }, ownLatestSuccess, unreadable, unreadableReason };
       }
-      if (av === 'unknown') unreadable = true;
+      if (UNDECIDED_VERDICTS.has(av)) markUndecided(av);
       // `ownLatestSuccess` is set only on a POSITIVE not_sent, never merely
       // because the attempt concluded success. The caller turns it into
       // `payload_missing` — a definite "this PR's author has no score" claim —
@@ -1139,7 +1217,7 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
       if (av === 'not_sent' && ok && own && ownLatestSuccess === null) ownLatestSuccess = n;
     }
   }
-  return { sent: null, ownLatestSuccess, unreadable };
+  return { sent: null, ownLatestSuccess, unreadable, unreadableReason };
 }
 
 export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null) {
@@ -1162,7 +1240,7 @@ export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null)
       run_attempt: rec.run_attempt || 1,
     };
     const siblings = (headRunIds?.get(rec.number) || []).filter((r) => r.id !== rec.run_id);
-    const { sent, unreadable } = await walkHeadForSend(
+    const { sent, unreadable, unreadableReason } = await walkHeadForSend(
       client,
       cfg,
       repo,
@@ -1184,7 +1262,10 @@ export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null)
       // to payload_missing — a definite "this author has no score" claim built on
       // an attempt nobody could read. `unverifiable` is the class for exactly that.
       verdict = 'unverifiable';
-      rec.unverifiable_reason = UNVERIFIABLE_ATTEMPT_UNREADABLE;
+      // The walk's own reason, not a constant chosen here: the causes have
+      // different repairs (narrow the window vs. a deleted run), and the call site
+      // cannot tell which one fired.
+      rec.unverifiable_reason = unreadableReason;
     }
     verdicts.set(rec.run_id, verdict);
   }
@@ -1235,7 +1316,7 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRu
         run_attempt: rec.run_attempt || 1,
       };
       const siblings = (headRunIds?.get(rec.number) || []).filter((r) => r.id !== rec.run_id);
-      const { sent, ownLatestSuccess, unreadable } = await walkHeadForSend(
+      const { sent, ownLatestSuccess, unreadable, unreadableReason } = await walkHeadForSend(
         client,
         cfg,
         repo,
@@ -1271,7 +1352,7 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRu
         // or attempt is a place the send could be hiding, so that assertion is
         // not established. Undecided-with-a-reason loses no information: the
         // report names the reason and points at `gh run list --commit <sha>`.
-        rec.unverifiable_reason = UNVERIFIABLE_ATTEMPT_UNREADABLE;
+        rec.unverifiable_reason = unreadableReason;
         classes.unverifiable.push(rec);
       } else if (ownLatestSuccess !== null) {
         // Every piece of evidence on this head was READ, none of it a send, and
@@ -1865,7 +1946,7 @@ const b64 = (s) => Buffer.from(s, 'base64').toString('utf8');
 // `a#b` is not one. Anchored rather than a bare indexOf('#') so that a real
 // caller's trailing ` # v2.16.3` version pin is removed without touching the ref
 // in front of it.
-const stripComment = (l) => l.replace(/(^|\s)#.*$/, '$1');
+export const stripComment = (l) => l.replace(/(^|\s)#.*$/, '$1');
 
 // A block scalar OPENER: `key: |`, `run: >-`, `script: |2`, with nothing after
 // the indicator but optional chomping/indentation indicators and a comment.
@@ -1891,8 +1972,13 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 //     silently drops it from an org-enumerated fleet -> unaudited, reports clean.
 //
 // The second is the silent-success class this whole detector exists to catch, so
-// neither direction is the "safe" one to leave open. Measured, the old predicate
-// missed 3 of 16 shapes and falsely matched 3 more; this one gets all 16. A
+// neither direction is the "safe" one to leave open. The criterion, not a count:
+// the SHAPES table in the test file is the measurement this predicate was chosen
+// on, every row of it is scored against the shipped detector, and the rejected
+// candidates are scored there too so a regression to either reds the suite. A
+// count written here would be stale on the next row added — which is a defect this
+// file has already shipped twice, so the table is the source of truth and this
+// comment does not restate its size. A
 // key sits at a node position: start of line (block mapping, optionally after a
 // `- ` sequence dash) or just after `{` or `,` (flow mapping). The optional
 // backreferenced quote admits a JSON-formatted workflow's `"uses":` while still
@@ -1904,6 +1990,57 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 // REGRESSED `- {name: x, uses: <ref>}` (the old one matched that by accident, on
 // the space after the comma).
 const USES_KEY = /(?:^\s*(?:-\s+)?|[{,]\s*)(["']?)uses\1\s*:(?:\s|["'])/;
+
+// The VALUE of every `uses:` key on one structural line, in source order.
+//
+// USES_KEY answers "is there a uses key here"; on its own that is not enough to
+// decide a call, because the caller then has to ask whether the REFERENCE is the
+// one it is looking for — and the previous form asked that of the whole line:
+//
+//   USES_KEY.test(code) && code.includes(cfg.reusable)
+//
+// Two independent tests over the same string, binding nothing to each other. Any
+// line carrying a uses key at a node position AND the reusable text ANYWHERE on it
+// matched, no matter which key the text belonged to:
+//
+//   - {uses: actions/checkout@v4, name: "<reusable>"}
+//
+// That calls checkout. It read as a call to the reusable, in the over-detect
+// direction whose harm is already measured above: the repo joins the fleet with a
+// caller it does not have, the reusable accrues no runs, every merged PR
+// classifies never_fired, and the report prints a PROD replay command for
+// deliveries that succeeded. This is the same defect SHAPE as the mention-vs-call
+// bug the anchor fixed, one level in: right key, wrong field.
+//
+// EVERY match is scanned, not just the first. A flow mapping can carry a uses key
+// after some other key's value, and the regex's `[{,]\s*` alternative also fires
+// on a comma INSIDE a quoted scalar — so `{name: "a, uses: x", uses: <ref>@sha}`
+// matches twice, and the real call is the second. Taking `match()` alone would
+// turn that into a false NEGATIVE, which is the silent-clean direction.
+//
+// The regex is rebuilt per call rather than declared `g` at module scope: a
+// g-flagged literal carries `lastIndex` between calls, so one line's scan would
+// resume mid-way through the next line's — a stateful matcher over shared input is
+// order-dependent, and nothing about the call sites makes that visible.
+export function usesValues(line) {
+  const out = [];
+  for (const m of line.matchAll(new RegExp(USES_KEY.source, 'g'))) {
+    // USES_KEY's last character is the separator after the colon, and for a
+    // JSON-formatted workflow (`"uses":"x"`) that separator IS the value's opening
+    // quote. Put it back before reading, so both spellings take the quoted path.
+    const tail = m[0].slice(-1);
+    let rest = line.slice(m.index + m[0].length);
+    if (tail === '"' || tail === "'") rest = tail + rest;
+    rest = rest.replace(/^[ \t]+/, '');
+    const q = rest[0] === '"' || rest[0] === "'" ? rest[0] : null;
+    // A quoted scalar ends at its closing quote; an unquoted one ends at the flow
+    // mapping's next `,` or its closing `}`, or runs to end of line in a block
+    // mapping. The quoted case is checked FIRST because a quoted ref may contain a
+    // comma, which the unquoted rule would cut the value short at.
+    out.push(q ? rest.slice(1).split(q)[0] : rest.split(/[,}]/)[0].trim());
+  }
+  return out;
+}
 
 // The lines of a workflow that are YAML STRUCTURE, with block-scalar content
 // blanked out. Exported because it is the part worth pinning on its own.
@@ -1923,10 +2060,11 @@ const USES_KEY = /(?:^\s*(?:-\s+)?|[{,]\s*)(["']?)uses\1\s*:(?:\s|["'])/;
 //
 //   uses: actions/checkout@v4  # replaces <reusable>
 //
-// Unstripped, `code.includes(cfg.reusable)` is true and the repo joins the
-// fleet with a caller it does not have. Measured against the 16-shape table:
-// the shipped predicate scores 16/16 with the strip and falsely matches
-// exactly that one shape without it.
+// An unquoted `uses:` value runs to end of line, so unstripped the comment is
+// PART OF THE VALUE and the repo joins the fleet with a caller it does not have.
+// The SHAPES table carries that shape with `want:false`, and a mutation run
+// confirms the strip's removal reds the suite on it — so this is pinned by the
+// table rather than by a score quoted here.
 //
 //   - run: |
 //       echo "uses: praetorian-inc/public-workflows/.../leaderboard-metrics.yml@sha"
@@ -2024,16 +2162,17 @@ export async function hasCaller(client, cfg, repo) {
   // is the worst output this tool can produce, and a commented example was enough
   // to produce it.
   //
-  // So: discard block-scalar content, strip comments, and require the reference
-  // to sit on a `uses:` line. Requiring `uses:` is the half that turns "mentions"
-  // into "calls"; the comment strip is needed because a commented line still
-  // contains `uses:`; and the block-scalar pass is needed because shell text
-  // inside a `run: |` is neither commented nor a call — see yamlStructureLines
-  // for why that is the same defect class and not a second special case.
-  return yamlStructureLines(b64(f.content)).some((l) => {
-    const code = stripComment(l);
-    return USES_KEY.test(code) && code.includes(cfg.reusable);
-  });
+  // So: discard block-scalar content, strip comments, and require the reference to
+  // be the VALUE of a `uses:` key — not merely to share a line with one, which is
+  // the distinction usesValues exists for. Reading the value is the half that turns
+  // "mentions" into "calls"; the comment strip is still needed on top of it,
+  // because an unquoted value runs to end of line and would swallow a trailing
+  // `# replaces <reusable>`; and the block-scalar pass is needed because shell text
+  // inside a `run: |` is neither commented nor a call — see yamlStructureLines for
+  // why that is the same defect class and not a second special case.
+  return yamlStructureLines(b64(f.content)).some((l) =>
+    usesValues(stripComment(l)).some((v) => v.includes(cfg.reusable)),
+  );
 }
 
 // A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no runs for
@@ -2394,9 +2533,40 @@ export async function auditRepo(client, cfg, repo) {
   //   missing. Only before-vs-after catches it.
   //
   // Residual of the detector itself, stated rather than implied closed: a removal
-  // and an insertion inside the same walk net to an unchanged count, and this
-  // check would pass. That needs both a reopen and a close within the same seconds
-  // in one repo — strictly narrower than the single-event case it does catch.
+  // and an insertion inside the same walk net to an unchanged count, and the
+  // before-vs-after check would pass. That needs both a reopen and a close within
+  // the same seconds in one repo — strictly narrower than the single-event case it
+  // does catch, and the SHORTFALL check below narrows it further.
+  //
+  // ── The shortfall the bracket cannot see ─────────────────────────────────────
+  //
+  // Bracketing observes the LIST changing. It does not observe the WALK stopping
+  // early, and those are different failures: if the walk returns 100 rows out of
+  // 250 and nothing was reopened, before and after both read 250, the one-sided
+  // check passes, and 150 merged PRs are silently unaudited. That is the same false
+  // clean the bracket was added to prevent, arriving through the other door.
+  //
+  // It is not hypothetical. ghPaged advances by parsing `rel="next"` out of the Link
+  // header; anything that makes ONE header unparseable — the comma trap documented
+  // on ghPaged, a proxy rewriting or dropping the header, an intermediary
+  // truncating it — ends the walk at that page and returns what it has, with no
+  // error. `runsInRange` already asserts `got.length < total` for exactly this
+  // reason on the runs endpoint; the closed-PR walk is the larger of the two (65
+  // pages on guard against a handful for a slice) and had no such assertion.
+  //
+  // `closedBefore`, not `closedAfter`, is the floor. A row closed mid-walk raises
+  // the count without being reachable behind an already-passed cursor, so
+  // comparing against the later count would demand a row the walk could not have
+  // seen and throw on ordinary churn — the spurious-exit-2 failure mode already
+  // paid for once in runsInRange. Growth above the floor is fine: `fetched` can
+  // legitimately exceed `closedBefore`.
+  //
+  // What this closes, precisely, because "the residual is now closed" would be the
+  // overclaim: any early stop, and any pre-cursor removal that skipped a row (the
+  // count drops, so the shortfall shows even when the bracket's own throw is what
+  // fires first). What it still does not close: a removal netted out by a
+  // compensating insertion, where the walk returns the full 250 having never read
+  // one of them. Both checks are needed and neither subsumes the other.
   const closedPath = `/repos/${cfg.owner}/${repo}/pulls?state=closed&sort=created&direction=asc`;
   const closedBefore = await client.ghCount(closedPath);
   const fetched = await client.ghPaged(`${closedPath}&per_page=100`, undefined, {
@@ -2410,6 +2580,14 @@ export async function auditRepo(client, cfg, repo) {
         'removal shifts the tail forward and can carry a row past the cursor without ever ' +
         'returning it, and a merged PR that is never read is never reported as a gap. Refusing ' +
         'rather than reporting a list that may be short by one: re-run the audit.',
+    );
+  }
+  if (fetched.length < closedBefore) {
+    throw new Error(
+      `${repo}: the closed-PR walk returned ${fetched.length} rows but the list held at least ` +
+        `${closedBefore} — the pagination stopped early, so merged PRs were never read and cannot ` +
+        'be reported as gaps. An unparseable or missing Link header ends the walk silently. ' +
+        'Refusing rather than auditing a partial population.',
     );
   }
   const inWindow = (p) => {

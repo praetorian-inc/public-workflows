@@ -59,7 +59,11 @@ import {
   headRunsByPr,
   unverifiableReasons,
   UNVERIFIABLE_REAPED,
-  UNVERIFIABLE_ATTEMPT_UNREADABLE,
+  UNVERIFIABLE_JOBS_UNREADABLE,
+  UNVERIFIABLE_STEPS_REAPED,
+  UNDECIDED_VERDICTS,
+  usesValues,
+  stripComment,
   recoverHiddenDeliveries,
   probeSqsStep,
   needsPayloadProbe,
@@ -2017,34 +2021,43 @@ test('verifyPayloads: a MISSING step name throws rather than defaulting to deliv
   );
 });
 
-test('verifyPayloads: a 404 on the jobs endpoint throws, it does not pass the run', () => {
-  // Same reason as above. __missing means the steps could not be read at all,
-  // which is not evidence of a delivery.
+test('verifyPayloads: a 404 on the jobs endpoint is UNVERIFIABLE, not sent and not fatal', async () => {
+  // __missing means the steps could not be read at all, which is not evidence of
+  // a delivery — and not evidence of its absence either. Round 19 changed WHICH
+  // non-answer this is: it used to throw, taking the whole fleet audit down (exit
+  // 2, no report for any repo) over one deleted or aged run. `unverifiable` is
+  // the class that already existed for "cannot be decided" — replayList excludes
+  // it, the report names it with a reason, and the other repos still get audited.
+  const rec = { number: 4, run_id: 444 };
   const client = jobsClient({ 444: { __missing: true } });
-  return assert.rejects(
-    () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 4, run_id: 444 }]),
-    /jobs could not be read/,
-  );
+  const v = await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [rec]);
+  assert.equal(v.get(444), 'unverifiable');
+  // NOT 'not_sent'. That verdict demotes the record to payload_missing, which
+  // asserts this PR delivered nothing and sends an operator to replay — a write
+  // to the prod queue, built on a run nobody could read.
+  assert.notEqual(v.get(444), 'not_sent');
+  assert.equal(rec.unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
 });
 
-test('verifyPayloads: an unreadable jobs list does NOT blame the step name', async () => {
-  // The earlier version of this test asserted /has no step named/ for the 404
+test('verifyPayloads: an unreadable jobs list does NOT blame the step name', () => {
+  // The original version of this test asserted /has no step named/ for the 404
   // case and so PINNED a misleading diagnosis: __missing produced steps=[], the
   // step lookup missed, and the operator was told to update SQS_STEP when the
   // real cause was that the run's jobs could not be read at all (a run past its
-  // retention window, typically). Both cases must still fail — an unreadable run
-  // is never evidence of a delivery — but each has to name its own repair, so
-  // this asserts the rename text is ABSENT.
+  // retention window, typically). The reason on the record must name its own
+  // repair, so this asserts the rename text is ABSENT from it — now checked on
+  // the reason string rather than on an exception, since this case no longer
+  // throws.
+  const rec = { number: 4, run_id: 444 };
   const client = jobsClient({ 444: { __missing: true } });
-  await assert.rejects(
-    () => verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [{ number: 4, run_id: 444 }]),
-    (e) => {
-      assert.match(e.message, /jobs could not be read/);
-      assert.doesNotMatch(e.message, /has no step named/);
-      assert.doesNotMatch(e.message, /step names have changed/);
-      return true;
-    },
-  );
+  return verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [rec]).then(() => {
+    assert.match(rec.unverifiable_reason, /could not be read/);
+    assert.doesNotMatch(rec.unverifiable_reason, /has no step named/);
+    assert.doesNotMatch(rec.unverifiable_reason, /step names have changed/);
+    // And it must not name the OTHER unreadable cause either: reaped step history
+    // is repaired by narrowing the window, a 404 is not.
+    assert.doesNotMatch(rec.unverifiable_reason, /reaps step history/);
+  });
 });
 
 test('verifyPayloads: asks for a FULL page of jobs, not the default 30', async () => {
@@ -2751,11 +2764,11 @@ test('undecidedCaveats: BOTH causes are named when both are present', () => {
   // record of the new kind — a closed count in prose, the same defect shape as a
   // false universal.
   const [line] = undecidedCaveats({ unverifiable: 3 }, [
-    UNVERIFIABLE_ATTEMPT_UNREADABLE,
+    UNVERIFIABLE_JOBS_UNREADABLE,
     UNVERIFIABLE_REAPED,
   ]);
   assert.match(line, /\*\*3\*\* cannot be decided from the Actions API — /);
-  assert.ok(line.includes(UNVERIFIABLE_ATTEMPT_UNREADABLE), line);
+  assert.ok(line.includes(UNVERIFIABLE_JOBS_UNREADABLE), line);
   assert.ok(line.includes(UNVERIFIABLE_REAPED), line);
   assert.match(line, /; or /);
 });
@@ -2793,7 +2806,7 @@ test('renderMarkdown: a gap repo lists its undecidable PR numbers and no replay 
           skipped_anomaly: 0,
           unverifiable: 2,
           unverifiable_prs: [77, 78],
-          unverifiable_reasons: [UNVERIFIABLE_ATTEMPT_UNREADABLE, UNVERIFIABLE_REAPED],
+          unverifiable_reasons: [UNVERIFIABLE_JOBS_UNREADABLE, UNVERIFIABLE_REAPED],
           replay: [5],
         },
       ],
@@ -2805,7 +2818,7 @@ test('renderMarkdown: a gap repo lists its undecidable PR numbers and no replay 
   assert.match(md, /Undecidable PRs \(2\): #77, #78/);
   // Both causes, one bullet each, under the table — and the ROW LABEL names
   // neither, because it used to name reaping as though it were the only one.
-  assert.ok(md.includes(`- ${UNVERIFIABLE_ATTEMPT_UNREADABLE}`), md);
+  assert.ok(md.includes(`- ${UNVERIFIABLE_JOBS_UNREADABLE}`), md);
   assert.ok(md.includes(`- ${UNVERIFIABLE_REAPED}`), md);
   assert.doesNotMatch(md, /undecidable, run record reaped/);
   // The replay command covers the real gap only.
@@ -3012,7 +3025,7 @@ test('recoverHiddenDeliveries: an unreadable attempt makes the PR unverifiable, 
   return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
     assert.deepEqual(classes.failed, []);
     assert.deepEqual(classes.unverifiable.map((r) => r.number), [5]);
-    assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_ATTEMPT_UNREADABLE);
+    assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
     assert.equal(
       replayList({ ...classes, never_fired: [], skipped_anomaly: [] }).includes(5),
       false,
@@ -3086,7 +3099,7 @@ test('recoverHiddenDeliveries: one unreadable attempt outranks a POSITIVE not_se
   return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
     assert.deepEqual(classes.payload_missing, []);
     assert.deepEqual(classes.unverifiable.map((r) => r.number), [5]);
-    assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_ATTEMPT_UNREADABLE);
+    assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
     // Undecided loses no information and costs no write; payload_missing sends an
     // operator to edit ENGINEER_EMAIL_MAP and re-run, and the re-run writes to the
     // prod queue. Neither class is replayed on this report.
@@ -3211,41 +3224,208 @@ test('probeSqsStep: an absent step is STILL fatal on the success path, so the re
   );
 });
 
-test('probeSqsStep: unreadable jobs are fatal BY DEFAULT, so a new call site fails closed', () => {
-  // The default matters independently of today's call sites, and a mutation showed
-  // it was untested: every caller passes `unreadableIsFatal` explicitly, so flipping
-  // the default to false kept the suite green. The next call site added will not
-  // pass it — and the silent default would answer 'unknown' for a run nobody could
-  // read, which upstream reads as "nothing was sent here".
+test("probeSqsStep: a 404 answers 'unknown' with NO flag to pass, at every call site", () => {
+  // There used to be an `unreadableIsFatal` option, true by default, and this
+  // pair of tests pinned both of its arms. It is gone: an unreadable step history
+  // is undecided for that ONE record, never a decision and never fatal for the
+  // fleet. Keeping the flag would also have left it dead — after the fix both call
+  // sites want the same answer, and an option with one reachable value is a
+  // liability, since the next reader has to work out that the other branch cannot
+  // fire.
+  //
+  // 'unknown' is emphatically not 'not_sent': the walk turns it into
+  // `unverifiable`, which replayList excludes, whereas 'not_sent' would leave the
+  // row on the replay list and write to the prod queue.
   const client = attemptClient({});
-  return assert.rejects(
-    () => probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900'),
-    /jobs could not be read/,
+  return probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900').then((v) => {
+    assert.equal(v, 'unknown');
+    assert.notEqual(v, 'not_sent');
+  });
+});
+
+test("probeSqsStep: a readable run whose STEPS were reaped answers 'unknown_no_steps'", () => {
+  // The inner reaping horizon. `/runs/{id}/jobs` keeps answering 200 long after
+  // the step history is gone: total_count intact, one entry per job, and `steps`
+  // PRESENT AS AN EMPTY ARRAY. Measured on this repo — 0 days old: 10 steps;
+  // ~101 days: present; 340 days (run 17336557917): `steps: []` with the key
+  // there. So the horizon sits inside RUN_HISTORY_DAYS=400, and the band where
+  // the row is readable and its history is not is reachable by any operator using
+  // --since, which the designed backfill does by construction.
+  //
+  // Before this arm, such a run took the RENAME branch — zero steps means no step
+  // matches SQS_STEP, and on a success that was fatal — so ONE aged PR aborted
+  // the whole fleet audit at exit 2 and told the operator "the reusable's step
+  // names have changed". Every clause of that was wrong.
+  const reaped = { total_count: 1, jobs: [{ steps: [] }] };
+  const client = attemptClient({ '/x/jobs?per_page=100': reaped });
+  return probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900').then((v) =>
+    assert.equal(v, 'unknown_no_steps'),
   );
 });
 
-test("probeSqsStep: unreadableIsFatal:false answers 'unknown' rather than deciding", () => {
-  // The other side of the pair. 'unknown' is not 'not_sent': the walker turns it
-  // into `unverifiable`, which replayList excludes, whereas 'not_sent' would leave
-  // the row on the replay list and write to the prod queue.
-  const client = attemptClient({});
-  return probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'sibling run 901', {
-    unreadableIsFatal: false,
-  }).then((v) => assert.equal(v, 'unknown'));
+test('probeSqsStep: a reaped run does NOT blame the step name, and requireStep cannot override it', async () => {
+  // Two properties in one fixture because they are the same claim from both sides.
+  //
+  // (1) On the SUCCESS path (requireStep defaults true) the old code threw the
+  //     rename error. Asserting the verdict alone would not catch a regression
+  //     that re-ordered the arms and threw again, so this asserts it resolves.
+  // (2) With requireStep:false the old code answered 'not_sent' — leaving the row
+  //     `failed` and REPLAYABLE. That is the writing direction, on evidence that
+  //     was reaped rather than absent, so the step-less arm deliberately outranks
+  //     requireStep. The cost is real and one-directional: a failed run whose
+  //     history is gone under-reports as undecided instead of over-reporting as a
+  //     gap. A run that died early still HAS step records (see jobsDiedEarly), so
+  //     this only fires when retention removed the evidence.
+  const reaped = { total_count: 1, jobs: [{ steps: [] }] };
+  const client = attemptClient({ '/x/jobs?per_page=100': reaped });
+  assert.equal(await probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: true }), 'unknown_no_steps');
+  assert.equal(await probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: false }), 'unknown_no_steps');
 });
 
-test('recoverHiddenDeliveries: UNREADABLE current jobs throws rather than assuming nothing was sent', () => {
-  // The asymmetry with an unreadable ATTEMPT is deliberate. "Cannot read the run
-  // that concluded failure" must not silently become "it sent nothing, go replay
-  // it" — that is the writing direction.
+test('probeSqsStep: a job with no steps ALONGSIDE one that has them is readable history', () => {
+  // The step-less arm's predicate is "NO job carries ANY step", not "this job has
+  // no steps" — and the difference is load-bearing in the direction that loses
+  // findings. A skipped or never-started job legitimately carries zero steps, and
+  // a run mixing one with executed jobs has perfectly readable history. A
+  // per-job reading of the same rule would answer `unknown_no_steps` for those,
+  // silently converting real deliveries into undecided records.
+  const mixed = {
+    total_count: 2,
+    jobs: [{ steps: [] }, { steps: [{ name: SQS_STEP, conclusion: 'success' }] }],
+  };
+  const client = attemptClient({ '/x/jobs?per_page=100': mixed });
+  return probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900').then((v) => assert.equal(v, 'sent'));
+});
+
+test('probeSqsStep: a TRUNCATED page that happens to be step-less still names pagination', () => {
+  // Arm order, asserted rather than assumed. The step-less check sits AFTER the
+  // truncation guard: a short read whose returned slice carries no steps is a
+  // broken READ, not a reaped run, and diagnosing it as retention would send the
+  // operator to narrow the window when the repair is pagination. Reversing the two
+  // arms passes every other test in this file.
+  const truncated = { total_count: 120, jobs: [{ steps: [] }] };
+  const client = attemptClient({ '/x/jobs?per_page=100': truncated });
+  return assert.rejects(
+    () => probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900'),
+    /truncated|needs pagination/,
+  );
+});
+
+test('UNDECIDED_VERDICTS: every non-decision verdict probeSqsStep can return has a reason', () => {
+  // The map is the single decision point for "is this verdict a decision", and
+  // walkHeadForSend asks it by MEMBERSHIP rather than comparing against one
+  // literal — because hand-comparing against 'unknown' alone is exactly how a
+  // step-less run fell through as though it were decided. That only holds while
+  // the map is complete, so this pins completeness at the source: scrape the
+  // verdict literals out of probeSqsStep's own body, subtract the two decisions,
+  // and require the remainder to be the map's key set.
+  //
+  // Scraped rather than retyped on purpose. A hand-written list of "the verdicts
+  // that exist" is a second copy of the truth and goes stale silently — a third
+  // undecided verdict added without a reason would then render as `unverifiable`
+  // with an undefined explanation, which is unactionable, and no test would red.
+  const src = readFileSync(join(HERE, 'audit-delivery.mjs'), 'utf8');
+  const body = src.slice(src.indexOf('export async function probeSqsStep'));
+  const fn = body.slice(0, body.indexOf('\n}\n'));
+  const returned = new Set(
+    // Per RETURN STATEMENT, with comparison operands removed first. The last line
+    // is `return step.conclusion === 'success' ? 'sent' : 'not_sent'`, so a naive
+    // "quoted literal after `return`" reads only the first of the two verdicts,
+    // and taking every literal in the statement instead picks up `'success'` —
+    // a step conclusion, not a verdict. Stripping `=== '...'` operands leaves
+    // exactly the values the function can hand back.
+    [...fn.matchAll(/\breturn ([^;]+);/g)].flatMap((m) =>
+      [...m[1].replace(/[=!]==?\s*'[a-z_]+'/g, '').matchAll(/'([a-z_]+)'/g)].map((x) => x[1]),
+    ),
+  );
+  // ANTI-VACUOUS: an extractor that grabbed the wrong region, or a rename of the
+  // function, would leave `returned` empty and this test would assert nothing.
+  assert.ok(returned.has('sent') && returned.has('not_sent'), `extractor drifted: ${[...returned]}`);
+  returned.delete('sent');
+  returned.delete('not_sent');
+  assert.deepEqual([...returned].sort(), [...UNDECIDED_VERDICTS.keys()].sort());
+  // And every reason is a usable sentence, not a placeholder: this string is what
+  // an operator reads in the report.
+  for (const [verdict, reason] of UNDECIDED_VERDICTS) {
+    assert.ok(reason.length > 40, `${verdict} has no usable reason: ${reason}`);
+  }
+});
+
+test('recoverHiddenDeliveries: UNREADABLE current jobs is UNVERIFIABLE, not left replayable', () => {
+  // "Cannot read the run that concluded failure" must not silently become "it sent
+  // nothing, go replay it" — that is the writing direction, and `failed` IS the
+  // replay list. It used to throw instead, which protected against the replay at
+  // the cost of the whole fleet's report; `unverifiable` protects against it and
+  // keeps the report. The reason must be the 404 one, not the reaped one.
   const classes = {
     delivered: [],
     failed: [{ number: 5, run_id: 900, conclusion: 'failure', run_attempt: 1 }],
     skipped_anomaly: [],
     payload_missing: [],
+    unverifiable: [],
   };
   const client = attemptClient({});
-  return assert.rejects(() => recoverHiddenDeliveries(client, ACFG, 'guard', classes), /jobs could not be read/);
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.failed, []);
+    assert.deepEqual(classes.unverifiable.map((r) => r.number), [5]);
+    assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
+  });
+});
+
+test('recoverHiddenDeliveries: a REAPED current run reports the retention reason, not the 404 one', () => {
+  // The reason is plumbed from the walk, not chosen at the call site, and the two
+  // causes have DIFFERENT repairs: narrow the window vs. the run is gone. A single
+  // constant for both — which is what a boolean `unreadable` flag forces — prints
+  // "narrow the window with --since" at an operator whose run was deleted, or the
+  // reverse. Same class as the rename misdiagnosis this fix started from.
+  const classes = {
+    delivered: [],
+    failed: [{ number: 6, run_id: 901, conclusion: 'failure', run_attempt: 1 }],
+    skipped_anomaly: [],
+    payload_missing: [],
+    unverifiable: [],
+  };
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/901/jobs?per_page=100': { total_count: 1, jobs: [{ steps: [] }] },
+  });
+  return recoverHiddenDeliveries(client, ACFG, 'guard', classes).then(() => {
+    assert.deepEqual(classes.unverifiable.map((r) => r.number), [6]);
+    assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_STEPS_REAPED);
+    assert.notEqual(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
+  });
+});
+
+test('walkHeadForSend: the FIRST unreadable cause wins the reason, and a SEND still outranks both', async () => {
+  // Two properties of the reason plumbing that no single-record test reaches.
+  //
+  // (1) The walk is ordered own-run, then siblings, then attempts — cheapest and
+  //     most relevant first — so when several things are unreadable the reason
+  //     reported is the one closest to what the operator asked about. Last-wins
+  //     would report an ancient sibling's cause for the row in front of them.
+  // (2) `unreadable` is returned ALONGSIDE `sent`, not instead of it: a send that
+  //     IS found decides the head no matter what else could not be read. If an
+  //     unreadable sibling could mask a found delivery, the record would fall to
+  //     `unverifiable` and drop off the delivered list.
+  const recs = [{ number: 7, run_id: 910, conclusion: 'failure', run_attempt: 1 }];
+  const classes = { delivered: [], failed: [...recs], skipped_anomaly: [], payload_missing: [], unverifiable: [] };
+  // Own run: steps reaped. Sibling: 404. First cause wins => the reaped reason.
+  const heads = new Map([[7, [{ id: 910, conclusion: 'failure', run_attempt: 1, created_at: '2026-01-02T00:00:00Z' }, { id: 911, conclusion: 'success', run_attempt: 1, created_at: '2026-01-01T00:00:00Z' }]]]);
+  const client = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/910/jobs?per_page=100': { total_count: 1, jobs: [{ steps: [] }] },
+  });
+  await recoverHiddenDeliveries(client, ACFG, 'guard', classes, heads);
+  assert.equal(classes.unverifiable[0].unverifiable_reason, UNVERIFIABLE_STEPS_REAPED);
+
+  // Same shape, but the sibling DID send. The head is decided.
+  const classes2 = { delivered: [], failed: [{ number: 7, run_id: 910, conclusion: 'failure', run_attempt: 1 }], skipped_anomaly: [], payload_missing: [], unverifiable: [] };
+  const client2 = attemptClient({
+    '/repos/praetorian-inc/guard/actions/runs/910/jobs?per_page=100': { total_count: 1, jobs: [{ steps: [] }] },
+    '/repos/praetorian-inc/guard/actions/runs/911/jobs?per_page=100': jobsWithStep('success'),
+  });
+  await recoverHiddenDeliveries(client2, ACFG, 'guard', classes2, heads);
+  assert.deepEqual(classes2.delivered.map((r) => r.number), [7]);
+  assert.deepEqual(classes2.unverifiable, []);
+  assert.equal(classes2.delivered[0].sent_by_run_id, 911);
 });
 
 test('assertActionsReadable: a 404 on the repo-level runs endpoint throws instead of yielding zero runs', () => {
@@ -3483,7 +3663,7 @@ test("recoverHiddenDeliveries: a SIBLING's unreadable jobs is undecidable, not f
   return recoverHiddenDeliveries(client, ACFG, 'guard', classes, heads).then(() => {
     assert.deepEqual(classes.failed, []);
     assert.deepEqual(classes.unverifiable.map((r) => r.number), [5]);
-    assert.equal(rec.unverifiable_reason, UNVERIFIABLE_ATTEMPT_UNREADABLE);
+    assert.equal(rec.unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
   });
 });
 
@@ -4002,7 +4182,7 @@ test('verifyPayloads: an unreadable attempt yields unverifiable, not a payload g
   return verifyPayloads(client, ACFG, 'guard', recs, null).then((v) => {
     assert.equal(v.get(700), 'unverifiable');
     assert.equal('sent_by_attempt' in recs[0], false);
-    assert.equal(recs[0].unverifiable_reason, UNVERIFIABLE_ATTEMPT_UNREADABLE);
+    assert.equal(recs[0].unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
   });
 });
 
@@ -4059,14 +4239,26 @@ test('verifyPayloads: the rename detector stays ARMED on the row, and off its at
   );
 });
 
-test('verifyPayloads: an unreadable OWN jobs list is still fatal', () => {
-  // The fatal/non-fatal split is per-ROW, not per-function: the own run's jobs
-  // are the evidence the audit is deciding FROM, and answering `not_sent` for a
-  // list nobody read is the false-clean this detector exists to prevent.
-  // Auxiliary evidence (siblings, older attempts) is what degrades to unknown.
+test('verifyPayloads: an unreadable OWN jobs list is UNDECIDED, and specifically not not_sent', () => {
+  // There used to be a fatal/non-fatal split, per-ROW: the own run's jobs were
+  // the evidence the audit decides FROM, so an unreadable one threw, while
+  // auxiliary evidence (siblings, older attempts) degraded to unknown. The
+  // premise was right — answering `not_sent` for a list nobody read is the
+  // false-clean this detector exists to prevent — but `unverifiable` refuses that
+  // answer just as completely, without costing every OTHER repo in the fleet its
+  // report. So the split is gone and both paths land here.
+  //
+  // Asserted as `unverifiable` AND as not-`not_sent`, because those are different
+  // claims: the first pins today's class, the second pins the property that must
+  // hold however the classes are reshuffled — an unread run never becomes a
+  // replay instruction.
   const recs = [{ number: 5, run_id: 700, run_attempt: 1 }];
   const client = attemptClient({});
-  return assert.rejects(() => verifyPayloads(client, ACFG, 'guard', recs, null));
+  return verifyPayloads(client, ACFG, 'guard', recs, null).then((v) => {
+    assert.equal(v.get(700), 'unverifiable');
+    assert.notEqual(v.get(700), 'not_sent');
+    assert.equal(recs[0].unverifiable_reason, UNVERIFIABLE_JOBS_UNREADABLE);
+  });
 });
 
 test('verifyPayloads: a run on attempt 1 triggers no attempt probe at all', () => {
@@ -4309,11 +4501,11 @@ test('unverifiableReasons: the distinct set, sorted, ignoring records with none'
   assert.deepEqual(
     unverifiableReasons([
       { unverifiable_reason: UNVERIFIABLE_REAPED },
-      { unverifiable_reason: UNVERIFIABLE_ATTEMPT_UNREADABLE },
+      { unverifiable_reason: UNVERIFIABLE_JOBS_UNREADABLE },
       { unverifiable_reason: UNVERIFIABLE_REAPED },
       { number: 3 },
     ]),
-    [UNVERIFIABLE_ATTEMPT_UNREADABLE, UNVERIFIABLE_REAPED].sort(),
+    [UNVERIFIABLE_JOBS_UNREADABLE, UNVERIFIABLE_REAPED].sort(),
   );
   assert.deepEqual(unverifiableReasons([]), []);
   assert.deepEqual(unverifiableReasons([{ number: 1 }]), []);
@@ -4332,7 +4524,7 @@ test('buildReport: fleet-wide unverifiable reasons UNION across repos', () => {
       }),
       repoResult('palatine', {
         merged: 1,
-        unverifiable: [{ ...rec(88), unverifiable_reason: UNVERIFIABLE_ATTEMPT_UNREADABLE }],
+        unverifiable: [{ ...rec(88), unverifiable_reason: UNVERIFIABLE_JOBS_UNREADABLE }],
       }),
     ],
     { since: '2026-07-05', selfAudit: true },
@@ -4340,7 +4532,7 @@ test('buildReport: fleet-wide unverifiable reasons UNION across repos', () => {
   );
   assert.deepEqual(
     report.unverifiable_reasons,
-    [UNVERIFIABLE_ATTEMPT_UNREADABLE, UNVERIFIABLE_REAPED].sort(),
+    [UNVERIFIABLE_JOBS_UNREADABLE, UNVERIFIABLE_REAPED].sort(),
   );
   assert.equal('unverifiable_reasons' in report.totals, false);
   for (const v of Object.values(report.totals)) assert.equal(typeof v, 'number');
@@ -4480,7 +4672,7 @@ test('renderMarkdown: CONTROL — the clean sentence no longer claims delivery w
 // tests execute the SHIPPED bash from action.yml against a stubbed detector and
 // read the real $GITHUB_OUTPUT, so all three `case "$rc"` arms and all three
 // pre-detector guards are covered by their observable effect.
-import { mkdirSync, chmodSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
 const RUN_BODY = (() => {
@@ -4544,13 +4736,16 @@ process.exit(${exitCode});
 `;
 
 let actRun = 0;
-const runAction = ({ repo = 'guard', token = 'tok', exitCode = 0, report = { repos_with_gaps: [] }, preexistingReport = false, lockTemp = false } = {}) => {
-  const dir = mkdtempSync(join(tmpdir(), `audit-act-${actRun++}-`));
+// `dir` is accepted so a test can invoke the action TWICE against one runner
+// temp — the two-invocations case below, which a fresh dir per call cannot
+// express. Returned for the same reason.
+const runAction = ({ repo = 'guard', token = 'tok', exitCode = 0, report = { repos_with_gaps: [] }, staleFixedPathReport = false, lockTemp = false, dir = null } = {}) => {
+  dir = dir ?? mkdtempSync(join(tmpdir(), `audit-act-${actRun++}-`));
   const actionPath = join(dir, 'action');
   const runnerTemp = join(dir, 'rt');
-  mkdirSync(actionPath);
-  mkdirSync(runnerTemp);
-  if (preexistingReport) writeFileSync(join(runnerTemp, 'audit-delivery.json'), '{"stale":true}');
+  if (!existsSync(actionPath)) mkdirSync(actionPath);
+  if (!existsSync(runnerTemp)) mkdirSync(runnerTemp);
+  if (staleFixedPathReport) writeFileSync(join(runnerTemp, 'audit-delivery.json'), '{"stale":true}');
   writeFileSync(join(actionPath, 'audit-delivery.mjs'), detectorStub(exitCode, report));
   if (lockTemp) chmodSync(runnerTemp, 0o500);
   const ghOutput = join(dir, 'gh-output');
@@ -4581,7 +4776,7 @@ const runAction = ({ repo = 'guard', token = 'tok', exitCode = 0, report = { rep
   );
   // stdout as well as stderr: `::error::` workflow commands go to STDOUT, so a
   // test asserting a guard's message against stderr fails while the guard works.
-  return { code: res.status, stdout: res.stdout, stderr: res.stderr, outputs, raw };
+  return { code: res.status, stdout: res.stdout, stderr: res.stderr, outputs, raw, dir, runnerTemp };
 };
 
 test('action contract: a clean run reports status=clean with has_gaps false', () => {
@@ -4643,23 +4838,74 @@ test('action contract: the empty-token guard writes status=unknown before exitin
   assert.equal(r.outputs.status, 'unknown');
 });
 
-test('action contract: an undeletable prior report writes status=unknown before exiting', (t) => {
+test('action contract: a report directory that cannot be CREATED writes status=unknown before exiting', (t) => {
   // The third status-less path, found by grepping every exit and then noticing
-  // this one is not an `exit` statement at all — a bare `set -e` abort on
-  // `rm -f`, which ignores a MISSING file but still fails on an undeletable one.
-  // Skipped when the check cannot hold: root ignores mode bits, so the rm would
+  // this one was not an `exit` statement at all — a bare `set -e` abort. Round 18
+  // that was `rm -f` on a fixed path (which ignores a MISSING file but still
+  // fails on an undeletable one); round 19 replaced the fixed path with
+  // `mktemp -d`, so the aborting command changed while the hazard did not: a
+  // silent abort here writes ZERO bytes to $GITHUB_OUTPUT and a caller on
+  // continue-on-error reads the unset `status` as clean.
+  //
+  // Skipped when the check cannot hold: root ignores mode bits, so mktemp would
   // succeed and the test would assert nothing.
   if (typeof process.getuid === 'function' && process.getuid() === 0) {
-    t.skip('running as root — mode 500 does not prevent deletion, so this case is unreachable');
+    t.skip('running as root — mode 500 does not prevent directory creation, so this case is unreachable');
     return;
   }
-  const r = runAction({ preexistingReport: true, lockTemp: true });
+  const r = runAction({ lockTemp: true });
   assert.equal(r.code, 1);
   assert.equal(r.outputs.status, 'unknown');
   // Asserted on the MESSAGE, not just on exit-1-plus-unknown: the repo and token
   // guards produce that identical pair, so a bare status check here would stay
-  // green if the rm guard vanished and some earlier guard fired instead.
+  // green if this guard vanished and some earlier guard fired instead.
   assert.match(r.stdout, /refusing to run/);
+});
+
+test('action contract: TWO invocations in one job publish two DISTINCT report paths', () => {
+  // The fix S-3 bought, asserted as behaviour rather than as the presence of
+  // `mktemp` in the source. Round 18 wrote both reports to
+  // $RUNNER_TEMP/audit-delivery.json: the second overwrote the first while BOTH
+  // steps' outputs still named that one file, so a caller commenting each report
+  // posted the same content twice — and the documented remedy was a prose
+  // contract ("call this action at most once per job") that nothing enforced.
+  //
+  // Same runner temp for both calls, which is the whole point; a fresh temp per
+  // call would pass against the round-18 code too.
+  const first = runAction({ exitCode: 0 });
+  const second = runAction({ dir: first.dir, exitCode: 1, report: { repos_with_gaps: [{ repo: 'guard', replay: [1], payload_missing: 0 }] } });
+
+  assert.equal(first.outputs.status, 'clean');
+  assert.equal(second.outputs.status, 'gaps');
+  assert.notEqual(first.outputs.report_json, second.outputs.report_json);
+  assert.notEqual(first.outputs.report_markdown, second.outputs.report_markdown);
+  // Both must still EXIST at the end — the failure being closed is not that the
+  // paths differ but that the first one survives the second run intact.
+  assert.ok(existsSync(first.outputs.report_json), 'the first report must survive the second invocation');
+  assert.ok(existsSync(second.outputs.report_json));
+  // And each must hold ITS OWN run's content. Distinct paths where the second
+  // clobbered the first would satisfy every assertion above.
+  assert.deepEqual(JSON.parse(readFileSync(first.outputs.report_json, 'utf8')).repos_with_gaps, []);
+  assert.equal(JSON.parse(readFileSync(second.outputs.report_json, 'utf8')).repos_with_gaps.length, 1);
+  // The basenames are deliberately unchanged, so a caller that recognises
+  // artifacts by name still does.
+  assert.match(first.outputs.report_json, /\/audit-delivery\.json$/);
+  assert.match(second.outputs.report_json, /\/audit-delivery\.json$/);
+});
+
+test('action contract: a stale report at the ROUND-18 fixed path is never published', () => {
+  // The other half of the same fix, and the reason it is structural rather than
+  // a second convention: with the report directory freshly minted, a file
+  // sitting at the old fixed location is not merely deleted, it is
+  // unreachable — the `[ -f ]` publish checks cannot see it, so there is no
+  // window in which they could publish it. A test that only compared two paths
+  // would stay green if someone reinstated the fixed path plus an `rm`.
+  const r = runAction({ staleFixedPathReport: true, exitCode: 2, report: null });
+  assert.equal(r.outputs.status, 'unknown');
+  assert.notEqual(r.outputs.report_json, join(r.runnerTemp, 'audit-delivery.json'));
+  // The stale file is still on disk, untouched — proving the run did not merely
+  // overwrite it, and that the published path (if any) is a different file.
+  assert.equal(readFileSync(join(r.runnerTemp, 'audit-delivery.json'), 'utf8'), '{"stale":true}');
 });
 
 test('action contract: CONTROL — every status value the action can emit is one of three', () => {
@@ -5411,9 +5657,22 @@ test('onboardedAt: the rename verdict does not depend on FILE ORDER', async () =
 // contract's own inputs), tolerate anything after the `;`, and assert only that a
 // region was found — never what it contains. What it must contain is the tests'
 // job, the same lesson the run-body extractor above records.
+//
+// Round 19 addendum, because this extractor found its own next failure mode the
+// hard way. `^ *const undecided = ([^;]+);` took the FIRST such declaration in the
+// file, and an unrelated function grew a local helper by that name higher up. The
+// match then ran to the first `;` INSIDE that helper's body, `new Function` was
+// handed a fragment, and the SyntaxError surfaced asynchronously as "a resource
+// generated asynchronous activity after the test ended" — attached to whichever
+// test happened to be running, naming neither this extractor nor the real cause.
+// Two repairs, since either alone leaves a hole:
+//   - the pattern requires the expression to mention `in_flight`, so it can only
+//     match the exit-code contract's own definition and not a same-named local;
+//   - the constructed function is COMPILED here. A fragment throws at module load,
+//     loudly and at the right place, instead of one page later as async noise.
 const EXIT_CODE_OF = (() => {
   const src = readFileSync(join(HERE, 'audit-delivery.mjs'), 'utf8');
-  const und = /^ *const undecided = ([^;]+);/m.exec(src);
+  const und = /^ *const undecided = ((?=[^;]*in_flight)[^;]+);/m.exec(src);
   const rc = /^ *process\.exitCode = ((?=[^;]*(?:repos_with_gaps|undecided))[^;]+);/m.exec(src);
   if (!und || !rc) {
     throw new Error(
@@ -5422,7 +5681,14 @@ const EXIT_CODE_OF = (() => {
         'undecided-vs-clean distinction goes unexercised',
     );
   }
-  return new Function('report', 't', `const undecided = ${und[1]}; return (${rc[1]});`);
+  try {
+    return new Function('report', 't', `const undecided = ${und[1]}; return (${rc[1]});`);
+  } catch (e) {
+    throw new Error(
+      `the extracted exit-code expression does not compile (${e.message}) — the regex ` +
+        `matched the wrong region. undecided=<${und[1]}> exitCode=<${rc[1]}>`,
+    );
+  }
 })();
 
 const EMPTY_CLASSES = {
@@ -5825,7 +6091,7 @@ test('REPLAY_CAVEATS: EVERY caveat reaches BOTH channels, not just the prose one
 // control in the same block, because a one-sided check with only one test
 // pinned is indistinguishable from a check that always fires.
 
-test('hasCaller: `uses` must be a mapping KEY at a node position — 16 shapes, both directions', async () => {
+test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VALUE — a shape table, both directions', async () => {
   // Round 17 shipped `/(^|\s)uses:\s/` — any `uses:` at a word boundary anywhere
   // on the line. Wrong in BOTH directions, and the two call sites do opposite
   // harm: over-detect at auditRepo fabricates a PROD replay list (no caller ->
@@ -5870,8 +6136,42 @@ test('hasCaller: `uses` must be a mapping KEY at a node position — 16 shapes, 
       label: 'a uses: key calling something ELSE, reusable only in a trailing comment',
       line: `    uses: actions/checkout@v4  # replaces ${R}`,
     },
+    // Rows 17-20, added in round 19. Every row above holds the reusable in the
+    // `uses` value or in no value at all, so the round-18 predicate — a
+    // key-position test AND a WHOLE-LINE substring test, two independent
+    // questions ANDed — scores 16/16 on them by luck: wherever a `uses` key
+    // exists, the only thing the reusable could be is its value. These rows
+    // separate the two questions, which flow style makes reachable in one line.
+    {
+      want: false,
+      label: 'a uses: key calling something ELSE, reusable in a SIBLING key value',
+      line: `    - {uses: actions/checkout@v4, name: "${R}"}`,
+    },
+    {
+      want: false,
+      label: 'reusable nested in a with: value, uses: calls something else',
+      line: `    - {uses: actions/checkout@v4, with: {ref: "${R}"}}`,
+    },
+    // The mirror of the row above it, and the reason the fix reads VALUES rather
+    // than deleting the substring test: swapping which key holds which value must
+    // flip the answer. A matcher that returned false for both would score the
+    // over-detection row correctly while being useless.
+    {
+      want: true,
+      label: 'CONTROL — the same two keys with the values swapped',
+      line: `    - {uses: ${R}, name: "actions/checkout@v4"}`,
+    },
+    // Two `uses:` positions on one line, only the second a real key. Pins that
+    // the scan collects EVERY match rather than deciding on the first: keyed on
+    // the first alone this is a checkout call and the repo silently leaves the
+    // fleet.
+    {
+      want: true,
+      label: 'a decoy uses: inside a quoted sibling value, real uses: after it',
+      line: `    - {name: "a, uses: actions/checkout@v4", uses: ${R}}`,
+    },
   ];
-  assert.equal(SHAPES.length, 16, 'the shape table is the measurement this fix was chosen on');
+  assert.equal(SHAPES.length, 20, 'the shape table is the measurement this fix was chosen on');
 
   for (const s of SHAPES) {
     const text = ['name: x', 'jobs:', '  call:', s.line, ''].join('\n');
@@ -5909,6 +6209,37 @@ test('hasCaller: `uses` must be a mapping KEY at a node position — 16 shapes, 
     score(blockOnly).some((s) => s.want === true),
     'the block-only anchor must be shown to UNDER-detect, which is the silent direction',
   );
+
+  // ROUND 19. `score` is not an arbitrary scoring rule — its `p(line) && includes(R)`
+  // shape IS the round-18 predicate, with `p` standing in for the key matcher. So
+  // scoring the SHIPPED key matcher through it measures round-18 exactly, and the
+  // rows it gets wrong are the ones the value-reading fix was written for. Stated
+  // as a floor rather than an exact count so a future row cannot silently make
+  // this vacuous, and separately as a want:false floor because the over-detection
+  // is the arm that fabricates a prod replay list.
+  const usesKeyAt = (l) => /(?:^\s*(?:-\s+)?|[{,]\s*)(["']?)uses\1\s*:(?:\s|["'])/.test(l);
+  const r18Wrong = score(usesKeyAt);
+  assert.ok(
+    r18Wrong.length >= 2,
+    `the round-18 predicate must FAIL at least two rows, or these rows do not describe ` +
+      `the defect (it missed ${r18Wrong.length}: ${r18Wrong.map((s) => s.label).join('; ')})`,
+  );
+  assert.ok(
+    r18Wrong.some((s) => s.want === false),
+    'the round-18 predicate must be shown to OVER-detect — that is the arm that joins a ' +
+      'repo to the fleet with a caller it does not have, and every merged PR then ' +
+      'classifies never_fired against a reusable that never ran for it',
+  );
+  // And the shipped code must get all 20, which `score` cannot assert (feeding it
+  // the shipped matcher is the X === X the block above avoids). Asserted through
+  // the exported unit instead, at the value layer the fix actually operates on.
+  for (const s of SHAPES) {
+    assert.equal(
+      usesValues(stripComment(s.line)).some((v) => v.includes(cfg.reusable)),
+      s.want,
+      `usesValues disagrees with hasCaller on: ${s.label}`,
+    );
+  }
 
   // The residual, stated rather than left to imply it is closed: no line-oriented
   // rule can tell `{uses: x}` as YAML from the same text inside a one-line shell
@@ -5996,6 +6327,87 @@ test('ghCount: reads the row count from rel="last" at per_page=1, and fails clos
   );
 });
 
+// A closed-PR page as the walk sees it. Unmerged on purpose: these tests are
+// about the completeness of the WALK, and a merged row would drag every
+// classification path in behind it.
+const closedRows = (n) => Array.from({ length: n }, (_, k) => ({ number: k + 1, merged_at: null }));
+
+test('auditRepo: a closed-PR walk that STOPPED EARLY is refused, not reported as clean', async () => {
+  // The failure the before/after bracket cannot see, because the LIST never
+  // changed: 250 rows before, 250 after, and a walk that returned 100. The
+  // bracket compares the two counts, agrees, and 150 merged PRs go unaudited —
+  // the same false clean the bracket exists to prevent, arriving through the
+  // other door.
+  //
+  // Not hypothetical: ghPaged advances by parsing `rel="next"` out of the Link
+  // header, so anything that makes ONE header unparseable (the comma trap
+  // documented on ghPaged, a proxy rewriting or dropping it) ends the walk and
+  // returns what it has, with no error. runsInRange has asserted this on the runs
+  // endpoint since round 14; the closed-PR walk is the LARGER of the two — 65
+  // pages on guard against a handful for a slice — and had no such assertion.
+  const client = {
+    ghPaged: async () => closedRows(100),
+    gh: async () => ({ total_count: 0 }),
+    ghCount: async () => 250,
+  };
+  await assert.rejects(
+    () =>
+      auditRepo(
+        client,
+        { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+        'guard',
+      ),
+    /returned 100 rows but the list held at least 250/,
+  );
+});
+
+test('auditRepo: CONTROL — a walk that REACHED the mid-walk insertion is not refused', async () => {
+  // The other half of the GREW control, and the one that pins the shortfall check
+  // as ONE-SIDED. There are two ways a list can grow under a walk, and only this
+  // one can reach an over-strict check: the row that closed mid-walk landed AHEAD
+  // of the cursor, so the walk returned 251 rows for a list that held 250 when it
+  // started. `fetched.length < closedBefore` tolerates that; the obvious-looking
+  // `!==` refuses it, and would turn every busy repo's audit into exit-2 unknown.
+  //
+  // Added in round 19 because the mutation run said so: the mutant that makes the
+  // check two-sided SURVIVED against the 250-row GREW control, since 250 !== 250
+  // is false and the mutation changed nothing that test could see. A one-sided
+  // check with only the under-detection direction pinned is indistinguishable
+  // from a check with no upper bound at all.
+  const counts = [250, 251];
+  let i = 0;
+  const client = {
+    ghPaged: async () => closedRows(251),
+    gh: async () => ({ total_count: 0 }),
+    ghCount: async () => counts[i++],
+  };
+  const res = await auditRepo(
+    client,
+    { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+    'guard',
+  );
+  assert.equal(res.repo, 'guard');
+  assert.equal(i, 2);
+});
+
+test('auditRepo: CONTROL — a COMPLETE closed-PR walk passes both bracket arms', async () => {
+  // The anti-tripwire for the two refusals above: a walk that read everything,
+  // against a list that did not move, must audit normally. Without this a check
+  // that threw unconditionally would satisfy both rejection tests.
+  const client = {
+    ghPaged: async () => closedRows(250),
+    gh: async () => ({ total_count: 0 }),
+    ghCount: async () => 250,
+  };
+  const res = await auditRepo(
+    client,
+    { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+    'guard',
+  );
+  assert.equal(res.repo, 'guard');
+  assert.equal(res.merged_prs, 0);
+});
+
 test('auditRepo: a closed-PR list that SHRANK mid-walk is refused, not reported', async () => {
   // The worked example, which is also why comparing the walk's own length against
   // the FINAL count is vacuous:
@@ -6009,10 +6421,15 @@ test('auditRepo: a closed-PR list that SHRANK mid-walk is refused, not reported'
   // A merged PR that is never read cannot be classified, so it cannot be
   // reported as a gap: the loss direction is a FALSE CLEAN, and this refuses
   // rather than emit one.
+  //
+  // The walk is stubbed COMPLETE (250 rows for a 250-row list) so this test
+  // isolates the shrink arm. An empty stub — which is what this was — would also
+  // trip the shortfall check added below, and the test would keep passing on
+  // whichever arm happened to run first rather than on the one it names.
   const counts = [250, 249];
   let i = 0;
   const client = {
-    ghPaged: async () => [],
+    ghPaged: async () => closedRows(250),
     gh: async () => ({ total_count: 0 }),
     ghCount: async () => counts[i++],
   };
@@ -6035,10 +6452,17 @@ test('auditRepo: CONTROL — a closed-PR list that GREW mid-walk is NOT refused'
   // cursor, so nothing already read shifts out of reach — at worst a row is
   // served twice and ghPaged dedupes it. Refusing on that would turn every busy
   // repo's audit into an exit-2 unknown for an event that loses nothing.
+  //
+  // The walk returns the 250 rows that existed when it started — NOT the 251 the
+  // list holds by the end. That is the realistic shape (the row that closed
+  // mid-walk joined behind the cursor), and it is the case the shortfall check
+  // below has to tolerate: its floor is deliberately the BEFORE count, because
+  // measuring against the after count would demand a row the walk could not have
+  // reached and turn ordinary churn into exit 2.
   const counts = [250, 251];
   let i = 0;
   const client = {
-    ghPaged: async () => [],
+    ghPaged: async () => closedRows(250),
     gh: async () => ({ total_count: 0 }),
     ghCount: async () => counts[i++],
   };

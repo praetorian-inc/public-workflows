@@ -16,9 +16,11 @@ description: >-
   (missing token, bad flag, rate limit, truncated run list), because a detector
   that reports "0 gaps" after failing to read anything is the exact failure
   class it exists to catch. On that failure the outputs are not meaningful.
-  Call this action at most ONCE per job: both report paths are fixed under
-  $RUNNER_TEMP, so a second invocation's pre-run `rm -f` destroys the first's
-  report and both steps' `report-json` then name the one surviving file.
+  Safe to call more than once per job: each invocation writes into its own fresh
+  directory under $RUNNER_TEMP, so `report-json` / `report-markdown` always name
+  THAT invocation's report. Read the paths from the outputs rather than
+  reconstructing them — the directory name is generated, only the basenames are
+  stable.
 
 inputs:
   github-token:
@@ -222,34 +224,45 @@ runs:
           exit 1
         fi
 
-        json="${RUNNER_TEMP:-/tmp}/audit-delivery.json"
-        md="${RUNNER_TEMP:-/tmp}/audit-delivery.md"
-
-        # Clear any prior report BEFORE running. The paths are fixed, so a
-        # second invocation in the same job that dies on an exit-2 path (rate
-        # limit, bad token) writes nothing — and the `[ -f ]` checks below would
-        # then publish the FIRST invocation's report as if it described this
-        # run. Stale-but-plausible output is worse than absent output, since the
-        # documented contract is that outputs are meaningless after a failure.
-        # RUNNER_TEMP also survives across steps, and is not guaranteed clean on
-        # self-hosted runners.
+        # A FRESH directory per invocation, rather than two fixed paths under
+        # $RUNNER_TEMP plus a `rm -f` to clear whatever was there.
         #
-        # Failure handled explicitly rather than left to `set -e`. `rm -f`
-        # ignores a MISSING file but still fails on an undeletable one, and a
-        # bare `set -e` abort here is the third status-less exit path in this
-        # step: reproduced with a pre-existing report under a mode-500
-        # RUNNER_TEMP (a self-hosted runner whose temp dir a previous job left
-        # root-owned), which exits 1 having written ZERO bytes to
-        # $GITHUB_OUTPUT — so `status` is unset and a caller on
-        # `continue-on-error: true` reads `has-gaps != 'true'` as CLEAN, the same
-        # false-clean the two input guards above were just fixed for. Aborting is
-        # still the right call: proceeding would let the `[ -f ]` checks below
-        # publish the previous invocation's stale report as this run's.
-        rm -f "$json" "$md" || {
+        # The fixed paths made a second invocation in the same job silently
+        # destructive, and the documented workaround was "call this action at most
+        # once per job" — a contract nothing enforced, on an action whose whole
+        # purpose is to catch reports that look complete and are not. Two ways it
+        # went wrong. A second invocation that dies on an exit-2 path writes
+        # nothing, and the `[ -f ]` checks below then publish the FIRST
+        # invocation's report as if it described this run. And with both
+        # succeeding, the second overwrites the first while BOTH steps' outputs
+        # still name that one file, so a caller commenting each report comments
+        # the same one twice. Stale-but-plausible output is worse than absent
+        # output, since the documented contract is that outputs are meaningless
+        # after a failure.
+        #
+        # mktemp is what makes this structural rather than another convention:
+        # the directory cannot pre-exist (mktemp fails rather than reusing a
+        # name), so there is nothing to clear and no stale file to publish — the
+        # `[ -f ]` checks become exact. Fixed paths plus a delete could only ever
+        # narrow the window, never close it. This also drops the requirement that
+        # $RUNNER_TEMP be clean, which is not guaranteed on a self-hosted runner,
+        # and the shared-name collision between concurrent matrix shards on one.
+        # The BASENAMES stay stable so a caller can still recognise the artifacts.
+        #
+        # Failure handled explicitly rather than left to `set -e`, for the reason
+        # the old `rm -f` guard was: a bare abort here writes ZERO bytes to
+        # $GITHUB_OUTPUT, so `status` is unset and a caller on
+        # `continue-on-error: true` reads `has-gaps != 'true'` as CLEAN — the same
+        # false-clean the two input guards above were fixed for. Reproduced with a
+        # mode-500 $RUNNER_TEMP (a self-hosted runner whose temp dir a previous
+        # job left root-owned): mktemp cannot create there and exits non-zero.
+        outdir=$(mktemp -d "${RUNNER_TEMP:-/tmp}/audit-delivery.XXXXXX") || {
           echo "status=unknown" >> "$GITHUB_OUTPUT"
-          echo "::error::could not clear the previous report at $json / $md — refusing to run, because a stale report would be published as if it described this run."
+          echo "::error::could not create a report directory under ${RUNNER_TEMP:-/tmp} — refusing to run, because without one this step cannot write a report and a caller would read the absence as a clean audit."
           exit 1
         }
+        json="$outdir/audit-delivery.json"
+        md="$outdir/audit-delivery.md"
 
         # Built as an array so every value stays one argv element no matter what
         # it contains — a flat string would word-split on spaces.
