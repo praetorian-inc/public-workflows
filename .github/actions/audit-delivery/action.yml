@@ -287,8 +287,12 @@ runs:
           args+=("--until=$UNTIL")
         fi
 
-        # The script's three-way exit status is load-bearing: 0 clean, 1 gaps
-        # found, 2 could-not-run. So capture it exactly.
+        # The script's FOUR-way exit status is load-bearing: 0 clean, 1 gaps
+        # found, 2 could-not-run, 3 undecided (the audit ran and some record
+        # could not be decided either way). So capture it exactly. The `case`
+        # below maps all four; this comment said "three-way" for one round after
+        # exit 3 was added, which is the drift that makes a load-bearing contract
+        # described in prose worth re-reading whenever the code adds an arm.
         #   - `|| rc=$?` because `set -e` would otherwise abort the step on the
         #     perfectly expected exit 1 and lose the distinction entirely.
         #   - No pipeline at all: `node ... | tee` would report tee's status,

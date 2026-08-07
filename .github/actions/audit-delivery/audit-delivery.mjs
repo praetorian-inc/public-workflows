@@ -386,10 +386,19 @@ export function parseArgs(argv, now = Date.now()) {
   // alphanumeric-plus-hyphen, max 39, not hyphen-initial; a repo name is
   // alphanumeric plus `.`, `_`, `-`, max 100. `.` and `..` match that charset and
   // are rejected by name, because they are the traversal segments.
-  const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+  // Round 20 tightened this to GitHub's actual login rule — alphanumerics with
+  // SINGLE hyphens between them, never leading or trailing, max 39. The old pattern
+  // accepted `foo-` and `a--b`, and while neither is a traversal risk (a hyphen is
+  // not path-active, and the request would simply 404), the error message one line
+  // down promises "must be a GitHub login" and a guard should be as strict as the
+  // contract it states. Written as one pattern rather than a lookahead so the rule
+  // is readable in the direction it is enforced: an alphanumeric, then any number
+  // of hyphen-separated alphanumeric groups, bounded to 39 characters overall.
+  const OWNER = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
   if (!OWNER.test(out.owner)) {
     throw new Error(
-      `owner must be a GitHub login (letters, digits, hyphens; max 39; no leading hyphen), got ${out.owner}`,
+      `owner must be a GitHub login (letters, digits, single hyphens between them; ` +
+        `max 39; no leading or trailing hyphen), got ${out.owner}`,
     );
   }
   for (const name of out.repos ?? []) assertRepoName(name);
@@ -515,6 +524,32 @@ export const UNVERIFIABLE_STEPS_REAPED =
   'history well before the run row itself (measured: present at 101 days, empty at ' +
   '340), so the delivery step being absent is not evidence it never ran. Narrow the ' +
   'window with --since to stay inside the retained band.';
+
+// The FOURTH cause, and the only one that is not about reading history: the run is
+// still WRITING it.
+//
+// `runsInRange` queries the runs endpoint with no `status` filter, and
+// `headRunsByPr` copies `conclusion` through verbatim, so a run that is queued or
+// in progress reaches the walk with `conclusion: null`. probeSqsStep derives
+// `requireStep` from `conclusion === 'success'`, which is false for null, so a
+// send step that simply HAS NOT RUN YET takes the `!step && !requireStep` arm and
+// returns the DECISION `not_sent`. "It has not sent yet" and "it never sent" are
+// not the same fact, and the walk cannot tell them apart from the step list alone.
+//
+// The cost lands on the replay path. `recoverHiddenDeliveries` walks the `failed`
+// and `skipped_anomaly` classes, and a record it fails to rescue stays on the
+// REPLAY list — the one error direction that WRITES, to a prod queue whose
+// consumer-side idempotency is not established (ENG-5789). So a sibling that is
+// mid-delivery right now can leave its head looking undelivered and put the PR on
+// a list that delivers it a second time.
+//
+// Undecided is the honest answer and it is already cheap: exit 3, a reason per
+// record, and the record excluded from replay. The condition clears by itself, so
+// the remedy is genuinely "run it again later".
+export const UNVERIFIABLE_RUN_IN_FLIGHT =
+  'a run on this head had not finished when the audit read it, so the delivery step ' +
+  'not being there yet is a snapshot of a run still in progress rather than evidence ' +
+  'it never sent. Re-run the audit once that run completes.';
 
 // Every probeSqsStep verdict that is NOT a decision, mapped to the reason it puts
 // on the record. The mapping is the single decision point ON PURPOSE: the two
@@ -1029,7 +1064,35 @@ export async function probeSqsStep(client, cfg, repo, jobsPath, label, { require
   // `not_sent` would put the run on a replay list that WRITES TO PROD. Under-
   // reporting is visible (status=undecided, exit 3, a reason per record); a
   // spurious replay is not.
-  if (!list.some((j) => (j.steps || []).length > 0)) return 'unknown_no_steps';
+  // A step-less job is evidence about RETENTION only if the job actually RAN. A
+  // SKIPPED job never had steps to reap, and the two are byte-identical in shape —
+  // both come back `steps: []`. Measured, one from each class:
+  //
+  //   praetorian-inc/public-workflows run 17336557917  conclusion=success  steps 0  (reaped, 340d)
+  //   praetorian-inc/guard            run 31185145525  conclusion=skipped  steps 0  (skipped, fresh)
+  //
+  // `conclusion` is the discriminator, and without it every all-skipped run reads
+  // as reaped history. That is reachable in the fleet as it is deployed today, not
+  // in theory: guard's caller is a SINGLE job that calls the reusable, triggered on
+  // `pull_request_target: [closed]`, so every close-without-merge — and any misfire
+  // of the reusable's merged guard — produces a run in which the only job skipped.
+  // Read as reaped, such a run marks the head undecided and drops a genuinely
+  // undelivered PR out of the gap count into `undecided`, which is the silent
+  // direction this arm exists to prevent.
+  //
+  // All-skipped therefore returns the DECISION `not_sent` rather than falling
+  // through: it did not deliver, which is exactly what the replay path should act
+  // on. Falling through instead would reach the rename arm, and for a run whose
+  // conclusion is `success` that aborts the whole fleet audit at exit 2 with a
+  // diagnosis ("the step names changed") that is wrong in every clause.
+  //
+  // An EMPTY job list keeps the undecided answer. `every` is vacuously true on it,
+  // so without the length check a run with no jobs at all would claim the positive
+  // "it skipped, so it never sent" — a decision drawn from no evidence.
+  if (!list.some((j) => (j.steps || []).length > 0)) {
+    if (list.length > 0 && list.every((j) => j.conclusion === 'skipped')) return 'not_sent';
+    return 'unknown_no_steps';
+  }
 
   // Steps are flattened across EVERY job in the run, so more than one can carry
   // this name — a matrix over the delivery job produces one per shard, and
@@ -1100,6 +1163,10 @@ export function headRunsByPr(prs, runs) {
     list.push({
       id: r.id,
       conclusion: r.conclusion,
+      // Carried so the walk can tell "finished without sending" from "has not got
+      // there yet" — `conclusion` alone cannot: it is null for BOTH a queued run
+      // and an in-progress one. See UNVERIFIABLE_RUN_IN_FLIGHT.
+      status: r.status,
       run_attempt: typeof r.run_attempt === 'number' ? r.run_attempt : 1,
       created_at: r.created_at,
     });
@@ -1164,12 +1231,18 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
   // One place that turns a non-decision into the pair, so no call site below can
   // set the flag and forget the reason — that combination renders as
   // `unverifiable` with no explanation, which is unactionable.
-  const markUndecided = (verdict) => {
+  // Split in two so a non-decision that is NOT a probe verdict can still put a
+  // reason on the record. UNDECIDED_VERDICTS is the registry of probeSqsStep's own
+  // undecided RETURN VALUES — a test asserts it covers exactly those — so an
+  // in-flight run must not be added to it as a pseudo-verdict; it would make that
+  // test assert something it does not mean, and `get()` on a key the probe never
+  // returns would silently fall back to the jobs-unreadable wording.
+  const markReason = (reason) => {
     unreadable = true;
-    if (unreadableReason === null) {
-      unreadableReason = UNDECIDED_VERDICTS.get(verdict) || UNVERIFIABLE_JOBS_UNREADABLE;
-    }
+    if (unreadableReason === null) unreadableReason = reason;
   };
+  const markUndecided = (verdict) =>
+    markReason(UNDECIDED_VERDICTS.get(verdict) || UNVERIFIABLE_JOBS_UNREADABLE);
   for (const run of runs) {
     const own = run.id === ownRunId;
     const base = `/repos/${cfg.owner}/${repo}/actions/runs/${run.id}`;
@@ -1186,6 +1259,14 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
     // verdicts behave identically here, and hand-comparing against `'unknown'`
     // alone is what let a step-less run fall through as though it were decided.
     if (UNDECIDED_VERDICTS.has(verdict)) markUndecided(verdict);
+    // Ordered AFTER the `sent` return above, deliberately: a run still in progress
+    // may already have sent, and a send that IS found decides the head no matter
+    // what else about it is unsettled. Only the NEGATIVE from an unfinished run is
+    // untrustworthy, so only that is downgraded. `!== undefined` keeps this inert
+    // for a synthesised record that carries no status rather than guessing one.
+    else if (run.status !== undefined && run.status !== 'completed') {
+      markReason(UNVERIFIABLE_RUN_IN_FLIGHT);
+    }
     for (let n = (run.run_attempt || 1) - 1; n >= 1; n--) {
       const path = `${base}/attempts/${n}`;
       const att = await client.gh(path);
@@ -1237,6 +1318,10 @@ export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null)
       // direction (requireStep true throws rather than shrugging).
       conclusion: rec.conclusion === undefined ? 'success' : rec.conclusion,
       id: rec.run_id,
+      // Passed through rather than defaulted: the in-flight downgrade keys on a
+      // status being PRESENT, so a record that never carried one stays on exactly
+      // the behaviour it had before. See UNVERIFIABLE_RUN_IN_FLIGHT.
+      status: rec.status,
       run_attempt: rec.run_attempt || 1,
     };
     const siblings = (headRunIds?.get(rec.number) || []).filter((r) => r.id !== rec.run_id);
@@ -1313,6 +1398,8 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRu
       const own = {
         id: rec.run_id,
         conclusion: rec.conclusion,
+        // See the matching field in verifyPayloads: present-or-absent, never guessed.
+        status: rec.status,
         run_attempt: rec.run_attempt || 1,
       };
       const siblings = (headRunIds?.get(rec.number) || []).filter((r) => r.id !== rec.run_id);
@@ -1794,7 +1881,16 @@ export function makeClient(token) {
     const link = res.headers.get('link') || '';
     const last = /<([^>]+)>\s*;\s*rel="last"/.exec(link);
     if (last) {
-      const n = Number(new URL(last[1]).searchParams.get('page'));
+      // Resolved against API rather than parsed bare. GitHub sends an absolute URL
+      // here, so this changes nothing today; the point is the failure mode if it
+      // ever sends a relative one. `new URL(relative)` throws a TypeError, and a
+      // TypeError is the one error shape this function does NOT produce
+      // deliberately — every other unreadable case below raises a message naming
+      // the path and the header. It would escape as a bare stack trace past the
+      // validation two lines down, which is written to be the thing that reports an
+      // unusable Link header. A base makes the relative case parse and, if it is
+      // still unusable, fall into that message instead of around it.
+      const n = Number(new URL(last[1], API).searchParams.get('page'));
       if (!Number.isInteger(n) || n < 1) {
         throw new Error(`unreadable rel="last" page in Link header for ${path}: ${last[1]}`);
       }
@@ -1989,7 +2085,50 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 // old predicate read as calls — without a line-start-only rule, which would have
 // REGRESSED `- {name: x, uses: <ref>}` (the old one matched that by accident, on
 // the space after the comma).
-const USES_KEY = /(?:^\s*(?:-\s+)?|[{,]\s*)(["']?)uses\1\s*:(?:\s|["'])/;
+// FLOW AND JSON STYLE ARE NOT ACCEPTED, and that is the round-20 change. The
+// position alternative used to include `|[{,]\s*`, admitting `- {uses: <ref>}` and
+// `{"uses": "<ref>"}`. Every residual false-positive this detector has left after
+// three rounds of narrowing came from that one alternative, because a `{` or `,`
+// inside an ORDINARY SCALAR is indistinguishable, line-locally, from one that opens
+// a flow mapping:
+//
+//   run: echo '{uses: <ref>}'          <- shell text, read as a call
+//   name: "x, uses: <ref>"             <- prose, read as a call
+//   if: contains(inputs.x, '{uses: y}')
+//
+// Rounds 18, 19 and 20 each patched this matcher and each left the next shape of
+// the same class standing. A fourth patch is the wrong move; so is the remedy the
+// round-20 review proposed (a real YAML parser), because this action is
+// zero-dependency BY CONSTRUCTION — there is no package.json and no node_modules,
+// `action.yml` runs `node audit-delivery.mjs` directly, and adding a parser adds an
+// install step to every consuming repo's job.
+//
+// So the alternative is REMOVED rather than patched, which deletes the whole class
+// at once instead of its current instance. What that costs is measured, not
+// assumed. GitHub code search over the org, with a control query to prove the
+// search itself answers:
+//
+//   org:praetorian-inc path:.github/workflows "uses:"            596   <- control
+//   org:praetorian-inc path:.github/workflows "actions/checkout"  446   <- control
+//   org:praetorian-inc path:.github/workflows "{uses:"              0
+//   org:praetorian-inc path:.github/workflows "\"uses\":"           0
+//
+// Zero live occurrences of either shape in 596 workflow files that DO write `uses:`.
+// The rows in the shape table that asserted flow and JSON support were labelled "No
+// live occurrence" when they were written; this is that claim measured org-wide, and
+// it makes the alternative pure cost — it bought detection of nothing and paid for
+// it in the direction that fabricates a PROD replay list.
+//
+// If a flow-style caller ever does appear, the answer is NOT to restore this
+// alternative. GitHub already parses the reference for us: a workflow run carries
+// `referenced_workflows[].path` as a fully-resolved `owner/repo/.github/workflows/
+// x.yml@sha`, produced by the real parser, free, and immune to every shape above.
+// It cannot replace content matching outright — a caller that has never RUN has no
+// run to carry it, and `never_fired` is a verdict this audit must keep reporting —
+// but as a union with the block-style matcher it closes the under-detection side
+// for anything that has ever executed. Filed as the follow-up direction rather than
+// built here (ENG-5922).
+const USES_KEY = /^\s*(?:-\s+)?(["']?)uses\1\s*:(?:\s|["'])/;
 
 // The VALUE of every `uses:` key on one structural line, in source order.
 //
@@ -2023,23 +2162,31 @@ const USES_KEY = /(?:^\s*(?:-\s+)?|[{,]\s*)(["']?)uses\1\s*:(?:\s|["'])/;
 // resume mid-way through the next line's — a stateful matcher over shared input is
 // order-dependent, and nothing about the call sites makes that visible.
 export function usesValues(line) {
-  const out = [];
-  for (const m of line.matchAll(new RegExp(USES_KEY.source, 'g'))) {
-    // USES_KEY's last character is the separator after the colon, and for a
-    // JSON-formatted workflow (`"uses":"x"`) that separator IS the value's opening
-    // quote. Put it back before reading, so both spellings take the quoted path.
-    const tail = m[0].slice(-1);
-    let rest = line.slice(m.index + m[0].length);
-    if (tail === '"' || tail === "'") rest = tail + rest;
-    rest = rest.replace(/^[ \t]+/, '');
-    const q = rest[0] === '"' || rest[0] === "'" ? rest[0] : null;
-    // A quoted scalar ends at its closing quote; an unquoted one ends at the flow
-    // mapping's next `,` or its closing `}`, or runs to end of line in a block
-    // mapping. The quoted case is checked FIRST because a quoted ref may contain a
-    // comma, which the unquoted rule would cut the value short at.
-    out.push(q ? rest.slice(1).split(q)[0] : rest.split(/[,}]/)[0].trim());
-  }
-  return out;
+  // ONE match, not a scan. USES_KEY is anchored at `^` and carries no `m` flag, so
+  // it can only ever match at index 0 — the `matchAll(…, 'g')` loop this replaced
+  // could not reach a second value on any input, including one with an embedded
+  // newline (measured: `"uses: a  uses: b"`, `"uses: a\nuses: b"` → 1 match each).
+  // It was multi-match machinery for flow mappings, and round 20 removed the flow
+  // arm from USES_KEY, so its only consumer went with it. A returned ARRAY is kept
+  // because the caller reads it with `.some()`.
+  const m = USES_KEY.exec(line);
+  if (!m) return [];
+  // USES_KEY's last character is the separator after the colon, and for a
+  // JSON-formatted workflow (`"uses":"x"`) that separator IS the value's opening
+  // quote. Put it back before reading, so both spellings take the quoted path.
+  const tail = m[0].slice(-1);
+  let rest = line.slice(m.index + m[0].length);
+  if (tail === '"' || tail === "'") rest = tail + rest;
+  rest = rest.replace(/^[ \t]+/, '');
+  const q = rest[0] === '"' || rest[0] === "'" ? rest[0] : null;
+  // A quoted scalar ends at its closing quote; an unquoted BLOCK scalar runs to
+  // end of line. The old unquoted rule cut at `,` or `}` — the flow mapping's
+  // terminators — and with the flow arm gone that is not merely dead, it is a
+  // silent UNDER-detection: a git ref may legally contain a comma, and truncating
+  // the value there makes the ref stop matching, drops the repo out of the fleet,
+  // and the fleet then reports clean for a caller nobody audited. Under-detection
+  // is the one direction that fails quietly, so the terminators come out.
+  return [q ? rest.slice(1).split(q)[0] : rest.trim()];
 }
 
 // The lines of a workflow that are YAML STRUCTURE, with block-scalar content
@@ -2084,24 +2231,25 @@ export function usesValues(line) {
 // be wrong than the two-line rule it replaces. Blanked rather than dropped so a
 // line number still means something to anyone debugging it.
 //
-// What this does NOT cover, stated rather than implied. Two of the three shapes
-// listed here previously — a one-line quoted scalar (`name: "uses: x@sha"`) and a
-// JSON-formatted workflow — are now handled by USES_KEY's node-position anchor
-// rather than by this function, the first rejected and the second accepted. Two
-// residuals remain, and they fail in OPPOSITE directions:
+// What this does NOT cover, stated rather than implied.
+//
+// Round 19 listed TWO residuals here. The second — a one-line `run:` whose shell
+// text carries a flow-mapping brace, `run: echo '{uses: <ref>}'` — was reported by
+// the round-20 review, which is what a documented-but-open defect eventually gets.
+// It is CLOSED, and not here: USES_KEY no longer anchors after `{` or `,` at all,
+// so a brace inside a scalar cannot be read as structure on any line, whatever key
+// it follows. That took the whole class (`run:`, `name:`, `if:`) rather than the
+// reported instance, and it removed a rule instead of adding one — see the
+// measurement at USES_KEY for why the flow support it cost was worth nothing.
+//
+// One residual remains:
 //
 //   - a MULTI-LINE quoted scalar whose continuation line happens to begin with
 //     `uses:`. Read as structure, so it over-detects, same direction as the
 //     `run:` block this function fixes.
-//   - a ONE-LINE `run:` whose shell text contains a flow-mapping brace naming
-//     the reusable (`run: echo '{uses: <ref>}'`). This one is NEW, and it is the
-//     price of accepting flow mappings at all: no line-oriented rule can tell
-//     `{uses: x}` as YAML from `{uses: x}` inside a one-line shell string. It is
-//     strictly narrower than the shape it replaces — the old predicate matched a
-//     bare `run: echo uses: <ref>`, no brace required.
 //
-// Both are far rarer than a `run:` block, and closing either needs a real parser,
-// which is the layer this file deliberately does not build (see above).
+// It is far rarer than a `run:` block, and closing it needs a real parser, which
+// is the layer this file deliberately does not build (see above).
 export function yamlStructureLines(text) {
   const out = [];
   let keyIndent = null; // indentation of the open block's key, or null

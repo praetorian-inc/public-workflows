@@ -61,6 +61,7 @@ import {
   UNVERIFIABLE_REAPED,
   UNVERIFIABLE_JOBS_UNREADABLE,
   UNVERIFIABLE_STEPS_REAPED,
+  UNVERIFIABLE_RUN_IN_FLIGHT,
   UNDECIDED_VERDICTS,
   usesValues,
   stripComment,
@@ -3282,6 +3283,119 @@ test('probeSqsStep: a reaped run does NOT blame the step name, and requireStep c
   assert.equal(await probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: false }), 'unknown_no_steps');
 });
 
+test("probeSqsStep: an ALL-SKIPPED run is a decision, not reaped history", async () => {
+  // Round 20. A skipped job and a reaped job are the SAME SHAPE over the wire —
+  // both come back `steps: []` — so the step-less arm read every all-skipped run
+  // as retention loss. Measured, one from each class:
+  //
+  //   public-workflows run 17336557917  conclusion=success  steps 0   (reaped, 340d)
+  //   guard            run 31185145525  conclusion=skipped  steps 0   (skipped, fresh)
+  //
+  // `conclusion` is the only thing that separates them. This is not hypothetical
+  // for the fleet as deployed: guard's caller is ONE job that calls the reusable,
+  // on `pull_request_target: [closed]`, so every close-without-merge produces a
+  // run whose only job skipped. Read as reaped, it marks the head undecided and
+  // drops a genuinely undelivered PR out of the gap count.
+  const skipped = { total_count: 1, jobs: [{ conclusion: 'skipped', steps: [] }] };
+  const client = attemptClient({ '/x/jobs?per_page=100': skipped });
+  assert.equal(await probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: false }), 'not_sent');
+  // requireStep cannot turn it back into the rename error either. An all-skipped
+  // run can CONCLUDE success, and falling through on that path would abort the
+  // whole fleet audit at exit 2 blaming the step name — the same misdiagnosis the
+  // reaped arm was added to stop.
+  assert.equal(await probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: true }), 'not_sent');
+});
+
+test("probeSqsStep: a job that RAN yet has no steps is still 'unknown_no_steps'", async () => {
+  // The other side of the discriminator, and the reason it is `every` and not
+  // `some`. A run that mixes a skipped job with one that executed-but-has-no-steps
+  // still carries reaping evidence, so it must NOT be downgraded to a decision.
+  const mixed = {
+    total_count: 2,
+    jobs: [{ conclusion: 'skipped', steps: [] }, { conclusion: 'success', steps: [] }],
+  };
+  const client = attemptClient({ '/x/jobs?per_page=100': mixed });
+  assert.equal(await probeSqsStep(client, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: false }), 'unknown_no_steps');
+
+  // And an EMPTY job list keeps the undecided answer. `every` is vacuously true on
+  // it, so without the length guard a run with no jobs at all would claim the
+  // positive "it skipped, therefore it never sent" — a decision from no evidence.
+  const none = { total_count: 0, jobs: [] };
+  const c2 = attemptClient({ '/x/jobs?per_page=100': none });
+  assert.equal(await probeSqsStep(c2, ACFG, 'guard', '/x/jobs', 'run 900', { requireStep: false }), 'unknown_no_steps');
+});
+
+test('headRunsByPr: carries run STATUS, because conclusion is null for finished-and-unfinished alike', () => {
+  // `conclusion` is null for a queued run, an in-progress run AND nothing else —
+  // it cannot distinguish "running" from "finished". The walk needs that
+  // distinction to avoid reading a mid-flight run as a completed non-delivery, so
+  // the projection has to carry `status` through. Pinned here because the field is
+  // consumed two functions away, where dropping it would silently restore the old
+  // behaviour rather than fail.
+  const prs = [{ number: 1, head: { sha: 'aaa' } }];
+  const runs = [
+    { id: 1, head_sha: 'aaa', conclusion: null, status: 'in_progress', created_at: '2026-01-02T00:00:00Z' },
+    { id: 2, head_sha: 'aaa', conclusion: 'failure', status: 'completed', created_at: '2026-01-01T00:00:00Z' },
+  ];
+  const got = headRunsByPr(prs, runs);
+  assert.deepEqual(
+    got.get(1).map((r) => [r.id, r.status]),
+    [
+      [1, 'in_progress'],
+      [2, 'completed'],
+    ],
+  );
+});
+
+test('verifyPayloads: a sibling still IN PROGRESS is undecided, not a missing payload', async () => {
+  // Round 20. `runsInRange` sets no `status` filter, so a queued or in-progress run
+  // reaches the walk with `conclusion: null`; probeSqsStep derives
+  // `requireStep = conclusion === 'success'`, which is false, so a send step that
+  // simply HAS NOT RUN YET took the `!step && !requireStep` arm and returned the
+  // DECISION `not_sent`. "Has not sent yet" is not "never sent".
+  //
+  // The cost lands on the replay path: an unrescued record stays on a list that
+  // WRITES to the prod queue, so a sibling mid-delivery could get its PR delivered
+  // a second time. Undecided is the honest answer, it already exists (exit 3, a
+  // reason per record, excluded from replay), and it clears by itself.
+  const client = jobsClient({
+    111: { jobs: [{ conclusion: 'success', steps: [{ name: 'Set up job', conclusion: 'success' }] }] },
+    999: { jobs: [{ conclusion: null, steps: [{ name: 'Set up job', conclusion: 'success' }] }] },
+  });
+  const heads = new Map([[1, [{ id: 999, conclusion: null, status: 'in_progress', run_attempt: 1 }]]]);
+  const rec = { number: 1, run_id: 111, conclusion: 'failure', status: 'completed' };
+  const v = await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [rec], heads);
+  assert.equal(v.get(111), 'unverifiable');
+  // The REASON matters as much as the verdict: an operator reading this record has
+  // to know it clears by re-running the audit, not by chasing a deleted run or
+  // widening the window. Asserting only 'unverifiable' would pass on any of the
+  // three wordings, including the jobs-unreadable fallback `.get()` returns for a
+  // key that is not in UNDECIDED_VERDICTS.
+  assert.equal(rec.unverifiable_reason, UNVERIFIABLE_RUN_IN_FLIGHT);
+});
+
+test('verifyPayloads: CONTROL — an in-progress sibling that ALREADY sent still decides the head', async () => {
+  // The downgrade is ordered AFTER the `sent` return on purpose, and this is what
+  // that ordering buys. A run still in progress may already have delivered, and a
+  // send that IS found is a fact regardless of what else about the run is
+  // unsettled. Without this control, "treat in-flight as undecided" could be
+  // implemented as an early skip and nothing would notice it had stopped finding
+  // real deliveries — the silent-clean direction.
+  const client = jobsClient({
+    111: { jobs: [{ conclusion: 'success', steps: [{ name: 'Set up job', conclusion: 'success' }] }] },
+    999: { jobs: [{ conclusion: null, steps: [{ name: 'Send metrics to SQS', conclusion: 'success' }] }] },
+  });
+  const heads = new Map([[1, [{ id: 999, conclusion: null, status: 'in_progress', run_attempt: 1 }]]]);
+  const v = await verifyPayloads(
+    client,
+    { owner: 'praetorian-inc' },
+    'guard',
+    [{ number: 1, run_id: 111, conclusion: 'failure', status: 'completed' }],
+    heads,
+  );
+  assert.equal(v.get(111), 'sent');
+});
+
 test('probeSqsStep: a job with no steps ALONGSIDE one that has them is readable history', () => {
   // The step-less arm's predicate is "NO job carries ANY step", not "this job has
   // no steps" — and the difference is load-bearing in the direction that loses
@@ -5317,7 +5431,31 @@ const REJECTED_REPO_ARGS = [
   ['../x', 'traversal in the owner position'],
   ['o/..', 'traversal in the name position'],
   ['o/.', 'single-dot path segment'],
+  // Round 20, from Gemini's review. Neither is a traversal risk — a hyphen is not
+  // path-active and GitHub would answer 404 — so these are here because the guard's
+  // own error message promises "must be a GitHub login" and these are not logins.
+  // Noted because the review's proposed pattern
+  // (`/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/`) closes the first of these
+  // and NOT the second, though it named both: measured, it still accepts `a--b`.
+  ['foo-/n', 'trailing hyphen in the owner — not a GitHub login'],
+  ['a--b/n', 'consecutive hyphens in the owner — not a GitHub login'],
 ];
+
+// The over-rejection direction for the same tightening, kept adjacent because a
+// charset guard that refuses a legitimate owner drops the whole fleet and reports
+// the same false clean the round-13 comment above describes. `praetorian-inc` is
+// the live value this action runs under; the rest bracket the rule's edges.
+for (const owner of ['praetorian-inc', 'a', 'ab', 'a-b-c', 'x'.repeat(39)]) {
+  test(`parseArgs: --repo ${owner}/n is ACCEPTED (a legitimate GitHub login)`, () => {
+    assert.equal(parseArgs(['--repo', `${owner}/n`], NOW).owner, owner);
+  });
+}
+
+test('parseArgs: an owner ONE character over the GitHub limit is rejected', () => {
+  // The bound itself, from the side that proves it is a bound and not a typo. The
+  // 39-character case above is accepted, so this pair pins the exact edge.
+  assert.throws(() => parseArgs(['--repo', `${'x'.repeat(40)}/n`], NOW), /must be a GitHub login/);
+});
 
 for (const [arg, why] of REJECTED_REPO_ARGS) {
   test(`parseArgs: --repo ${arg} is rejected (${why})`, () => {
@@ -6109,12 +6247,30 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     { want: true, label: 'block, single-quoted value', line: `    uses: '${R}'` },
     { want: true, label: 'block, double-quoted value', line: `    uses: "${R}"` },
     { want: true, label: 'block, extra space before the value', line: `    uses:   ${R}` },
-    // Flow / JSON. No live occurrence, but valid Actions YAML — and dropping a
-    // repo that writes one is the silent direction.
-    { want: true, label: 'flow mapping in a sequence', line: `    - {uses: ${R}}` },
-    { want: true, label: 'flow mapping, uses as the SECOND key', line: `    - {name: x, uses: ${R}}` },
-    { want: true, label: 'JSON-formatted workflow', line: `        {"uses": "${R}"}` },
-    { want: true, label: 'JSON, quoted key mid-object', line: `        "name": "x", "uses": "${R}"` },
+    // Flow / JSON. NOT detected as of round 20, and these rows record that as a
+    // deliberate, measured choice rather than an oversight.
+    //
+    // They read `want: true` through round 19 on the argument that they are valid
+    // Actions YAML and dropping such a repo is the silent direction. The comment
+    // conceded even then that there was "no live occurrence"; round 20 measured
+    // that claim instead of asserting it, via GitHub code search over the org with
+    // control queries to prove the search answers at all:
+    //
+    //   path:.github/workflows "uses:"            596   <- control
+    //   path:.github/workflows "actions/checkout" 446   <- control
+    //   path:.github/workflows "{uses:"             0
+    //   path:.github/workflows "\"uses\":"          0
+    //
+    // Zero, in 596 workflow files that DO write `uses:`. Supporting these shapes
+    // required anchoring the key matcher after `{` and `,`, and a `{` or `,` inside
+    // an ordinary scalar is not distinguishable line-locally from one that opens a
+    // flow mapping — which is where every residual false positive of rounds 18, 19
+    // and 20 came from. So the support buys detection of nothing measurable and
+    // pays for it in the direction that fabricates a PROD replay list.
+    { want: false, label: 'flow mapping in a sequence', line: `    - {uses: ${R}}` },
+    { want: false, label: 'flow mapping, uses as the SECOND key', line: `    - {name: x, uses: ${R}}` },
+    { want: false, label: 'JSON-formatted workflow', line: `        {"uses": "${R}"}` },
+    { want: false, label: 'JSON, quoted key mid-object', line: `        "name": "x", "uses": "${R}"` },
     // Not callers. Matching any of these fabricates a prod replay list.
     { want: false, label: 'one-line run: echoing a caller template', line: `        run: echo uses: ${R}` },
     { want: false, label: 'one-line run: grepping for it', line: `        run: grep uses: ${R} x.yml` },
@@ -6156,8 +6312,15 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     // than deleting the substring test: swapping which key holds which value must
     // flip the answer. A matcher that returned false for both would score the
     // over-detection row correctly while being useless.
+    // Was want:true through round 19, as the control proving the value-reading fix
+    // could still say YES. It is a flow mapping, so round 20's removal of flow
+    // support makes it false along with the rest of its class. The control job it
+    // did — "a matcher that answers false to everything would score the
+    // over-detection rows correctly while being useless" — has not disappeared; it
+    // is carried by the five block-style want:true rows at the top, which are the
+    // shapes every live caller in the org actually writes.
     {
-      want: true,
+      want: false,
       label: 'CONTROL — the same two keys with the values swapped',
       line: `    - {uses: ${R}, name: "actions/checkout@v4"}`,
     },
@@ -6166,12 +6329,48 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     // the first alone this is a checkout call and the repo silently leaves the
     // fleet.
     {
-      want: true,
+      want: false,
       label: 'a decoy uses: inside a quoted sibling value, real uses: after it',
       line: `    - {name: "a, uses: actions/checkout@v4", uses: ${R}}`,
     },
+    // ROUND 21's row: the shape the round-20 review reported, and the reason flow
+    // support was removed rather than patched a fourth time. A perfectly ordinary
+    // one-line `run:` whose SHELL TEXT contains a flow-mapping brace. Round 19
+    // documented this as a knowingly accepted residual; it is closed now, and it is
+    // closed for its whole class rather than for this instance — the two rows after
+    // it are the same defect wearing `name:` and `if:`, which a `run:`-only rule
+    // would have left standing.
+    {
+      want: false,
+      label: 'a one-line run: whose shell text contains a flow mapping',
+      line: `        run: echo '{uses: ${R}}'`,
+    },
+    {
+      want: false,
+      label: 'the same brace inside a quoted name: value',
+      line: `        name: "see {uses: ${R}} below"`,
+    },
+    {
+      want: false,
+      label: 'the same brace inside an if: expression',
+      line: `        if: contains(inputs.x, '{uses: ${R}}')`,
+    },
+    // The row that JUSTIFIES reading the value at all. Once round 20 dropped flow
+    // support, a block `uses:` value runs to end of line, so "the value contains
+    // the reusable" and "the line contains the reusable" agree on every well-formed
+    // shape above — a mutation run restoring the round-18 whole-line predicate
+    // survived the other 23. They part on exactly this: a QUOTED value with the
+    // reusable as trailing junk after the closing quote. The line is malformed YAML,
+    // which is the point — a broken workflow file must not be able to fabricate a
+    // fleet member, because over-detection is the direction that ends in a
+    // production replay list for deliveries that already succeeded.
+    {
+      want: false,
+      label: 'a quoted uses: value with the reusable as trailing junk (malformed)',
+      line: `        uses: 'actions/checkout@v4' ${R}`,
+    },
   ];
-  assert.equal(SHAPES.length, 20, 'the shape table is the measurement this fix was chosen on');
+  assert.equal(SHAPES.length, 24, 'the shape table is the measurement this fix was chosen on');
 
   for (const s of SHAPES) {
     const text = ['name: x', 'jobs:', '  call:', s.line, ''].join('\n');
@@ -6194,20 +6393,21 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     score(r17).length > 0,
     'the round-17 predicate must FAIL this table, or these rows do not describe the defect',
   );
-  // The specific reason a line-start-only anchor was not the fix. Round 18's
-  // plan asserted key-anchoring would close the over-detections and cost
-  // nothing; measurement refuted it, because the old predicate matched this
-  // shape by accident on the space after the comma.
+  // Round 18 rejected a line-start-only anchor because it LOSES
+  // `- {name: x, uses: <ref>}`, and that regression is why the shipped matcher
+  // anchored after `{` and `,` for two rounds. Round 20 reverses the trade on
+  // measurement — zero flow-style or JSON-style `uses` in 596 org workflow files —
+  // so the loss is real but costs nothing observable, while the anchor it bought
+  // cost a false-caller class that ends in a prod replay list.
+  //
+  // The row is still here and still asserted, as the price being paid rather than
+  // a regression nobody noticed: block-only genuinely does not see it.
   const flowSecondKey = SHAPES.find((s) => s.label.includes('SECOND key'));
   assert.equal(
     blockOnly(flowSecondKey.line),
     false,
-    'a line-start-only anchor must be shown to LOSE `- {name: x, uses: <ref>}` — that ' +
-      'regression is why the shipped matcher also anchors after `{` and `,`',
-  );
-  assert.ok(
-    score(blockOnly).some((s) => s.want === true),
-    'the block-only anchor must be shown to UNDER-detect, which is the silent direction',
+    'the block-only anchor must be shown to LOSE `- {name: x, uses: <ref>}` — that is ' +
+      'the measured cost of removing flow support, and this row is what pays it',
   );
 
   // ROUND 19. `score` is not an arbitrary scoring rule — its `p(line) && includes(R)`
@@ -6230,7 +6430,7 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
       'repo to the fleet with a caller it does not have, and every merged PR then ' +
       'classifies never_fired against a reusable that never ran for it',
   );
-  // And the shipped code must get all 20, which `score` cannot assert (feeding it
+  // And the shipped code must get all 23, which `score` cannot assert (feeding it
   // the shipped matcher is the X === X the block above avoids). Asserted through
   // the exported unit instead, at the value layer the fix actually operates on.
   for (const s of SHAPES) {
@@ -6241,12 +6441,52 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     );
   }
 
-  // The residual, stated rather than left to imply it is closed: no line-oriented
-  // rule can tell `{uses: x}` as YAML from the same text inside a one-line shell
-  // string. Deliberately NOT asserted either way — pinning the current answer
-  // would freeze the defect, and pinning the desired one would red the suite for
-  // a limitation the file documents. Closing it needs a real parser, which this
-  // zero-dependency action does not build.
+  // The two properties the round-20 simplification rests on. Both were flow-mapping
+  // machinery whose only consumer was the flow arm removed from USES_KEY, and a
+  // mutation run found each one unkillable once that arm was gone — a survivor is
+  // the harness reporting dead code, so the code came out and the properties are
+  // asserted here instead.
+  //
+  // (1) At most ONE value, and a later `uses:` is part of the FIRST value. Stated
+  // honestly: this assertion CANNOT be killed by swapping the single `exec` back
+  // to a scan, and a run confirmed that mutant survives. That is not a weak test,
+  // it is the proof the loop was dead — `^` with no `m` flag matches only at index
+  // 0, so scan and exec return the same thing on every input (probed:
+  // `"uses: a  uses: b"`, `"  - uses: a, uses: b"`, `"uses: a\nuses: b"` → 1 match
+  // each). The line below therefore pins the OBSERVABLE contract, so that
+  // un-anchoring the matcher later has to come here and change an expectation
+  // rather than silently reintroducing a second value.
+  assert.deepEqual(usesValues('uses: a  uses: b'), ['a  uses: b']);
+
+  // (2) An unquoted BLOCK value runs to end of line. The old rule cut it at `,`
+  // or `}` — the flow terminators — which for a ref containing a legal comma
+  // silently truncated the value, un-matched the reusable, dropped the repo out of
+  // the fleet, and left the fleet reporting clean. This is the under-detect
+  // direction, so it gets an explicit row rather than only the over-detect ones.
+  const comma = `${cfg.reusable.split('@')[0]}@rel,v2`;
+  assert.deepEqual(usesValues(`uses: ${comma}`), [comma]);
+  assert.equal(usesValues(`uses: ${comma}`)[0].includes(cfg.reusable.split('@')[0]), true);
+  // The quoted spelling of the same value was already correct — it is the control
+  // proving the fix changed the unquoted path only.
+  assert.deepEqual(usesValues(`uses: '${comma}'`), [comma]);
+
+  // Round 19 left a residual here and said so: no line-oriented rule can tell
+  // `{uses: x}` as YAML from the same text inside a one-line shell string, so the
+  // shape was documented and deliberately left unasserted. Round 20's review
+  // reported exactly that shape.
+  //
+  // It is closed now, and closed by DELETING the flow-mapping anchor rather than by
+  // adding a fourth special case on top of three rounds of them. That is why the
+  // three rows above are asserted rather than described: with no `{`/`,` anchor
+  // there is no line on which a brace inside a scalar can be mistaken for
+  // structure, so the answer is stable for the whole class and not just for the
+  // instance that was reported.
+  //
+  // What remains genuinely open is the mirror: a real flow-style caller would now
+  // be missed. That is measured at zero org-wide (see the table's flow rows) and
+  // the fix for it, if it ever stops being zero, is `referenced_workflows` from the
+  // runs API — GitHub's own parse of the reference — not a hand-rolled parser this
+  // zero-dependency action would have to grow. Filed as ENG-5922.
 });
 
 test('ghCount: reads the row count from rel="last" at per_page=1, and fails closed', async () => {
