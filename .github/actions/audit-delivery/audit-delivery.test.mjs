@@ -6247,8 +6247,20 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     { want: true, label: 'block, single-quoted value', line: `    uses: '${R}'` },
     { want: true, label: 'block, double-quoted value', line: `    uses: "${R}"` },
     { want: true, label: 'block, extra space before the value', line: `    uses:   ${R}` },
-    // Flow / JSON. NOT detected as of round 20, and these rows record that as a
-    // deliberate, measured choice rather than an oversight.
+    // FLOW shapes, and JSON shapes where the key is not at a node position. NOT
+    // detected as of round 20, and these rows record that as a deliberate,
+    // measured choice rather than an oversight.
+    //
+    // Read this together with the three want:true rows below it. What round 20
+    // removed is the FLOW ANCHOR — the `[{,]\s*` alternative that let a key be
+    // recognised after a brace or comma. A quoted KEY at a node position is a
+    // different thing and is still detected, because it costs nothing: the
+    // matcher stays `^`-anchored and the backreference forces the quotes to
+    // match, so there is no scalar-interior text it can mistake for structure.
+    // The two rows immediately below are unmatched for the anchor's sake, not
+    // the quoting's — one opens with `{`, the other carries `uses` as a
+    // non-initial key — and a mutation run confirms the split is real rather
+    // than incidental (see those rows' mirror image further down).
     //
     // They read `want: true` through round 19 on the argument that they are valid
     // Actions YAML and dropping such a repo is the silent direction. The comment
@@ -6369,8 +6381,44 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
       label: 'a quoted uses: value with the reusable as trailing junk (malformed)',
       line: `        uses: 'actions/checkout@v4' ${R}`,
     },
+    // Rows 25-27, added in round 21. The QUOTED KEY at a node position, which
+    // `USES_KEY`'s `(["']?)uses\1` group and `usesValues`'s tail-requote branch
+    // both exist to serve — and which, until this round, NO test covered. A
+    // re-anchored mutant replacing the whole matcher with `/^\s*(?:-\s+)?uses:\s/`
+    // (i.e. deleting quoted-key support outright) SURVIVED all 24 rows above.
+    //
+    // That survivor was recovered by fixing the harness, not by writing a test:
+    // the mutant had been reporting `INVALID(needle)` since round 20 moved the
+    // regex, and an INVALID measures NOTHING while looking like a clean line in
+    // the summary. It is the same lesson the CP/CQ/CR re-anchors taught one round
+    // earlier, which is why every drifted mutant was re-anchored rather than
+    // dropped.
+    //
+    // Kept rather than deleted, unlike the flow anchor: dropping it would only
+    // lose detection, and a missed caller is the SILENT-CLEAN direction — the
+    // repo leaves the fleet and the audit reports no problem.
+    {
+      want: true,
+      label: 'double-quoted KEY at a node position',
+      line: `    "uses": "${R}"`,
+    },
+    {
+      want: true,
+      label: 'single-quoted KEY at a node position',
+      line: `    'uses': '${R}'`,
+    },
+    // The tail-requote branch specifically. USES_KEY's last character is the
+    // separator after the colon, and with no space the separator IS the value's
+    // opening quote — so it has to be put back before the value is read, or the
+    // quoted path is entered one character late and the value comes back with a
+    // trailing `"`.
+    {
+      want: true,
+      label: 'quoted key AND no space before the quoted value (strict JSON spelling)',
+      line: `    "uses":"${R}"`,
+    },
   ];
-  assert.equal(SHAPES.length, 24, 'the shape table is the measurement this fix was chosen on');
+  assert.equal(SHAPES.length, 27, 'the shape table is the measurement this fix was chosen on');
 
   for (const s of SHAPES) {
     const text = ['name: x', 'jobs:', '  call:', s.line, ''].join('\n');
