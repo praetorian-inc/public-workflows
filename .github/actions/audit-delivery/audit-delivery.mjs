@@ -2365,6 +2365,34 @@ export function yamlStructureLines(text) {
   return out;
 }
 
+// Round 24 (codex-connector): the anchored compare below was CASE-SENSITIVE
+// across the whole value, but GitHub resolves the {owner}/{repo} half of a
+// `uses:` reference case-insensitively — owner and repo names are unique
+// without regard to case, and the REST API answers
+// `Praetorian-Inc/Public-Workflows` with full_name
+// `praetorian-inc/public-workflows` (probed live) — so a caller spelled with
+// a case-variant owner or repo IS the official reusable and was dropped here:
+// hasCaller false, the repo silently struck from the fleet, its merged PRs
+// never audited. Silent under-coverage is the false-clean direction this
+// detector exists to refuse. And if the Actions resolver were ever strict
+// about case where the rest of GitHub is not, admitting the spelling is still
+// the right reading: the file evidences an INTENDED onboarding whose caller
+// delivers nothing, so the resulting gaps are true gaps, surfaced instead of
+// silenced.
+//
+// The fold is ASCII-only, and the owner/repo segments are charset-checked
+// FIRST: a bare toLowerCase() folds U+212A KELVIN SIGN to `k`, so
+// `public-worKflows` — a value GitHub can never resolve, repo names
+// being [A-Za-z0-9_.-] — would count as a caller, re-opening the
+// false-fleet-member class round 22 closed (its harm ends in a fabricated
+// prod replay list). The PATH half stays case-sensitive: it is a git tree
+// lookup, and git paths are exact.
+function matchesReusable(v, reusable) {
+  const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/(.+)$/.exec(v);
+  if (!m) return false;
+  return `${m[1].toLowerCase()}/${m[2].toLowerCase()}/${m[3]}`.startsWith(reusable);
+}
+
 export async function hasCaller(client, cfg, repo) {
   // Encoded per SEGMENT, never as a whole string: encodeURIComponent turns `/`
   // into `%2F`, which the contents API does not read as a directory separator,
@@ -2417,9 +2445,11 @@ export async function hasCaller(client, cfg, repo) {
   // repo's PATH segment (`evil/repo/praetorian-inc/public-workflows/...`).
   // Anchoring at the start closes both: same over-detect class, same harm, as
   // the commented-template and quoted-key findings above — a false fleet
-  // member ends in a fabricated prod replay list.
+  // member ends in a fabricated prod replay list. The anchored compare lives
+  // in matchesReusable since round 24, which folds owner/repo case without
+  // touching the path — see its note above.
   return yamlStructureLines(b64(f.content)).some((l) =>
-    usesValues(stripComment(l)).some((v) => v.startsWith(cfg.reusable)),
+    usesValues(stripComment(l)).some((v) => matchesReusable(v, cfg.reusable)),
   );
 }
 
@@ -3136,8 +3166,18 @@ export function renderMarkdown(report, cfg) {
     return L.join('\n');
   }
   L.push(
-    '**A leaderboard metrics delivery gap was detected.** Each affected PR below ' +
-      'produced no `CodeCommit` row, so its author is missing score for it.',
+    // Round 24 (codex-connector): this banner used to claim each affected PR
+    // "produced no `CodeCommit` row" — a consumer-side fact nothing in this
+    // audit reads (the deepest probe is the enqueue step; see the coverage
+    // note above REPLAY_CAVEATS), and one the deleted_run caveat rendered
+    // BELOW it contradicts: a delivered PR whose run was deleted classifies
+    // never_fired yet may well have its row, and an operator taking the
+    // stronger sentence at face value replays an already-scored PR. The
+    // banner claims the evidence (no enqueue could be verified), never the
+    // consequence (no row, no score).
+    '**A leaderboard metrics delivery gap was detected.** No enqueue to the metrics ' +
+      'queue could be verified for the PRs below, so their authors may be missing ' +
+      'score for them.',
   );
   L.push('');
   {

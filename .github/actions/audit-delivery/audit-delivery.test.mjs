@@ -1393,6 +1393,21 @@ test('renderMarkdown: emits the no-caller callout only when has_caller is false'
   assert.match(withCaller, /A leaderboard metrics delivery gap was detected/);
 });
 
+test('renderMarkdown: the gap banner claims a missing VERIFIED ENQUEUE, never a consumer-side row', () => {
+  // Round 24 (codex-connector): the banner said each affected PR "produced no
+  // `CodeCommit` row" — a fact nothing in this audit reads (the deepest probe
+  // is the enqueue step) and one the deleted_run caveat in the SAME report
+  // contradicts: a delivered PR whose run was deleted classifies never_fired
+  // yet may well have its row, and an operator taking the stronger sentence at
+  // face value replays an already-scored PR. The positive assertion carries the
+  // pin; the absence assertion documents the retired overclaim and would go
+  // vacuous alone (the near-miss at :1388's sibling), which is why both are
+  // here together.
+  const md = renderMarkdown(gapReport(), CFG);
+  assert.match(md, /No enqueue to the metrics queue could be verified/);
+  assert.doesNotMatch(md, /produced no `CodeCommit` row/);
+});
+
 test('renderMarkdown: the replay command carries the comma-joined PR numbers', () => {
   const md = renderMarkdown(gapReport({ replay: [9, 10, 100] }), CFG);
 
@@ -5214,6 +5229,50 @@ test('hasCaller: the official ref embedded in another repo PATH is not a caller 
   const cfg = callerCfg();
   const text = ['jobs:', '  m:', `    uses: evil/repo/${cfg.reusable}abc123`, ''].join('\n');
   assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), false);
+});
+
+test('hasCaller: the official reusable with a case-variant OWNER/REPO IS a caller', async () => {
+  // Round 24 (codex-connector): owner and repo names resolve case-insensitively
+  // on GitHub — Praetorian-Inc/Public-Workflows IS the official repo, there is
+  // no second repo it could denote — but the anchored compare was byte-exact,
+  // so this real caller read as "no caller": the repo silently dropped from the
+  // fleet and its merged PRs were never audited. That is the false-CLEAN
+  // direction, the one the fork and embedded-path rows above cannot see because
+  // they only pin over-detection.
+  const cfg = callerCfg();
+  const text = [
+    'jobs:',
+    '  m:',
+    '    uses: Praetorian-Inc/Public-Workflows/.github/workflows/leaderboard-metrics.yml@abc123',
+    '',
+  ].join('\n');
+  assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), true);
+});
+
+test('hasCaller: case-variance stops at the repo — a case-variant PATH or a non-ASCII fold-alike is NOT the reusable', async () => {
+  // Two ways an over-broad fold would re-open the false-fleet-member class the
+  // rows above closed. The PATH half is a git tree lookup and git paths are
+  // exact, so `.github/Workflows/` names a path that does not exist; and
+  // U+212A KELVIN SIGN folds to `k` under full-Unicode toLowerCase() while
+  // never being resolvable as a GitHub repo name (names are [A-Za-z0-9_.-]),
+  // so a fold that skips the charset check would count `public-worKflows` as
+  // the official repo. Both must stay refused — each ends in a false fleet
+  // member and a fabricated prod replay list.
+  const cfg = callerCfg();
+  const pathCase = [
+    'jobs:',
+    '  m:',
+    '    uses: praetorian-inc/public-workflows/.github/Workflows/leaderboard-metrics.yml@abc123',
+    '',
+  ].join('\n');
+  assert.equal(await hasCaller(contentClient(pathCase), cfg, 'guard'), false);
+  const kelvin = [
+    'jobs:',
+    '  m:',
+    '    uses: praetorian-inc/public-worKflows/.github/workflows/leaderboard-metrics.yml@abc123',
+    '',
+  ].join('\n');
+  assert.equal(await hasCaller(contentClient(kelvin), cfg, 'guard'), false);
 });
 
 test('yamlStructureLines: block content is blanked, structure and line count survive', () => {
