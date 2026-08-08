@@ -6251,16 +6251,13 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
     // detected as of round 20, and these rows record that as a deliberate,
     // measured choice rather than an oversight.
     //
-    // Read this together with the three want:true rows below it. What round 20
-    // removed is the FLOW ANCHOR — the `[{,]\s*` alternative that let a key be
-    // recognised after a brace or comma. A quoted KEY at a node position is a
-    // different thing and is still detected, because it costs nothing: the
-    // matcher stays `^`-anchored and the backreference forces the quotes to
-    // match, so there is no scalar-interior text it can mistake for structure.
-    // The two rows immediately below are unmatched for the anchor's sake, not
-    // the quoting's — one opens with `{`, the other carries `uses` as a
-    // non-initial key — and a mutation run confirms the split is real rather
-    // than incidental (see those rows' mirror image further down).
+    // (Through round 21 this comment split the class: the flow ANCHOR came out
+    // but a quoted KEY at a node position stayed detected, on the argument that
+    // it "costs nothing" — the backreference could mistake no scalar-interior
+    // text for structure ON ONE LINE. Round 21's review exhibited the cost one
+    // layer up, across lines — see rows 25-27 — and round 22 removed quoted-key
+    // support too, so the two JSON rows below are now unmatched for both
+    // reasons: anchor AND quoting.)
     //
     // They read `want: true` through round 19 on the argument that they are valid
     // Actions YAML and dropping such a repo is the silent direction. The comment
@@ -6381,39 +6378,37 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
       label: 'a quoted uses: value with the reusable as trailing junk (malformed)',
       line: `        uses: 'actions/checkout@v4' ${R}`,
     },
-    // Rows 25-27, added in round 21. The QUOTED KEY at a node position, which
-    // `USES_KEY`'s `(["']?)uses\1` group and `usesValues`'s tail-requote branch
-    // both exist to serve — and which, until this round, NO test covered. A
-    // re-anchored mutant replacing the whole matcher with `/^\s*(?:-\s+)?uses:\s/`
-    // (i.e. deleting quoted-key support outright) SURVIVED all 24 rows above.
-    //
-    // That survivor was recovered by fixing the harness, not by writing a test:
-    // the mutant had been reporting `INVALID(needle)` since round 20 moved the
-    // regex, and an INVALID measures NOTHING while looking like a clean line in
-    // the summary. It is the same lesson the CP/CQ/CR re-anchors taught one round
-    // earlier, which is why every drifted mutant was re-anchored rather than
-    // dropped.
-    //
-    // Kept rather than deleted, unlike the flow anchor: dropping it would only
-    // lose detection, and a missed caller is the SILENT-CLEAN direction — the
-    // repo leaves the fleet and the audit reports no problem.
+    // Rows 25-27, added in round 21 as want:true, FLIPPED to want:false in
+    // round 22. Round 21 pinned the QUOTED KEY at a node position and kept the
+    // support on the argument that "dropping it would only lose detection, and
+    // a missed caller is the SILENT-CLEAN direction". The round-21 review
+    // refuted that argument by exhibiting the support's over-detect arm:
+    // yamlStructureLines tracks no quote state, so a continuation line of an
+    // OPPOSITE-quoted multiline scalar carrying `"uses": "<ref>"` was read as
+    // structure and fabricated a fleet member — a PROD replay list for
+    // deliveries that succeeded (asserted below this table, alongside the
+    // documented unquoted residual). Detection value measured at zero
+    // (`"uses":` in 0 of 596 org workflow files — see USES_KEY), so round 22
+    // removed the quoting group and the tail-requote branch the same way round
+    // 20 removed the flow arm. The rows stay in the table with the sign
+    // flipped, so restoring quoted-key support has to come here and flip three
+    // expectations rather than silently widen the matcher.
     {
-      want: true,
-      label: 'double-quoted KEY at a node position',
+      want: false,
+      label: 'double-quoted KEY at a node position (support removed, round 22)',
       line: `    "uses": "${R}"`,
     },
     {
-      want: true,
-      label: 'single-quoted KEY at a node position',
+      want: false,
+      label: 'single-quoted KEY at a node position (support removed, round 22)',
       line: `    'uses': '${R}'`,
     },
-    // The tail-requote branch specifically. USES_KEY's last character is the
-    // separator after the colon, and with no space the separator IS the value's
-    // opening quote — so it has to be put back before the value is read, or the
-    // quoted path is entered one character late and the value comes back with a
-    // trailing `"`.
+    // The strict-JSON spelling the tail-requote branch existed to serve. Not
+    // even a lost detection: with no space after the colon this is not a
+    // block-mapping entry at all — YAML reads the whole line as ONE plain
+    // scalar — so a workflow written this way never called anything.
     {
-      want: true,
+      want: false,
       label: 'quoted key AND no space before the quoted value (strict JSON spelling)',
       line: `    "uses":"${R}"`,
     },
@@ -6431,7 +6426,7 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
 
   // ANTI-VACUOUS, and the reason the table is here at all: a table that every
   // plausible predicate satisfies proves nothing about the one that shipped.
-  // Both REJECTED candidates are restated (not the shipped one — that would
+  // The REJECTED candidates are restated (not the shipped one — that would
   // assert X === X) and each must get at least one row wrong.
   const r17 = (l) => /(^|\s)uses:\s/.test(l);
   const blockOnly = (l) => /^\s*(?:-\s+)?uses:\s/.test(l);
@@ -6449,7 +6444,11 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
   // cost a false-caller class that ends in a prod replay list.
   //
   // The row is still here and still asserted, as the price being paid rather than
-  // a regression nobody noticed: block-only genuinely does not see it.
+  // a regression nobody noticed: block-only genuinely does not see it. (As of
+  // round 22 the shipped anchor IS block-only — quoting removed too, and the only
+  // difference left is tolerated space before the colon — so this line stopped
+  // being a rejected candidate and became the record of what the shipped shape
+  // pays on this row.)
   const flowSecondKey = SHAPES.find((s) => s.label.includes('SECOND key'));
   assert.equal(
     blockOnly(flowSecondKey.line),
@@ -6478,9 +6477,9 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
       'repo to the fleet with a caller it does not have, and every merged PR then ' +
       'classifies never_fired against a reusable that never ran for it',
   );
-  // And the shipped code must get all 23, which `score` cannot assert (feeding it
-  // the shipped matcher is the X === X the block above avoids). Asserted through
-  // the exported unit instead, at the value layer the fix actually operates on.
+  // And the shipped code must get every row, which `score` cannot assert (feeding
+  // it the shipped matcher is the X === X the block above avoids). Asserted
+  // through the exported unit instead, at the value layer the fix operates on.
   for (const s of SHAPES) {
     assert.equal(
       usesValues(stripComment(s.line)).some((v) => v.includes(cfg.reusable)),
@@ -6535,6 +6534,53 @@ test('hasCaller: `uses` must be a KEY at a node position AND the reusable its VA
   // the fix for it, if it ever stops being zero, is `referenced_workflows` from the
   // runs API — GitHub's own parse of the reference — not a hand-rolled parser this
   // zero-dependency action would have to grow. Filed as ENG-5922.
+
+  // ROUND 22: the multiline-scalar shape, both spellings, driven through the
+  // FULL hasCaller pipeline rather than usesValues alone because the defect
+  // lives in the seam between its two halves — yamlStructureLines tracks no
+  // quote state, so a scalar's continuation line reaches the key matcher as if
+  // it were structure. The table above cannot carry these: its rows are single
+  // lines wrapped in a fixed well-formed document.
+  //
+  // The QUOTED spelling is the round-21 review's finding: a continuation line
+  // of an OPPOSITE-quoted scalar carrying `"uses": "<ref>"` fired hasCaller and
+  // fabricated a fleet member — no caller, no runs, every merged PR
+  // never_fired, a PROD replay list for deliveries that succeeded. CLOSED by
+  // removing quoted-key support from USES_KEY; this assertion keeps it closed.
+  const quotedKeyInScalar = [
+    'jobs:',
+    '  docs:',
+    '    steps:',
+    "      - name: 'documentation",
+    `          "uses": "${R}"'`,
+    '      - uses: actions/checkout@v4',
+    '',
+  ].join('\n');
+  assert.equal(
+    await hasCaller(contentClient(quotedKeyInScalar), cfg, 'guard'),
+    false,
+    'a quoted uses key on a scalar CONTINUATION line must not fabricate a caller',
+  );
+  // The UNQUOTED spelling is the residual DOCUMENTED at yamlStructureLines:
+  // still read as structure, still over-detects. Asserted true not because true
+  // is the desired answer but so the documentation cannot drift — a change that
+  // closes the residual must flip this expectation and move the comment at
+  // yamlStructureLines in the same diff.
+  const unquotedKeyInScalar = [
+    'jobs:',
+    '  docs:',
+    '    steps:',
+    "      - name: 'documentation",
+    `          uses: ${R}'`,
+    '      - uses: actions/checkout@v4',
+    '',
+  ].join('\n');
+  assert.equal(
+    await hasCaller(contentClient(unquotedKeyInScalar), cfg, 'guard'),
+    true,
+    'the documented unquoted residual: if this returns false the residual is closed — ' +
+      'flip this expectation and update the yamlStructureLines comment together',
+  );
 });
 
 test('ghCount: reads the row count from rel="last" at per_page=1, and fails closed', async () => {
@@ -6761,6 +6807,64 @@ test('auditRepo: CONTROL — a closed-PR list that GREW mid-walk is NOT refused'
   );
   assert.equal(res.repo, 'guard');
   assert.equal(i, 2);
+});
+
+test('auditRepo: a merged row the FIRST walk skipped is recovered by the UNION with a second walk', async () => {
+  // The round-21 finding the count brackets cannot see, reproduced against the
+  // real client in scratchpad/r10/netted-repro.mjs: a reopen BEFORE the cursor
+  // netted by a close AFTER it leaves closedBefore === closedAfter and
+  // fetched.length >= closedBefore while a merged PR was never read — both
+  // brackets pass, FALSE CLEAN. Counts cannot close a positional skip; the
+  // union of two walks does, because a merged PR cannot be reopened and so
+  // never leaves the closed list — a fresh second enumeration rereads the row
+  // the shift carried past the first walk's cursor.
+  //
+  // The fixture is that exact mutation, seen from the walk's side. Walk A is
+  // the netted snapshot: 250 rows, merged #101 shifted past the cursor and a
+  // compensating unmerged #251 at the tail. Walk B is the list as it stands:
+  // 250 rows, #101 present, reopened #50 gone. Both count probes read 250.
+  // Under a single walk this audit reported merged_prs=0 with every check
+  // green — which is what the walk-count assertion below pins: a mutant that
+  // drops walk B reads 1 pulls walk AND loses #101, so both arms go red.
+  const mergedRow = pr(101, '2026-06-01T00:00:00Z', 'f'.repeat(40));
+  const others = Array.from({ length: 250 }, (_, k) => ({ number: k + 1, merged_at: null })).filter(
+    (r) => r.number !== 101,
+  );
+  const tail = { number: 251, merged_at: null };
+  const walkASnapshot = [...others, tail];
+  const walkBSnapshot = [...others.filter((r) => r.number !== 50), mergedRow, tail];
+  let pullsWalks = 0;
+  const client = {
+    ghPaged: async (path) => {
+      if (path.includes('/pulls?')) {
+        pullsWalks++;
+        return pullsWalks === 1 ? walkASnapshot : walkBSnapshot;
+      }
+      if (path.includes('/commits?')) return [];
+      if (path.includes('/runs?')) return [];
+      throw new Error(`unexpected ghPaged ${path}`);
+    },
+    gh: async (path) => {
+      if (path.includes('per_page=1&created=')) return { total_count: 0 };
+      if (path.includes('/contents/')) return { type: 'file' };
+      throw new Error(`unexpected gh ${path}`);
+    },
+    ghCount: async () => 250,
+  };
+  const res = await auditRepo(
+    client,
+    { owner: 'praetorian-inc', callerFile: 'c.yml', callerPath: '.github/workflows/c.yml', since: '2026-05-01', until: null },
+    'guard',
+  );
+  assert.equal(pullsWalks, 2, 'the closed-PR enumeration must walk TWICE — the union is the fix');
+  assert.equal(res.merged_prs, 1, 'the skipped merged row must be recovered, not silently absent');
+  const classified = Object.values(res.classes)
+    .flat()
+    .map((r) => r.number);
+  assert.ok(
+    classified.includes(101),
+    `merged #101 must be CLASSIFIED, not merely counted — got ${JSON.stringify(classified)}`,
+  );
 });
 
 test('buildReport: duplicate_rows is always reported, so the insertion branch is observable', () => {

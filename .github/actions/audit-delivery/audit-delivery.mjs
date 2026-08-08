@@ -2076,15 +2076,9 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 // file has already shipped twice, so the table is the source of truth and this
 // comment does not restate its size. A
 // key sits at a node position: start of line (block mapping, optionally after a
-// `- ` sequence dash) or just after `{` or `,` (flow mapping). The optional
-// backreferenced quote admits a JSON-formatted workflow's `"uses":` while still
-// requiring the SAME quote on both sides, and the trailing class accepts either
-// whitespace or a quote after the colon because JSON writes `"uses":"x"` with no
-// space. Anchoring on the position is what rejects `run: echo uses: <ref>`,
-// `description: calls uses: <ref>` and `name: "uses: <ref>"` — three shapes the
-// old predicate read as calls — without a line-start-only rule, which would have
-// REGRESSED `- {name: x, uses: <ref>}` (the old one matched that by accident, on
-// the space after the comma).
+// `- ` sequence dash). Anchoring on the position is what rejects
+// `run: echo uses: <ref>`, `description: calls uses: <ref>` and
+// `name: "uses: <ref>"` — three shapes the old predicate read as calls.
 // FLOW AND JSON STYLE ARE NOT ACCEPTED, and that is the round-20 change. The
 // position alternative used to include `|[{,]\s*`, admitting `- {uses: <ref>}` and
 // `{"uses": "<ref>"}`. Every residual false-positive this detector has left after
@@ -2128,7 +2122,29 @@ const BLOCK_OPEN = /^(\s*(?:-\s+)?)[^#\s][^:]*:[ \t]*[|>][+-]?\d*[ \t]*(?:#.*)?$
 // but as a union with the block-style matcher it closes the under-detection side
 // for anything that has ever executed. Filed as the follow-up direction rather than
 // built here (ENG-5922).
-const USES_KEY = /^\s*(?:-\s+)?(["']?)uses\1\s*:(?:\s|["'])/;
+//
+// QUOTED KEYS ARE NOT ACCEPTED EITHER, and that is the round-22 change. Through
+// round 21 the key admitted an optional backreferenced quote — `(["']?)uses\1`
+// — and usesValues carried a tail-requote branch so the strict-JSON spelling
+// `"uses":"x"` (no space after the colon) read its value correctly. Round 21
+// kept that support on the argument that dropping it "would only lose
+// detection"; the round-21 review refuted the argument by exhibiting its
+// over-detect arm: yamlStructureLines tracks no quote state, so a continuation
+// line of an OPPOSITE-quoted multiline scalar that happens to carry
+// `"uses": "<ref>"` was read as structure, matched as a call, and fabricated a
+// fleet member — the residual documented at yamlStructureLines, EXTENDED to
+// quoted spellings. What the support bought is measured above: `"uses":`
+// appears in 0 of the 596 org workflow files that write `uses:` at all. The
+// strict-JSON spelling is not even a lost detection — `"uses":"x"` with no
+// space after the colon is not a block-mapping entry (YAML reads the whole
+// line as one plain scalar), so a workflow written that way never called
+// anything. A quoted key WITH a space is legal YAML that nobody in the org
+// writes; if one ever appears, ENG-5922's `referenced_workflows` union covers
+// any caller that has ever run, same answer as for flow style. So the quoting
+// support paid in the direction that fabricates a PROD replay list and bought
+// detection of nothing measurable, and it came out the same way the flow arm
+// did: removed, not patched.
+const USES_KEY = /^\s*(?:-\s+)?uses\s*:\s/;
 
 // The VALUE of every `uses:` key on one structural line, in source order.
 //
@@ -2171,13 +2187,12 @@ export function usesValues(line) {
   // because the caller reads it with `.some()`.
   const m = USES_KEY.exec(line);
   if (!m) return [];
-  // USES_KEY's last character is the separator after the colon, and for a
-  // JSON-formatted workflow (`"uses":"x"`) that separator IS the value's opening
-  // quote. Put it back before reading, so both spellings take the quoted path.
-  const tail = m[0].slice(-1);
-  let rest = line.slice(m.index + m[0].length);
-  if (tail === '"' || tail === "'") rest = tail + rest;
-  rest = rest.replace(/^[ \t]+/, '');
+  // USES_KEY requires whitespace after the colon, so the match always ends on
+  // the separator and the value starts cleanly after it. (The tail-requote
+  // branch that lived here existed for the strict-JSON `"uses":"x"` spelling,
+  // whose separator IS the value's opening quote; it left with quoted-key
+  // support — see USES_KEY.)
+  const rest = line.slice(m.index + m[0].length).replace(/^[ \t]+/, '');
   const q = rest[0] === '"' || rest[0] === "'" ? rest[0] : null;
   // A quoted scalar ends at its closing quote; an unquoted BLOCK scalar runs to
   // end of line. The old unquoted rule cut at `,` or `}` — the flow mapping's
@@ -2245,11 +2260,16 @@ export function usesValues(line) {
 // One residual remains:
 //
 //   - a MULTI-LINE quoted scalar whose continuation line happens to begin with
-//     `uses:`. Read as structure, so it over-detects, same direction as the
-//     `run:` block this function fixes.
+//     an UNQUOTED `uses: `. Read as structure, so it over-detects, same
+//     direction as the `run:` block this function fixes.
 //
-// It is far rarer than a `run:` block, and closing it needs a real parser, which
-// is the layer this file deliberately does not build (see above).
+// The QUOTED spelling of the same shape — a continuation line carrying
+// `"uses": "<ref>"` — was reported by the round-21 review and is CLOSED, not
+// here but at USES_KEY: quoted-key support came out entirely (round 22), so no
+// quoted spelling reads as a key on any line. What is left is exactly the
+// unquoted case above. It is far rarer than a `run:` block, and closing it
+// needs quote state tracked ACROSS lines — a real parser, which is the layer
+// this file deliberately does not build (see above).
 export function yamlStructureLines(text) {
   const out = [];
   let keyIndent = null; // indentation of the open block's key, or null
@@ -2680,11 +2700,15 @@ export async function auditRepo(client, cfg, repo) {
   //   the fetched length against the FINAL count agrees perfectly while a row is
   //   missing. Only before-vs-after catches it.
   //
-  // Residual of the detector itself, stated rather than implied closed: a removal
+  // Residual of the COUNT detector, stated rather than implied closed: a removal
   // and an insertion inside the same walk net to an unchanged count, and the
-  // before-vs-after check would pass. That needs both a reopen and a close within
-  // the same seconds in one repo — strictly narrower than the single-event case it
-  // does catch, and the SHORTFALL check below narrows it further.
+  // before-vs-after check passes. The round-21 review exhibited exactly that,
+  // and it reproduced against this file's real client (reopen #50 behind the
+  // cursor, a new close ahead of it: closedBefore=250, closedAfter=250,
+  // fetched=250, dupes=0 — both brackets pass, merged #101 never read). Counts
+  // cannot close it: no finite stack of brackets proves snapshot completeness
+  // over an offset-paginated list mutating under the reader. What answers the
+  // netted SKIP is not another count — it is the UNION OF TWO WALKS below.
   //
   // ── The shortfall the bracket cannot see ─────────────────────────────────────
   //
@@ -2709,17 +2733,53 @@ export async function auditRepo(client, cfg, repo) {
   // paid for once in runsInRange. Growth above the floor is fine: `fetched` can
   // legitimately exceed `closedBefore`.
   //
-  // What this closes, precisely, because "the residual is now closed" would be the
-  // overclaim: any early stop, and any pre-cursor removal that skipped a row (the
-  // count drops, so the shortfall shows even when the bracket's own throw is what
-  // fires first). What it still does not close: a removal netted out by a
-  // compensating insertion, where the walk returns the full 250 having never read
-  // one of them. Both checks are needed and neither subsumes the other.
+  // What the two count checks close, precisely, because "the residual is now
+  // closed" would be the overclaim: any early stop, and any pre-cursor removal
+  // that shows up as a net count drop. What counts cannot close is the netted
+  // case above — which is why the walk itself runs TWICE and the union is taken.
+  //
+  // ── The union of two walks ────────────────────────────────────────────────────
+  //
+  // The fact that makes a second walk sufficient rather than a coin flip: the
+  // rows this audit exists to classify are MERGED PRs, and a merged PR cannot be
+  // reopened — it can never leave the closed list. A mid-walk removal is always
+  // the reopen of an UNMERGED closed PR; it can shift a merged row past walk A's
+  // cursor, but the row itself stays in the list, so walk B — a fresh
+  // enumeration from page 1 — reads it unless a SECOND, independent reopen lands
+  // inside walk B's seconds at a position before that same row. The union turns
+  // "one reopen during the walk loses a merged row" into "two reopens, one per
+  // walk, both positioned ahead of the same row". That is the documented
+  // residual, per the premise amendment on PR #154: a merged row skipped by both
+  // walks in a one-shot replay run is absent from THAT run's report and is
+  // recovered by the next scheduled run's fresh enumeration — detection is
+  // eventual, cross-run. A future finding of the form "there exists a mutation
+  // timing that defeats this" is answered by this paragraph, not by a third
+  // walk or another bracket.
+  //
+  // Mechanics: first-seen wins in the merge (for merged rows the fields this
+  // audit reads — number, merged_at, head SHA at merge — do not change between
+  // walks; any drift in mutable fields is the same drift a single walk races).
+  // Cross-walk duplication is EXPECTED and is not churn: ghPaged's identity
+  // dedupe is per call, so the union map is what removes the overlap. The
+  // shortfall check below measures the UNION, and the count brackets span both
+  // walks (before A, after B — the widest span). Cost: one extra pulls walk
+  // (~65 pages on guard, the largest repo); nothing gates on pulls-endpoint
+  // call volume — API_CAP bounds the runs endpoint, not this one. Over-fetch is
+  // benign: a row that closes between the walks joins the union and inWindow
+  // filters on merged_at, which is immutable.
   const closedPath = `/repos/${cfg.owner}/${repo}/pulls?state=closed&sort=created&direction=asc`;
   const closedBefore = await client.ghCount(closedPath);
-  const fetched = await client.ghPaged(`${closedPath}&per_page=100`, undefined, {
-    identity: (p) => p.number,
-  });
+  const walkClosed = () =>
+    client.ghPaged(`${closedPath}&per_page=100`, undefined, {
+      identity: (p) => p.number,
+    });
+  const walkA = await walkClosed();
+  const walkB = await walkClosed();
+  const byNumber = new Map();
+  for (const p of [...walkA, ...walkB]) if (!byNumber.has(p.number)) byNumber.set(p.number, p);
+  // Sorted to restore created-asc order for rows only one walk saw: PR numbers
+  // are assigned at creation, so number order IS creation order.
+  const fetched = [...byNumber.values()].sort((a, b) => a.number - b.number);
   const closedAfter = await client.ghCount(closedPath);
   if (closedAfter < closedBefore) {
     throw new Error(
