@@ -1,0 +1,290 @@
+# Reusable workflow implementing ENG-5689: an alert reaches a human within
+# 24h of a leaderboard-metrics delivery failure, naming the affected repo.
+#
+# CHOSEN SIGNAL (recorded on the ticket): a per-repo SCHEDULED SELF-CHECK over
+# a recent window (default: last 7 days), run by the repo itself against its
+# OWN metrics-caller workflow, using the repo's own GITHUB_TOKEN — no new
+# secrets, no cross-repo permissions. It looks for two anomaly classes:
+#   1. BAD RUNS — caller runs that failed, timed out, required action, were
+#      cancelled, or hit `startup_failure`. `startup_failure` is load-bearing:
+#      a caller broken at the workflow-file level (bad YAML, missing input)
+#      never executes an in-run step, so nothing inside the run can report it
+#      — only an external observer like this scheduled check catches it.
+#   2. MISSING RUNS — merged PRs in-window with no caller run at all for
+#      their head SHA (the caller never fired, e.g. deleted/disabled).
+#
+# ALERT CHANNEL: deliberately NOT another red workflow run — unwatched red
+# runs are the problem this ticket exists to solve. The alert is an
+# auto-filed/updated GitHub ISSUE (label-driven, one issue kept open per
+# repo). Route to Slack by subscribing the relevant channel to issues
+# carrying `alarm-label` in this repo (GitHub's native issue notification
+# integration) rather than teaching this workflow to speak Slack.
+#
+# STATED NON-COVERAGE (read before assuming this workflow covers more than it
+# does):
+#   1. Consumer-side failures behind a green producer run. A run counts as
+#      "delivered" here because it reached ENQUEUE time (the SQS
+#      send-message call in leaderboard-metrics.yml) — that is never
+#      evidence the metric was actually SCORED downstream. That failure class
+#      (measured instance: ENG-5775) needs a queue-side/consumer-side alarm,
+#      named as option 2 on ENG-5689. This workflow does not attempt it.
+#   2. A repo that never onboarded EITHER the metrics caller OR this alarm
+#      stays completely invisible to both — that is a repo-onboarding
+#      control (a fleet-wide inventory check), not this workflow's job. This
+#      workflow can only speak for repos that already call it.
+#
+# HEAD-SHA JOIN CAVEAT: "did a caller run fire for this merge" is joined on
+# head SHA, not PR number. Two PRs that happen to share a head SHA (e.g. a
+# fast-forward merge, or a PR re-opened against the same commit) are BOTH
+# counted as "fired" if any run exists for that SHA, even if only one of them
+# actually triggered it. Accepted at this alarm's 7-day scheduled-check scope
+# — the cost of a false negative here is bounded by the next scheduled run.
+name: Leaderboard Metrics Alarm (Callable)
+
+on:
+  workflow_call:
+    inputs:
+      metrics-workflow:
+        description: "File name of THIS repo's metrics caller workflow to audit (e.g. leaderboard-metrics.yml or leaderboard-metrics-caller.yml)."
+        required: false
+        type: string
+        default: "leaderboard-metrics.yml"
+
+      window-days:
+        description: "How many days back to look for caller runs and merged PRs."
+        required: false
+        type: number
+        default: 7
+
+      grace-hours:
+        description: "Skip PRs merged less than this long ago — their caller run and the search index may still be lagging."
+        required: false
+        type: number
+        default: 3
+
+      alarm-label:
+        description: "Label identifying the alarm issue this workflow files/updates."
+        required: false
+        type: string
+        default: "leaderboard-alarm"
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner as the first step."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' (observe + report) or 'block' (deny by default)."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  alarm:
+    name: Leaderboard metrics delivery check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      pull-requests: read
+      issues: write
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      WF: ${{ inputs.metrics-workflow }}
+      WINDOW_DAYS: ${{ inputs.window-days }}
+      GRACE_HOURS: ${{ inputs.grace-hours }}
+      ALARM_LABEL: ${{ inputs.alarm-label }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      # No checkout: this is pure GitHub API work (gh + jq), per the ticket's
+      # "own GITHUB_TOKEN, no new secrets" signal design.
+      - name: Check leaderboard metrics delivery
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SINCE="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)"
+          SINCE_DATE="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%d)"
+          GRACE_CUTOFF="$(date -u -d "${GRACE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+          NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # --- Step 2: list runs of the audited caller workflow -------------
+          RUNS_RAW="$(mktemp)"
+          ERR_LOG="$(mktemp)"
+          WORKFLOW_MISSING=false
+          if ! gh api "repos/${REPO}/actions/workflows/${WF}/runs?created=>=${SINCE}&per_page=100" \
+               --paginate --jq '[.workflow_runs[] | {head_sha, conclusion, html_url, created_at, run_number}]' \
+               >"$RUNS_RAW" 2>"$ERR_LOG"; then
+            if grep -q "HTTP 404" "$ERR_LOG"; then
+              # The audited workflow doesn't exist in this repo at all — the
+              # highest-severity anomaly this check can report. Do not crash.
+              WORKFLOW_MISSING=true
+              : >"$RUNS_RAW"
+            else
+              echo "::error::gh api call for workflow runs failed unexpectedly:" >&2
+              cat "$ERR_LOG" >&2
+              exit 1
+            fi
+          fi
+          RUNS_JSON="[]"
+          if [ -s "$RUNS_RAW" ]; then
+            RUNS_JSON="$(jq -s 'add' "$RUNS_RAW")"
+          fi
+          RUNS_COUNT="$(printf '%s' "$RUNS_JSON" | jq 'length')"
+
+          # --- Step 3: BAD RUNS ---------------------------------------------
+          BAD_RUNS_JSON="$(printf '%s' "$RUNS_JSON" | jq -c \
+            '[.[] | select(.conclusion as $c | ["failure","startup_failure","timed_out","action_required","cancelled"] | index($c) != null)]')"
+          BAD_RUNS_COUNT="$(printf '%s' "$BAD_RUNS_JSON" | jq 'length')"
+
+          # --- Step 4: MISSING RUNS — merged PRs with no caller run --------
+          SEARCH_RAW="$(mktemp)"
+          gh api "search/issues?q=repo:${REPO}+is:pr+is:merged+merged:>=${SINCE_DATE}&per_page=100" \
+            --paginate --jq '{incomplete_results, total_count, numbers: [.items[].number]}' \
+            >"$SEARCH_RAW"
+          SEARCH_JSON="$(jq -s '.' "$SEARCH_RAW")"
+          INCOMPLETE="$(printf '%s' "$SEARCH_JSON" | jq -r 'any(.[]; .incomplete_results == true)')"
+          TOTAL_COUNT="$(printf '%s' "$SEARCH_JSON" | jq -r '[.[].total_count] | max // 0')"
+          PR_NUMBERS="$(printf '%s' "$SEARCH_JSON" | jq -c '[.[].numbers[]] | unique')"
+
+          TRUNCATED=false
+          if [ "$INCOMPLETE" = "true" ] || [ "$TOTAL_COUNT" -ge 1000 ]; then
+            TRUNCATED=true
+          fi
+
+          MISSING_JSON="[]"
+          CHECKED_PR_COUNT=0
+          for num in $(printf '%s' "$PR_NUMBERS" | jq -r '.[]'); do
+            PR_DATA="$(gh api "repos/${REPO}/pulls/${num}" \
+              --jq '{number: .number, html_url: .html_url, head_sha: .head.sha, merged_at: .merged_at}')"
+            MERGED_AT="$(printf '%s' "$PR_DATA" | jq -r '.merged_at')"
+            # Skip PRs merged more recently than the grace cutoff: their
+            # caller run and the search index may still be lagging.
+            if [[ "$MERGED_AT" > "$GRACE_CUTOFF" ]]; then
+              continue
+            fi
+            CHECKED_PR_COUNT=$((CHECKED_PR_COUNT + 1))
+            HEAD_SHA="$(printf '%s' "$PR_DATA" | jq -r '.head_sha')"
+            # Fired = ANY run exists for this head SHA, any conclusion
+            # (including in-progress/null) — see head-SHA join caveat above.
+            HAS_RUN="$(printf '%s' "$RUNS_JSON" | jq --arg sha "$HEAD_SHA" 'any(.[]; .head_sha == $sha)')"
+            if [ "$HAS_RUN" != "true" ]; then
+              RECORD="$(printf '%s' "$PR_DATA" | jq -c '{number, html_url}')"
+              MISSING_JSON="$(printf '%s' "$MISSING_JSON" | jq --argjson pr "$RECORD" '. + [$pr]')"
+            fi
+          done
+          MISSING_RUNS_COUNT="$(printf '%s' "$MISSING_JSON" | jq 'length')"
+
+          ANOMALIES=false
+          if [ "$WORKFLOW_MISSING" = "true" ] || [ "$BAD_RUNS_COUNT" -gt 0 ] || [ "$MISSING_RUNS_COUNT" -gt 0 ]; then
+            ANOMALIES=true
+          fi
+
+          # --- Step 5: alerting (issue is the alert; the run exits 0) ------
+          LABEL_ERR="$(mktemp)"
+          if ! gh api -X POST "repos/${REPO}/labels" \
+               -f name="${ALARM_LABEL}" -f color="d73a4a" \
+               -f description="leaderboard metrics delivery alarm" \
+               >/dev/null 2>"$LABEL_ERR"; then
+            if ! grep -q "HTTP 422" "$LABEL_ERR"; then
+              echo "::warning::Could not ensure alarm label exists (non-422 error):"
+              cat "$LABEL_ERR" >&2
+            fi
+          fi
+
+          OPEN_ISSUE_NUMBER="$(gh api "repos/${REPO}/issues?labels=${ALARM_LABEL}&state=open&per_page=100" \
+            --jq '[.[] | select(.pull_request == null)] | .[0].number // empty')"
+
+          ACTION="none (window clean, no existing alarm issue)"
+          if [ "$ANOMALIES" = "true" ]; then
+            BODY_FILE="$(mktemp)"
+            {
+              echo "**Window:** last ${WINDOW_DAYS} day(s) (since ${SINCE})"
+              echo "**Checked:** ${RUNS_COUNT} run(s) of \`${WF}\`, ${CHECKED_PR_COUNT} merged PR(s) (grace: ${GRACE_HOURS}h)"
+              echo
+              if [ "$WORKFLOW_MISSING" = "true" ]; then
+                echo "### Metrics caller workflow not found"
+                echo
+                echo "\`${WF}\` does not exist in this repo (404 from the workflow-runs API). This repo has the alarm but not the metrics caller — the highest-severity anomaly this check can report."
+                echo
+              fi
+              if [ "$BAD_RUNS_COUNT" -gt 0 ]; then
+                echo "### Bad runs (${BAD_RUNS_COUNT})"
+                echo
+                printf '%s' "$BAD_RUNS_JSON" | jq -r '.[] | "- \(.conclusion // "in_progress"): \(.html_url) (created \(.created_at))"'
+                echo
+              fi
+              if [ "$MISSING_RUNS_COUNT" -gt 0 ]; then
+                echo "### Missing runs (${MISSING_RUNS_COUNT})"
+                echo
+                echo "Merged PRs with no caller run for their head SHA (PR number + URL only — deliberately not PR titles, which are third-party-controlled text):"
+                echo
+                printf '%s' "$MISSING_JSON" | jq -r '.[] | "- PR #\(.number): \(.html_url)"'
+                echo
+              fi
+              echo "### Evidence ceiling"
+              echo
+              echo "This check confirms the caller workflow RAN for a given head SHA — a successful run means the metric reached ENQUEUE time (SQS), never that it was scored downstream. Consumer-side failures behind a green producer run are not covered (measured instance: ENG-5775); that class needs the queue-side alarm named as option 2 on ENG-5689."
+              echo
+              if [ "$TRUNCATED" = "true" ]; then
+                echo "### Window truncated — results incomplete"
+                echo
+                echo "The merged-PR search reported \`incomplete_results\` or hit the 1000-result search cap. Missing-run counts above may undercount."
+                echo
+              fi
+              echo "**Repair path:** leaderboard-backfill (ENG-5688); replay-list derivation: ENG-5973."
+            } >"$BODY_FILE"
+
+            if [ -n "$OPEN_ISSUE_NUMBER" ]; then
+              gh api "repos/${REPO}/issues/${OPEN_ISSUE_NUMBER}/comments" -F body=@"$BODY_FILE" >/dev/null
+              ACTION="commented on existing issue #${OPEN_ISSUE_NUMBER}"
+            else
+              NEW_ISSUE_NUMBER="$(gh api "repos/${REPO}/issues" \
+                -f title="Leaderboard metrics delivery alarm: ${REPO}" \
+                -F body=@"$BODY_FILE" \
+                -f "labels[]=${ALARM_LABEL}" \
+                --jq '.number')"
+              ACTION="created issue #${NEW_ISSUE_NUMBER}"
+            fi
+          else
+            if [ -n "$OPEN_ISSUE_NUMBER" ]; then
+              gh api "repos/${REPO}/issues/${OPEN_ISSUE_NUMBER}/comments" \
+                -f body="window clean as of ${NOW} (window: ${WINDOW_DAYS} days)" >/dev/null
+              gh api -X PATCH "repos/${REPO}/issues/${OPEN_ISSUE_NUMBER}" -f state="closed" >/dev/null
+              ACTION="closed issue #${OPEN_ISSUE_NUMBER} (window clean)"
+            fi
+          fi
+
+          # --- Step 6: step summary (always, regardless of anomalies) ------
+          {
+            echo "## Leaderboard metrics delivery check — ${REPO}"
+            echo
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Workflow runs checked (\`${WF}\`) | ${RUNS_COUNT} |"
+            echo "| Merged PRs checked (post-grace) | ${CHECKED_PR_COUNT} |"
+            echo "| Bad runs | ${BAD_RUNS_COUNT} |"
+            echo "| Missing-run PRs | ${MISSING_RUNS_COUNT} |"
+            echo "| Metrics caller workflow found | $([ "$WORKFLOW_MISSING" = "true" ] && echo "no — 404" || echo "yes") |"
+            echo "| Window truncated | ${TRUNCATED} |"
+            echo "| Alerting action | ${ACTION} |"
+          } >>"$GITHUB_STEP_SUMMARY"
