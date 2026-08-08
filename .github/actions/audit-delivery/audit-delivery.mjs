@@ -1929,9 +1929,46 @@ export function makeClient(token) {
       }
       return n;
     }
-    // No `rel="last"` means the first page is the only page: 0 or 1 rows.
+    // No `rel="last"` means the first page is the only page: 0 or 1 rows. That
+    // is GitHub's documented contract (verified live: a 147-row collection at
+    // per_page=1 carries rel="last"; an empty one carries no Link at all) — but
+    // the Link header is response data like any other, and until round 24 the
+    // ABSENT case was the one shape this probe trusted bare while the malformed
+    // case refused (codex, round 23). If an intermediary strips Link from every
+    // response, this probe reads a multi-page list as 1 row AND the walk — which
+    // advances on rel="next" — ends after its first page, so the before/after
+    // and shortfall brackets around the closed-PR walk both pass because both
+    // channels shrank together (100 fetched >= 1 counted). A walk-side
+    // cross-check cannot close this: the union of two walks legitimately holds
+    // more rows than the final count whenever a netted reopen races it, which is
+    // exactly the churn the union exists to survive. So the claim is verified
+    // HERE, where it is made: a second probe at per_page=2 must agree that the
+    // collection ends at one row. A second row coming back — or the re-probe
+    // carrying the Link header the first probe lacked — proves the single-page
+    // claim false, and the count refuses rather than deflate. The residual: an
+    // intermediary that also truncates BODIES to match the deflated count is
+    // indistinguishable from a truthful small repo by any client — that is the
+    // transport-integrity assumption (TLS to the API origin), not a gap a
+    // consistency probe can close.
     const body = await res.json();
     if (!Array.isArray(body)) throw new Error(`count probe for ${path} did not return a list`);
+    if (body.length === 0) return 0;
+    const res2 = await request(`${path}${path.includes('?') ? '&' : '?'}per_page=2`);
+    if (!res2.ok) throw new Error(`${res2.status} on the count verification probe for ${path}`);
+    const body2 = await res2.json();
+    if (!Array.isArray(body2)) {
+      throw new Error(`count verification probe for ${path} did not return a list`);
+    }
+    if (body2.length > 1 || res2.headers.get('link')) {
+      throw new Error(
+        `the count probe for ${path} returned no Link header — the single-page signal — but a ` +
+          `verification probe at per_page=2 returned ${body2.length} rows` +
+          `${res2.headers.get('link') ? ' and a Link header' : ''}: the first probe's pagination ` +
+          'metadata was dropped or corrupted in transit, so any count derived from it would be ' +
+          'DEFLATED and the walks it brackets silently truncated. Refusing rather than measuring ' +
+          'with a broken instrument.',
+      );
+    }
     return body.length;
   }
 

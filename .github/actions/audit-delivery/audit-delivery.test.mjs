@@ -6660,14 +6660,25 @@ test('ghCount: reads the row count from rel="last" at per_page=1, and fails clos
   assert.match(seen[0], /state=closed/, 'and must not drop the query it was handed');
   assert.match(seen[0], /state=closed&per_page=1/, 'an existing query joins with &, not ?');
 
-  // No rel="last" means a single page, so the row count is the body length. Not
-  // "0" and not "unknown": one page of 7 rows is a list of 7.
+  // No rel="last" means a single page — which at per_page=1 is 0 or 1 rows —
+  // and since round 24 the 1-row claim is VERIFIED with a per_page=2 re-probe
+  // before it is believed, because an absent Link is also what a stripped
+  // header looks like. The consistent case returns the count and costs one
+  // extra request.
+  const singleSeen = [];
   const single = await withFetch(
-    async () => paged([1, 2, 3, 4, 5, 6, 7]),
+    async (url) => {
+      singleSeen.push(String(url));
+      return paged([{ number: 9 }]);
+    },
     () => makeClient('t').ghCount('/repos/o/r/pulls'),
   );
-  assert.equal(single, 7);
-  // A path with no query joins with `?`.
+  assert.equal(single, 1);
+  assert.equal(singleSeen.length, 2, 'an absent Link is VERIFIED, never trusted bare');
+  assert.match(singleSeen[1], /[?&]per_page=2(&|$)/, 'the verification probe must pin per_page=2');
+  // A path with no query joins with `?`, and an EMPTY body needs no verification:
+  // a stripped Link cannot fake emptiness — the body is the data channel, and a
+  // 250-row list at per_page=1 returns a row even with every header removed.
   const noQuery = [];
   await withFetch(
     async (url) => {
@@ -6677,6 +6688,7 @@ test('ghCount: reads the row count from rel="last" at per_page=1, and fails clos
     () => makeClient('t').ghCount('/repos/o/r/pulls'),
   );
   assert.match(noQuery[0], /\/pulls\?per_page=1$/);
+  assert.equal(noQuery.length, 1, 'zero rows resolve on the first probe alone');
 
   // A caller that sets per_page itself gets a throw, BEFORE any request. The
   // alternative is the silent one: two `per_page=100` probes compare page counts,
@@ -6775,6 +6787,54 @@ test('auditRepo: CONTROL — a walk that REACHED the mid-walk insertion is not r
   );
   assert.equal(res.repo, 'guard');
   assert.equal(i, 2);
+});
+
+test('ghCount: a DEFLATED count channel is refused, not returned', async () => {
+  // The codex round-23 finding. An absent Link header is GitHub's documented
+  // single-page signal, but it is also exactly what a Link header STRIPPED by an
+  // intermediary looks like — and if every response loses it, the per_page=1
+  // probe reads a multi-page list as 1 row while the walk (which advances on
+  // rel="next") ends after its first page. Both brackets around the closed-PR
+  // walk then pass because both channels shrank together: 1 -> 1 is no shrink,
+  // and 100 fetched >= 1 counted is no shortfall — a repo with hundreds of
+  // closed PRs reports clean with all but 100 never audited.
+  //
+  // The claim is therefore verified where it is MADE. A walk-side cross-check
+  // (fetched > closedAfter) was tried first and refused the union-recovery
+  // fixture below: the union of two walks legitimately holds more rows than the
+  // final count whenever a netted reopen races it — the exact churn the union
+  // exists to survive — so any read-more-than-counted predicate over the walk
+  // conflates corruption with tolerated churn. The per_page=2 re-probe does
+  // not: a second row coming back contradicts "the collection ends at one row"
+  // under ANY churn, because rows cannot be read out of a 1-row page.
+  await withFetch(
+    async (url) =>
+      /[?&]per_page=2(&|$)/.test(String(url))
+        ? paged([{ number: 1 }, { number: 2 }])
+        : paged([{ number: 1 }]),
+    () =>
+      assert.rejects(
+        () => makeClient('t').ghCount('/repos/o/r/pulls?state=closed'),
+        /verification probe at per_page=2 returned 2 rows.*DEFLATED/s,
+      ),
+  );
+  // The transient shape: the re-probe carries the Link header the first probe
+  // lacked. The count COULD be recomputed from it, but a channel that drops
+  // headers intermittently is a broken instrument, not a source of truth — the
+  // walks depend on the same header arriving on every page.
+  await withFetch(
+    async (url) =>
+      /[?&]per_page=2(&|$)/.test(String(url))
+        ? paged([{ number: 1 }], {
+            link: '<https://api.github.com/x?per_page=2&page=125>; rel="last"',
+          })
+        : paged([{ number: 1 }]),
+    () =>
+      assert.rejects(
+        () => makeClient('t').ghCount('/repos/o/r/pulls?state=closed'),
+        /returned 1 rows and a Link header/,
+      ),
+  );
 });
 
 test('auditRepo: CONTROL — a COMPLETE closed-PR walk passes both bracket arms', async () => {
