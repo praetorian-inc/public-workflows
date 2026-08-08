@@ -28,6 +28,14 @@ inputs:
       Token with contents:read, actions:read AND pull-requests:read on the
       audited repo. All three are required; pull-requests:read is what the
       merged-PR listing needs, and omitting it fails the audit at 403.
+      Request BUDGET, not just scopes: the audit issues roughly one Jobs API
+      request per delivered record on top of the run listings, onboarding
+      probes, and two closed-PR walks — guard's 90-day measurement held 1,054
+      records — while a plain Actions GITHUB_TOKEN is capped at 1,000 REST
+      requests/hour/repository. A window wide enough to exceed that budget
+      exhausts the token and the audit exits non-zero = UNKNOWN (loud, never a
+      false clean). For wide windows pass a PAT (5,000/hour) or split the
+      window; the default 30-day window fits the Actions token.
     required: true
   repo:
     description: "owner/repo to audit"

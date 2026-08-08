@@ -219,7 +219,9 @@ test('parseArgs: rejects a --since in the future rather than reporting a clean e
 });
 
 test('parseArgs: rejects --days=0, negatives, and non-integers', () => {
-  for (const bad of ['0', '-1', '1.5', 'abc', '']) {
+  // '' left this list in round 22: it is still rejected, but by the empty-value
+  // guard with its own message — see the dedicated test beside --since/--until.
+  for (const bad of ['0', '-1', '1.5', 'abc']) {
     assert.throws(
       () => parseArgs([`--days=${bad}`], NOW),
       /--days must be a positive integer/,
@@ -1842,7 +1844,7 @@ test('assertReadable: a null body is treated as unreadable, not as readable', ()
 const FLEET_CFG = {
   owner: 'praetorian-inc',
   callerPath: '.github/workflows/leaderboard-metrics.yml',
-  reusable: 'public-workflows/.github/workflows/leaderboard-metrics.yml@',
+  reusable: 'praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@',
 };
 
 // Mirrors the two endpoints resolveFleet reaches through, keyed by repo name so a
@@ -4682,6 +4684,17 @@ test('parseArgs: --until= with an empty value is rejected, not silently unbounde
   );
 });
 
+test('parseArgs: --days= with an empty value is rejected by NAME, not as a malformed integer', () => {
+  // Unlike the four sibling flags, '' was never a silent fallback here — it
+  // already failed the integer check — so this pins the MESSAGE only (round 22,
+  // gemini): the error must name the actual mistake, an unset shell variable,
+  // not report `got ` as if the caller mistyped a number.
+  assert.throws(
+    () => parseArgs(['--repo=praetorian-inc/guard', '--days=']),
+    /--days was passed with an empty value/,
+  );
+});
+
 test('parseArgs: CONTROL — real --since/--until values still parse after the empty guards', () => {
   // Without this, both tests above stay green against a guard that rejects
   // every value of either flag, which would break the rename remediation the
@@ -5177,6 +5190,32 @@ test('hasCaller: CONTROL — a real `uses:` after a run: block IS still a caller
   assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), true);
 });
 
+test('hasCaller: a FORK of the reusable under another owner is NOT the reusable', async () => {
+  // Round 22 (codex): the owner-less needle, matched with includes(), admitted
+  // this shape as an official caller. A fork's deliveries never reach the prod
+  // queue, so the false fleet member classifies every merged PR never_fired and
+  // the report prints a prod replay list — the same harm, through the same
+  // over-detect direction, as the commented-template case above.
+  const cfg = callerCfg();
+  const text = [
+    'jobs:',
+    '  m:',
+    '    uses: attacker/public-workflows/.github/workflows/leaderboard-metrics.yml@abc123',
+    '',
+  ].join('\n');
+  assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), false);
+});
+
+test('hasCaller: the official ref embedded in another repo PATH is not a caller — the match anchors at the value START', async () => {
+  // The half-fix trap: making the needle owner-ful while keeping includes()
+  // closes the fork case above but still matches the full official string
+  // appearing as a path SEGMENT of some other owner/repo. Only anchoring at the
+  // value's first byte closes both, so this row exists to fail that half-fix.
+  const cfg = callerCfg();
+  const text = ['jobs:', '  m:', `    uses: evil/repo/${cfg.reusable}abc123`, ''].join('\n');
+  assert.equal(await hasCaller(contentClient(text), cfg, 'guard'), false);
+});
+
 test('yamlStructureLines: block content is blanked, structure and line count survive', () => {
   // Blanked rather than dropped, so a line number still means something to
   // anyone debugging a probe result; and asserted directly because the matcher
@@ -5455,6 +5494,20 @@ test('parseArgs: an owner ONE character over the GitHub limit is rejected', () =
   // The bound itself, from the side that proves it is a bound and not a typo. The
   // 39-character case above is accepted, so this pair pins the exact edge.
   assert.throws(() => parseArgs(['--repo', `${'x'.repeat(40)}/n`], NOW), /must be a GitHub login/);
+});
+
+test('parseArgs: the length bound holds for HYPHENATED logins, not just solid ones', () => {
+  // Round 22 (gemini): the round-20 pattern bounded ITERATIONS of a group that
+  // matches one OR TWO characters, so the solid 40-x rejection above passed while
+  // hyphenated shapes sailed to 77 characters. The minimal counterexample is 41
+  // characters of perfectly legal single-hyphen shape; its 39-character sibling
+  // proves the fix rejects it for LENGTH, not for hyphens.
+  const over = `a${'-b'.repeat(20)}`;
+  assert.equal(over.length, 41, 'counterexample must be over the limit by construction');
+  assert.throws(() => parseArgs(['--repo', `${over}/n`], NOW), /must be a GitHub login/);
+  const atLimit = `a${'-b'.repeat(19)}`;
+  assert.equal(atLimit.length, 39);
+  assert.equal(parseArgs(['--repo', `${atLimit}/n`], NOW).owner, atLimit);
 });
 
 for (const [arg, why] of REJECTED_REPO_ARGS) {

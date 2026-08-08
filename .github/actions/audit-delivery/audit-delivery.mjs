@@ -56,7 +56,14 @@ const DEFAULTS = {
   until: null, // YYYY-MM-DD upper bound, exclusive; null = up to now
   days: '30',
   callerPath: '.github/workflows/leaderboard-metrics.yml',
-  reusable: 'public-workflows/.github/workflows/leaderboard-metrics.yml@',
+  // Owner-FUL, deliberately: a `uses:` value is `owner/repo/path@ref`, so the
+  // owner is part of the reusable's identity, not a prefix to tolerate. Round 22
+  // (codex): the owner-less spelling, matched with includes(), admitted
+  // `attacker/public-workflows/.../leaderboard-metrics.yml@main` as an official
+  // caller — a fork of the reusable is NOT the reusable, its deliveries do not
+  // reach the prod queue, and the false fleet member ends in a fabricated prod
+  // replay list. hasCaller anchors this string at the START of the value.
+  reusable: 'praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@',
   backfillCaller: 'leaderboard-backfill-caller.yml',
   json: null,
   markdown: null,
@@ -66,6 +73,18 @@ const DEFAULTS = {
 // ~880 calls, so anything short enough to bound total runtime would abort
 // healthy requests. 30s is well past GitHub's own p99 for these endpoints while
 // still turning a hung socket into a retry rather than a 6-hour job timeout.
+//
+// The audit-wide budget that DOES exist is the token's, not this file's (round
+// 22, codex-connector): a plain Actions GITHUB_TOKEN is capped at 1,000 REST
+// requests/hour/repository, and the per-record verification is one Jobs call
+// per delivered record — 1,054 records in guard's 90-day measurement — so a
+// window wide enough to hold >~900 records cannot complete on that token. The
+// failure direction is the designed one, loud: retryDelayMs caps a primary-
+// limit wait at 60s, the retries exhaust, and the run exits non-zero =
+// UNKNOWN — never a false clean. Deliberately not repaired with batching or
+// sampling machinery: the Jobs call per record is the verification itself, and
+// the remedy is operational — run wide windows under a PAT (5,000/hour) or
+// split the window. Documented at the `github-token` input in action.yml.
 const REQUEST_TIMEOUT_MS = 30000;
 
 const DAY = 86400000;
@@ -198,6 +217,16 @@ export function parseArgs(argv, now = Date.now()) {
   if (out.until === '') {
     throw new Error(
       '--until was passed with an empty value — refusing to silently drop the upper bound',
+    );
+  }
+  // Unlike the four flags above, '' was never a silent fallback here — it fails
+  // the integer check below regardless. This exists for message parity (round
+  // 22, gemini): the sibling flags name the actual mistake, a caller
+  // interpolating an unset variable, and `--days must be a positive integer,
+  // got ` names a typo instead.
+  if (out.days === '') {
+    throw new Error(
+      '--days was passed with an empty value — omit the flag for the 30-day default rather than interpolating an unset variable',
     );
   }
 
@@ -391,10 +420,14 @@ export function parseArgs(argv, now = Date.now()) {
   // accepted `foo-` and `a--b`, and while neither is a traversal risk (a hyphen is
   // not path-active, and the request would simply 404), the error message one line
   // down promises "must be a GitHub login" and a guard should be as strict as the
-  // contract it states. Written as one pattern rather than a lookahead so the rule
-  // is readable in the direction it is enforced: an alphanumeric, then any number
-  // of hyphen-separated alphanumeric groups, bounded to 39 characters overall.
-  const OWNER = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
+  // contract it states. Round 22 (gemini) caught the length half of that contract
+  // unenforced: the round-20 pattern bounded ITERATIONS, not characters — each
+  // `(?:-?[A-Za-z0-9])` matches one or two characters, so `{0,38}` admitted
+  // logins up to 77 characters while the comment here claimed 39. The lookahead
+  // now carries the length rule; the body keeps the readable shape (an
+  // alphanumeric, then hyphen-separated alphanumeric groups) and is deliberately
+  // unbounded, because bounding both is how the two rules got conflated.
+  const OWNER = /^(?=.{1,39}$)[A-Za-z0-9](?:-?[A-Za-z0-9])*$/;
   if (!OWNER.test(out.owner)) {
     throw new Error(
       `owner must be a GitHub login (letters, digits, single hyphens between them; ` +
@@ -2338,8 +2371,18 @@ export async function hasCaller(client, cfg, repo) {
   // `# replaces <reusable>`; and the block-scalar pass is needed because shell text
   // inside a `run: |` is neither commented nor a call — see yamlStructureLines for
   // why that is the same defect class and not a second special case.
+  // startsWith, not includes (round 22, codex): a `uses:` value is
+  // `owner/repo/path@ref`, so the official reference begins at the value's
+  // first byte. includes() with an owner-less needle admitted
+  // `attacker/public-workflows/.../leaderboard-metrics.yml@main` — a fork of
+  // the reusable, whose deliveries never reach the prod queue — and even with
+  // the owner-ful needle it would still match the needle embedded in another
+  // repo's PATH segment (`evil/repo/praetorian-inc/public-workflows/...`).
+  // Anchoring at the start closes both: same over-detect class, same harm, as
+  // the commented-template and quoted-key findings above — a false fleet
+  // member ends in a fabricated prod replay list.
   return yamlStructureLines(b64(f.content)).some((l) =>
-    usesValues(stripComment(l)).some((v) => v.includes(cfg.reusable)),
+    usesValues(stripComment(l)).some((v) => v.startsWith(cfg.reusable)),
   );
 }
 
