@@ -71,6 +71,7 @@ import {
   needsPayloadProbe,
   assertActionsReadable,
   annotateAvailability,
+  annotateSelfProvenance,
   undecidedCaveats,
   RETRY_STATUS,
   API_CAP,
@@ -1894,6 +1895,29 @@ test('buildReport: fleetMeta exclusions and flags serialize into discovery and t
   assert.equal('archived' in bare.discovery, false);
 });
 
+test('buildReport: self-audit provenance reaches discovery with NO fleetMeta at all', () => {
+  // Self-audit never runs resolveFleet, so buildReport must derive these lists
+  // from the result rows (where annotateSelfProvenance deposits the flags) —
+  // a fleetMeta-only derivation silently drops them in this mode.
+  const flagged = repoResult('public-workflows', { merged: 2, failed: [rec(4), rec(5)] });
+  flagged.caller_deleted = true;
+  flagged.repo_archived = true;
+
+  const report = buildReport(
+    [flagged],
+    { since: '2026-07-05', selfAudit: true, repos: ['public-workflows'] },
+    1,
+  );
+
+  assert.equal(report.discovery.source, 'self');
+  assert.deepEqual(report.discovery.caller_deleted, ['public-workflows']);
+  assert.deepEqual(report.discovery.archived, ['public-workflows']);
+  // And the gap row carries both flags, same as fleet mode.
+  const row = report.repos_with_gaps.find((g) => g.repo === 'public-workflows');
+  assert.equal(row.caller_deleted, true);
+  assert.equal(row.repo_archived, true);
+});
+
 test('buildReport: a pre-onboarding-ONLY repo is not a repo with gaps', () => {
   // This is the difference between a useful detector and one that cries wolf.
   // guard-like repo: everything undelivered is pre-onboarding → no alert.
@@ -2099,6 +2123,99 @@ test('annotateAvailability: a PRESENT backfill caller leaves the flag absent', a
   const results = [repoResult('caeruleus', { merged: 1, failed: [rec(4)] })];
   await annotateAvailability(client, { ...AVAIL_CFG, selfAudit: false }, results);
   assert.ok(!('backfill_caller_missing' in results[0]));
+});
+
+// ── annotateSelfProvenance ───────────────────────────────────────────────────
+//
+// Self-audit bypasses resolveFleet, so these flags have their own derivation
+// path — same stub-client discipline as above: the probe SELECTION and the
+// flag contract (set only when proven, never false) are the properties under
+// test.
+const selfClient = ({ history = [] } = {}) => {
+  const urls = [];
+  return {
+    urls,
+    gh: async (url) => {
+      urls.push(url);
+      if (url.includes('/commits')) return history;
+      throw new Error(`annotateSelfProvenance asked an unexpected URL: ${url}`);
+    },
+  };
+};
+
+test('annotateSelfProvenance: archived metadata flags the row; unarchived leaves it ABSENT', async () => {
+  const client = selfClient();
+  const results = [repoResult('public-workflows', { merged: 1, failed: [rec(3)] })];
+  await annotateSelfProvenance(
+    client,
+    AVAIL_CFG,
+    results,
+    new Map([['public-workflows', { archived: true, size: 42 }]]),
+  );
+  assert.equal(results[0].repo_archived, true);
+
+  const r2 = [repoResult('public-workflows', { merged: 1, failed: [rec(3)] })];
+  await annotateSelfProvenance(
+    selfClient(),
+    AVAIL_CFG,
+    r2,
+    new Map([['public-workflows', { archived: false, size: 42 }]]),
+  );
+  assert.ok(!('repo_archived' in r2[0]), 'unarchived must leave the flag ABSENT, not false');
+});
+
+test('annotateSelfProvenance: a caller absent at HEAD but present in history is DELETED, not never-onboarded', async () => {
+  const client = selfClient({ history: [{ sha: 'caffe1ed' }] });
+  const results = [repoResult('public-workflows', { merged: 2, never_fired: [rec(1), rec(2)] })];
+  results[0].has_caller = false;
+  await annotateSelfProvenance(
+    client,
+    AVAIL_CFG,
+    results,
+    new Map([['public-workflows', { archived: false, size: 42 }]]),
+  );
+  assert.equal(results[0].caller_deleted, true);
+  assert.deepEqual(client.urls, [
+    '/repos/praetorian-inc/public-workflows/commits?path=.github%2Fworkflows%2Fleaderboard-metrics-caller.yml&per_page=1',
+  ]);
+
+  // Empty history: the caller never existed — never-onboarded, flag ABSENT.
+  const r2 = [repoResult('public-workflows', { merged: 2, never_fired: [rec(1), rec(2)] })];
+  r2[0].has_caller = false;
+  await annotateSelfProvenance(
+    selfClient({ history: [] }),
+    AVAIL_CFG,
+    r2,
+    new Map([['public-workflows', { archived: false, size: 42 }]]),
+  );
+  assert.ok(!('caller_deleted' in r2[0]));
+});
+
+test('annotateSelfProvenance: probe selection — present caller and proven-empty repos are never history-probed', async () => {
+  // A present caller answers the question already; an empty repo would answer
+  // the probe with a 409 the client rightly throws on (the whole reason the
+  // size guard exists), so the probe must not be asked at all.
+  const client = selfClient({ history: [{ sha: 'caffe1ed' }] });
+  const present = [repoResult('public-workflows', { merged: 1, delivered: [rec(1)] })];
+  await annotateSelfProvenance(
+    client,
+    AVAIL_CFG,
+    present,
+    new Map([['public-workflows', { archived: false, size: 42 }]]),
+  );
+  assert.deepEqual(client.urls, [], 'has_caller: true must not probe');
+
+  const emptyClient = selfClient();
+  const empty = [repoResult('public-workflows', { merged: 0 })];
+  empty[0].has_caller = false;
+  await annotateSelfProvenance(
+    emptyClient,
+    AVAIL_CFG,
+    empty,
+    new Map([['public-workflows', { archived: false, size: 0 }]]),
+  );
+  assert.deepEqual(emptyClient.urls, [], 'size 0 is the 409 trap — no probe');
+  assert.ok(!('caller_deleted' in empty[0]));
 });
 
 test('buildReport: an in_flight-ONLY repo is not a repo with gaps', () => {

@@ -3600,8 +3600,18 @@ export function buildReport(results, cfg, apiCalls, dupes = 0, fleetMeta = null)
       ...(fleetMeta?.excludedDisabled?.length
         ? { excluded_disabled: fleetMeta.excludedDisabled }
         : {}),
-      ...(fleetMeta?.callerDeleted?.length ? { caller_deleted: fleetMeta.callerDeleted } : {}),
-      ...(fleetMeta?.archived?.length ? { archived: fleetMeta.archived } : {}),
+      // Derived from the RESULT rows, not from fleetMeta: the rows are the one
+      // place both modes deposit these flags (resolveFleet propagates onto them
+      // in fleet mode; main()'s self-audit block sets them directly), so
+      // deriving here keeps self-audit provenance from silently vanishing.
+      // `excluded_disabled` stays fleetMeta-only by construction — an excluded
+      // repo never becomes a result row.
+      ...(results.some((r) => r.caller_deleted)
+        ? { caller_deleted: results.filter((r) => r.caller_deleted).map((r) => r.repo) }
+        : {}),
+      ...(results.some((r) => r.repo_archived)
+        ? { archived: results.filter((r) => r.repo_archived).map((r) => r.repo) }
+        : {}),
     },
     api_calls: apiCalls,
     duplicate_rows: dupes,
@@ -3687,6 +3697,30 @@ export async function annotateAvailability(client, cfg, results) {
         `/repos/${cfg.owner}/${r.repo}/contents/.github/workflows/${encodeURIComponent(cfg.backfillCaller)}`,
       );
       if (!probe || probe.__missing) r.backfill_caller_missing = true;
+    }
+  }
+  return results;
+}
+
+// Self-audit bypasses resolveFleet — the only fleetMeta populator — so the
+// `caller_deleted` / `repo_archived` provenance has to be derived here, from
+// the repo metadata main()'s readability loop already fetched. Without this, a
+// deleted-caller self-audit renders the "never onboarded" callout — the
+// OPPOSITE of the truth — and an archived one prints a replay command with no
+// dispatch-is-disabled caveat. Same flag contract as annotateAvailability
+// (set only when proven, never false), same probe and 409 guard as
+// resolveFleet: GET /commits on an empty repo answers 409, which the client
+// rightly throws on, so only proven-empty (`size === 0`) skips the probe —
+// an undefined size does NOT count as empty.
+export async function annotateSelfProvenance(client, cfg, results, repoMetaByName) {
+  for (const r of results) {
+    const meta = repoMetaByName.get(r.repo);
+    if (meta?.archived) r.repo_archived = true;
+    if (!r.has_caller && meta?.size !== 0) {
+      const hist = await client.gh(
+        `/repos/${cfg.owner}/${r.repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=1`,
+      );
+      if (Array.isArray(hist) && hist.length) r.caller_deleted = true;
     }
   }
   return results;
@@ -3809,8 +3843,12 @@ async function main() {
   // every endpoint answered 404. BOTH probes, because they cover different
   // grants and only one of them is implied by the other's success — see
   // assertActionsReadable.
+  // The metadata assertReadable already fetched is kept, not discarded: in
+  // self-audit mode it is the ONLY source of `archived` / `size`, because that
+  // mode bypasses resolveFleet (the fleetMeta populator) entirely.
+  const repoMetaByName = new Map();
   for (const repo of fleet) {
-    await assertReadable(client, cfg, repo);
+    repoMetaByName.set(repo, await assertReadable(client, cfg, repo));
     await assertActionsReadable(client, cfg, repo);
   }
 
@@ -3825,6 +3863,7 @@ async function main() {
     if (fleetMeta.callerDeleted?.includes(r.repo)) r.caller_deleted = true;
     if (fleetMeta.archived?.includes(r.repo)) r.repo_archived = true;
   }
+  if (cfg.selfAudit) await annotateSelfProvenance(client, cfg, results, repoMetaByName);
 
   // After the audit, before the report is built, so the flags ride both
   // channels (repos[] and the repos_with_gaps rows). Warnings surface in the
