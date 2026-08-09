@@ -93,7 +93,11 @@ jobs:
   alarm:
     name: Leaderboard metrics delivery check
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # 15m (up from 10m): the per-PR sequential `gh api` loop on a high-volume
+    # repo (~100 merged PRs/week) costs a few minutes. The sequential design
+    # stays (well under the 1,000 req/hr GITHUB_TOKEN budget) — this just
+    # keeps the timeout from becoming the failure mode.
+    timeout-minutes: 15
     permissions:
       actions: read
       pull-requests: read
@@ -124,6 +128,13 @@ jobs:
 
           SINCE="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)"
           SINCE_DATE="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%d)"
+          # Runs-fetch window carries a 1h skew buffer ahead of SINCE: a run
+          # fires at merge time, and the merged-PR search's SINCE_DATE (date-
+          # only, midnight) is coarser than SINCE (exact timestamp) — without
+          # this buffer, a PR merged between midnight and the exact SINCE
+          # cutoff can pass the per-PR loop's exact filter while its run
+          # falls just outside RUNS_JSON, reading as a false "missing run".
+          SINCE_RUNS="$(date -u -d "${WINDOW_DAYS} days ago - 1 hour" +%Y-%m-%dT%H:%M:%SZ)"
           GRACE_CUTOFF="$(date -u -d "${GRACE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -131,7 +142,7 @@ jobs:
           RUNS_RAW="$(mktemp)"
           ERR_LOG="$(mktemp)"
           WORKFLOW_MISSING=false
-          if ! gh api "repos/${REPO}/actions/workflows/${WF}/runs?created=>=${SINCE}&per_page=100" \
+          if ! gh api "repos/${REPO}/actions/workflows/${WF}/runs?created=>=${SINCE_RUNS}&per_page=100" \
                --paginate --jq '[.workflow_runs[] | {head_sha, conclusion, html_url, created_at, run_number}]' \
                >"$RUNS_RAW" 2>"$ERR_LOG"; then
             if grep -q "HTTP 404" "$ERR_LOG"; then
@@ -152,6 +163,11 @@ jobs:
           RUNS_COUNT="$(printf '%s' "$RUNS_JSON" | jq 'length')"
 
           # --- Step 3: BAD RUNS ---------------------------------------------
+          # `cancelled` stays in the bad-run set: a cancelled caller run means
+          # the metric was never enqueued — a real delivery gap the missing-
+          # runs check cannot catch (a run DOES exist for that SHA). The
+          # metrics callers carry no concurrency-cancel group, so a
+          # cancellation is a human action, not routine churn.
           BAD_RUNS_JSON="$(printf '%s' "$RUNS_JSON" | jq -c \
             '[.[] | select(.conclusion as $c | ["failure","startup_failure","timed_out","action_required","cancelled"] | index($c) != null)]')"
           BAD_RUNS_COUNT="$(printf '%s' "$BAD_RUNS_JSON" | jq 'length')"
@@ -177,6 +193,15 @@ jobs:
             PR_DATA="$(gh api "repos/${REPO}/pulls/${num}" \
               --jq '{number: .number, html_url: .html_url, head_sha: .head.sha, merged_at: .merged_at}')"
             MERGED_AT="$(printf '%s' "$PR_DATA" | jq -r '.merged_at')"
+            # Skip PRs merged before the exact window cutoff: SINCE_DATE (the
+            # search query) is date-only/midnight, coarser than SINCE (exact
+            # timestamp) — without this, a PR merged between midnight and the
+            # exact SINCE cutoff would be checked here despite being outside
+            # the intended window. SINCE_DATE stays as the coarse net; this
+            # is the exact filter.
+            if [[ "$MERGED_AT" < "$SINCE" ]]; then
+              continue
+            fi
             # Skip PRs merged more recently than the grace cutoff: their
             # caller run and the search index may still be lagging.
             if [[ "$MERGED_AT" > "$GRACE_CUTOFF" ]]; then
@@ -195,7 +220,7 @@ jobs:
           MISSING_RUNS_COUNT="$(printf '%s' "$MISSING_JSON" | jq 'length')"
 
           ANOMALIES=false
-          if [ "$WORKFLOW_MISSING" = "true" ] || [ "$BAD_RUNS_COUNT" -gt 0 ] || [ "$MISSING_RUNS_COUNT" -gt 0 ]; then
+          if [ "$WORKFLOW_MISSING" = "true" ] || [ "$BAD_RUNS_COUNT" -gt 0 ] || [ "$MISSING_RUNS_COUNT" -gt 0 ] || [ "$TRUNCATED" = "true" ]; then
             ANOMALIES=true
           fi
 
