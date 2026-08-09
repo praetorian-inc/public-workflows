@@ -2546,7 +2546,21 @@ export async function assertActionsReadable(client, cfg, repo) {
 // correctness property, and it is not observable from any caller's return value —
 // a dropped subject and a repo that legitimately has no caller produce the same
 // fleet list.
-export async function resolveFleet(client, cfg) {
+//
+// `meta` is an out-parameter: discovery provenance the fleet list itself cannot
+// carry — which repos were kept despite a DELETED caller, which are archived,
+// which disabled repos were excluded. main() threads it into the report so the
+// machine channel states these bounds, not just the log.
+export async function resolveFleet(client, cfg, meta = {}) {
+  meta.callerDeleted = [];
+  meta.archived = [];
+  meta.excludedDisabled = [];
+  // Repo size (KB) where enumeration or readability metadata provided it.
+  // Load-bearing for the history probe below: GET /repos/:o/:r/commits answers
+  // an EMPTY repo with 409 (which client.gh throws on, correctly — it is not a
+  // 404), so a proven-empty repo must skip the probe. `undefined` size means
+  // unproven, and the probe runs.
+  const sizeByName = new Map();
   let names = cfg.repos;
   const discovered = !names;
   if (discovered) {
@@ -2562,7 +2576,25 @@ export async function resolveFleet(client, cfg) {
       undefined,
       { identity: (r) => r.id },
     );
-    names = repos.filter((r) => !r.archived && !r.disabled).map((r) => r.name);
+    // Archived repos STAY in the fleet. Archiving freezes a repo's future, not
+    // its past: a repo archived after merging PRs inside the window still owns
+    // those PRs, and its deliveries (or gaps) are exactly as real as a live
+    // repo's. Filtering it here would silently shrink the audited window's
+    // subject set — the same false-clean direction as a dropped page, one
+    // filter earlier. The archived state is recorded instead, because the
+    // REMEDY differs: dispatch is disabled on archived repos, so a replay
+    // command bounces until the repo is unarchived.
+    //
+    // Disabled repos are the one exclusion kept, because the API itself is
+    // unreliable against them (contents/commits/runs probes can fail in ways
+    // indistinguishable from absence). Excluded, but never silently: the names
+    // ride `meta.excludedDisabled` into the report, which claims nothing about
+    // them.
+    meta.excludedDisabled = repos.filter((r) => r.disabled).map((r) => r.name);
+    const rows = repos.filter((r) => !r.disabled);
+    meta.archived = rows.filter((r) => r.archived).map((r) => r.name);
+    for (const r of rows) sizeByName.set(r.name, r.size);
+    names = rows.map((r) => r.name);
   }
 
   // ONE validation site, covering BOTH provenances, ahead of every request that
@@ -2603,10 +2635,38 @@ export async function resolveFleet(client, cfg) {
     // Org-wide discovery deliberately does NOT get this treatment. There an
     // unreadable repo was never requested, so skipping it is the correct answer
     // rather than a lost subject.
-    for (const name of names) await assertReadable(client, cfg, name);
+    for (const name of names) {
+      const repoMeta = await assertReadable(client, cfg, name);
+      // The readability probe already fetched the repo object; reuse its
+      // `archived` and `size` instead of trusting the operator to know them.
+      if (repoMeta?.archived) meta.archived.push(name);
+      sizeByName.set(name, repoMeta?.size);
+    }
   }
   const fleet = [];
-  for (const name of names) if (await hasCaller(client, cfg, name)) fleet.push(name);
+  for (const name of names) {
+    if (await hasCaller(client, cfg, name)) {
+      fleet.push(name);
+      continue;
+    }
+    // No caller at HEAD is TWO cases, and only one of them may leave the
+    // fleet. "Never onboarded" is a repo with no delivery duty — skipping it is
+    // the correct answer. "Onboarded, caller since DELETED" is the strongest
+    // gap signal this tool can see: every merged PR after the deletion is a
+    // real never_fired, and gating membership on the caller's PRESENT content
+    // would remove exactly the repo most likely to be bleeding deliveries. The
+    // content probe cannot tell the two apart, so the caller path's commit
+    // HISTORY breaks the tie: any commit ever touching the path proves the
+    // repo was onboarded, and it stays a subject, flagged `caller_deleted`.
+    if (sizeByName.get(name) === 0) continue; // empty repo: /commits is a 409, and there is no history to find
+    const hist = await client.gh(
+      `/repos/${cfg.owner}/${name}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=1`,
+    );
+    if (Array.isArray(hist) && hist.length) {
+      fleet.push(name);
+      meta.callerDeleted.push(name);
+    }
+  }
   return fleet;
 }
 
@@ -3152,6 +3212,12 @@ const COVERAGE_CEILING =
 // cannot enumerate what it cannot list — so the remedy is operational (run
 // fleet mode under the org-read PAT) and the sentence's job is to stop
 // "fleet_size=N, clean" from being read as a claim about the whole org.
+//
+// The gate is `report.discovery.token_visibility_bounded`, not a cfg
+// re-derivation: buildReport computes the discovery provenance once and both
+// channels read it, so the JSON a machine consumes and the markdown a human
+// reads cannot disagree about whether the ceiling applies (the round-17
+// unified-gates lesson, applied at discovery scope).
 const DISCOVERY_CEILING =
   '_Discovery: this was an org-enumerated fleet run, and org enumeration lists only the ' +
   'repositories the supplied token can see — a private repo invisible to the token never ' +
@@ -3166,9 +3232,19 @@ export function renderMarkdown(report, cfg) {
   // needs these MOST, and a second call site is how one of them drifts.
   const pushCeilings = () => {
     L.push(COVERAGE_CEILING);
-    if (report.mode === 'fleet' && !cfg.repos) {
+    if (report.discovery?.token_visibility_bounded) {
       L.push('');
       L.push(DISCOVERY_CEILING);
+    }
+    if (report.discovery?.excluded_disabled?.length) {
+      L.push('');
+      L.push(
+        `_Discovery: ${report.discovery.excluded_disabled.length} disabled ` +
+          `${report.discovery.excluded_disabled.length === 1 ? 'repository was' : 'repositories were'} ` +
+          'excluded from enumeration because the API is unreliable against disabled repos ' +
+          `(${report.discovery.excluded_disabled.map((n) => `\`${n}\``).join(', ')}). ` +
+          'Their delivery state is UNKNOWN — this report makes no claim about them._',
+      );
     }
   };
   L.push('## Leaderboard delivery audit');
@@ -3250,11 +3326,25 @@ export function renderMarkdown(report, cfg) {
     const r = report.repos.find((x) => x.repo === g.repo);
     L.push(`### \`${g.repo}\``);
     L.push('');
-    if (r && !r.has_caller) {
+    if (r && !r.has_caller && !r.caller_deleted) {
       L.push(
         '> **This repo has no `leaderboard-metrics.yml` caller that references the ' +
           'reusable.** Nothing was ever going to deliver, so every merged PR below ' +
           'is a never-fired delivery, not a failure.',
+      );
+      L.push('');
+    }
+    if (r && r.caller_deleted) {
+      // Mutually exclusive with the blockquote above: both fire on
+      // `has_caller: false`, but resolveFleet's history probe proved this repo
+      // WAS onboarded, so "nothing was ever going to deliver" would be the
+      // wrong sentence — deliveries stopped, they were not never-owed.
+      L.push(
+        '> **This repo’s caller workflow existed in git history but is DELETED at HEAD.** ' +
+          'The repo was onboarded and its delivery path has since been removed, so every ' +
+          'merged PR after the deletion is a real missed delivery — the strongest gap ' +
+          'signal in this report. Re-onboard the caller before expecting deliveries to ' +
+          'resume; the replay below recovers the backlog either way.',
       );
       L.push('');
     }
@@ -3371,6 +3461,20 @@ export function renderMarkdown(report, cfg) {
       );
       L.push('');
     }
+    if (g.repo_archived) {
+      // Same shape as the missing-backfill-caller caveat above, different
+      // blocker: GitHub disables workflow dispatch on archived repos, so the
+      // command bounces regardless of which workflows exist. The command still
+      // renders for the same reason — the PR numbers are the finding, and the
+      // command is correct the moment the repo is unarchived.
+      L.push(
+        '> **This repository is archived.** GitHub disables workflow dispatch on archived ' +
+          'repos, so the replay command below will fail until the repo is unarchived. Its ' +
+          'gaps are still real — the PRs merged before archival — so unarchive, replay, ' +
+          'and re-archive if the archival should stand.',
+      );
+      L.push('');
+    }
     const batches = chunk(g.replay, REPLAY_BATCH);
     L.push(
       batches.length > 1
@@ -3427,7 +3531,7 @@ export function renderMarkdown(report, cfg) {
 // modes are not comparable. An unstated row key silently SHORTENS a list, which is
 // the false clean this file exists to refuse, so it throws; an unpassed dupes
 // count understates a diagnostic and cannot change a verdict.
-export function buildReport(results, cfg, apiCalls, dupes = 0) {
+export function buildReport(results, cfg, apiCalls, dupes = 0, fleetMeta = null) {
   const sum = (f) => results.reduce((n, r) => n + f(r), 0);
   // in_flight is deliberately NOT a gap condition: an unconcluded run is an
   // unknown, and raising on it would make the audit's verdict depend on how
@@ -3472,12 +3576,33 @@ export function buildReport(results, cfg, apiCalls, dupes = 0) {
     // against a workflow the audit already proved absent.
     ...(r.caller_workflow_missing ? { caller_workflow_missing: true } : {}),
     ...(r.backfill_caller_missing ? { backfill_caller_missing: true } : {}),
+    ...(r.caller_deleted ? { caller_deleted: true } : {}),
+    ...(r.repo_archived ? { repo_archived: true } : {}),
   }));
   return {
     since: cfg.since,
     until: cfg.until,
     mode: cfg.selfAudit ? 'self' : 'fleet',
     fleet_size: results.length,
+    // HOW the fleet was resolved, in the machine channel. `fleet_size` alone
+    // cannot distinguish a complete org audit from a partial one: org
+    // enumeration lists only what the token can see, so a machine consumer of
+    // this document (the planned ENG-5789 dispatcher reads exactly this file)
+    // would accept a token-truncated fleet as a clean full-org verdict. That
+    // ceiling was previously disclosed only by renderMarkdown — the round-17
+    // defect shape again, a caveat riding one channel. The markdown gate now
+    // reads THIS object, so the two channels cannot diverge.
+    discovery: {
+      source: cfg.selfAudit ? 'self' : cfg.repos ? 'explicit-list' : 'org-enumeration',
+      // Only org enumeration has the invisible-repo ceiling: explicit names
+      // fail loudly via assertReadable when the token cannot see them.
+      ...(!cfg.selfAudit && !cfg.repos ? { token_visibility_bounded: true } : {}),
+      ...(fleetMeta?.excludedDisabled?.length
+        ? { excluded_disabled: fleetMeta.excludedDisabled }
+        : {}),
+      ...(fleetMeta?.callerDeleted?.length ? { caller_deleted: fleetMeta.callerDeleted } : {}),
+      ...(fleetMeta?.archived?.length ? { archived: fleetMeta.archived } : {}),
+    },
     api_calls: apiCalls,
     duplicate_rows: dupes,
     totals: {
@@ -3669,7 +3794,8 @@ async function main() {
   // Self-audit deliberately skips the caller probe: a repo with no caller must
   // be audited (and scream), not skipped. Fleet mode probes, because there it
   // is a discovery question rather than a subject question.
-  const fleet = cfg.selfAudit ? cfg.repos : await resolveFleet(client, cfg);
+  const fleetMeta = {};
+  const fleet = cfg.selfAudit ? cfg.repos : await resolveFleet(client, cfg, fleetMeta);
   if (!fleet.length) {
     wfError(
       'resolved ZERO caller repos — the fleet probe is broken or the token cannot read the org. Refusing to report a clean fleet.',
@@ -3691,6 +3817,15 @@ async function main() {
   const results = [];
   for (const repo of fleet) results.push(await auditRepo(client, cfg, repo));
 
+  // Discovery provenance from resolveFleet onto the result rows, so the flags
+  // serialize into `repos[]` and the gap rows the same way the availability
+  // flags below do. Set only when proven, never false — same contract as
+  // annotateAvailability.
+  for (const r of results) {
+    if (fleetMeta.callerDeleted?.includes(r.repo)) r.caller_deleted = true;
+    if (fleetMeta.archived?.includes(r.repo)) r.repo_archived = true;
+  }
+
   // After the audit, before the report is built, so the flags ride both
   // channels (repos[] and the repos_with_gaps rows). Warnings surface in the
   // run log too: the report says the same thing, but a ::warning is what an
@@ -3707,9 +3842,24 @@ async function main() {
         `${cfg.owner}/${r.repo}: ${cfg.backfillCaller} does not exist in this repo — the replay command in the report will fail until the backfill caller is onboarded (ENG-5688).`,
       );
     }
+    if (r.caller_deleted) {
+      wfWarn(
+        `${cfg.owner}/${r.repo}: the caller workflow existed in this repo's history but is DELETED at HEAD — every merged PR since the deletion is a real never_fired. The repo stays in the fleet; re-onboard the caller before deliveries can resume.`,
+      );
+    }
+    if (r.repo_archived) {
+      wfWarn(
+        `${cfg.owner}/${r.repo}: repository is archived — workflow dispatch is disabled, so any replay command against it will fail until the repo is unarchived.`,
+      );
+    }
+  }
+  if (fleetMeta.excludedDisabled?.length) {
+    wfWarn(
+      `${fleetMeta.excludedDisabled.length} disabled repo(s) excluded from org enumeration (API access to disabled repos is unreliable): ${fleetMeta.excludedDisabled.join(', ')}. Their delivery state is UNKNOWN — this report makes no claim about them.`,
+    );
   }
 
-  const report = buildReport(results, cfg, client.state.calls, client.state.dupes);
+  const report = buildReport(results, cfg, client.state.calls, client.state.dupes, fleetMeta);
 
   const { writeFileSync } = await import('node:fs');
   if (cfg.json) writeFileSync(cfg.json, JSON.stringify(report, null, 2));

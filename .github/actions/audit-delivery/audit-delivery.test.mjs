@@ -1368,9 +1368,13 @@ const gapReport = ({
   mode,
   callerWorkflowMissing = false,
   backfillCallerMissing = false,
+  callerDeleted = false,
+  repoArchived = false,
+  discovery,
 } = {}) => ({
   since: '2026-07-05',
   ...(mode ? { mode } : {}),
+  ...(discovery ? { discovery } : {}),
   totals: { merged_prs: 12, delivered: 9, in_flight: inFlight },
   repos_with_gaps: [
     {
@@ -1382,6 +1386,7 @@ const gapReport = ({
       in_flight: inFlight,
       replay,
       ...(backfillCallerMissing ? { backfill_caller_missing: true } : {}),
+      ...(repoArchived ? { repo_archived: true } : {}),
     },
   ],
   repos: [
@@ -1389,6 +1394,7 @@ const gapReport = ({
       repo: 'guard',
       has_caller: hasCaller,
       ...(callerWorkflowMissing ? { caller_workflow_missing: true } : {}),
+      ...(callerDeleted ? { caller_deleted: true } : {}),
     },
   ],
 });
@@ -1445,13 +1451,24 @@ test('renderMarkdown: the discovery ceiling renders ONLY for org-enumerated flee
   // see, so a token-invisible private repo never enters the fleet — no probe,
   // no error, fleet_size quietly under-counts. Explicit --repos and self-audit
   // are exempt: every named repo passes assertReadable and fails loudly.
-  const orgFleet = renderMarkdown(gapReport({ mode: 'fleet' }), CFG);
+  //
+  // Round 3 (codex): the gate reads `report.discovery.token_visibility_bounded`,
+  // not a cfg re-derivation, so JSON and markdown cannot disagree about whether
+  // the ceiling applies. The derivation of that flag from cfg is buildReport's
+  // job and is pinned by its own test below.
+  const orgFleet = renderMarkdown(
+    gapReport({ mode: 'fleet', discovery: { source: 'org-enumeration', token_visibility_bounded: true } }),
+    CFG,
+  );
   assert.match(orgFleet, /org enumeration lists only the\s+repositories the supplied token can see/);
 
-  const explicitFleet = renderMarkdown(gapReport({ mode: 'fleet' }), { ...CFG, repos: ['guard'] });
+  const explicitFleet = renderMarkdown(
+    gapReport({ mode: 'fleet', discovery: { source: 'explicit-list' } }),
+    { ...CFG, repos: ['guard'] },
+  );
   assert.doesNotMatch(explicitFleet, /org enumeration lists only/);
 
-  const self = renderMarkdown(gapReport({ mode: 'self' }), CFG);
+  const self = renderMarkdown(gapReport({ mode: 'self', discovery: { source: 'self' } }), CFG);
   assert.doesNotMatch(self, /org enumeration lists only/);
 
   // The clean early-return branch pushes the same ceiling block — it is the
@@ -1461,6 +1478,7 @@ test('renderMarkdown: the discovery ceiling renders ONLY for org-enumerated flee
     {
       since: '2026-07-05',
       mode: 'fleet',
+      discovery: { source: 'org-enumeration', token_visibility_bounded: true },
       totals: { merged_prs: 2, delivered: 2 },
       unverifiable_reasons: [],
       repos_with_gaps: [],
@@ -1470,6 +1488,70 @@ test('renderMarkdown: the discovery ceiling renders ONLY for org-enumerated flee
   );
   assert.match(clean, /No gaps/);
   assert.match(clean, /org enumeration lists only/);
+});
+
+test('renderMarkdown: a REPORT-LEVEL gate means a report with no discovery block renders no ceiling', () => {
+  // The legacy gate was `report.mode === 'fleet' && !cfg.repos` — a cfg
+  // re-derivation that let the two channels diverge (a JSON with no ceiling
+  // beside a markdown with one, or vice versa). With the gate on the report,
+  // the absence of the block is itself authoritative.
+  const noBlock = renderMarkdown(gapReport({ mode: 'fleet' }), CFG);
+  assert.doesNotMatch(noBlock, /org enumeration lists only/);
+});
+
+test('renderMarkdown: a DELETED caller renders the deleted-caller callout, not the never-onboarded one', () => {
+  // Both fire on has_caller:false, and they say opposite things: "nothing was
+  // ever going to deliver" excuses the gap, "delivery path since removed" is
+  // the strongest gap signal in the report. Rendering both would have the
+  // report contradict itself one line apart.
+  const deleted = renderMarkdown(gapReport({ hasCaller: false, callerDeleted: true }), CFG);
+  assert.match(deleted, /existed in git history but is DELETED at HEAD/);
+  assert.doesNotMatch(deleted, /has no `leaderboard-metrics\.yml` caller/);
+
+  const neverOnboarded = renderMarkdown(gapReport({ hasCaller: false }), CFG);
+  assert.match(neverOnboarded, /has no `leaderboard-metrics\.yml` caller/);
+  assert.doesNotMatch(neverOnboarded, /DELETED at HEAD/);
+});
+
+test('renderMarkdown: an archived repo warns BEFORE the replay command, which still renders', () => {
+  // Same contract as the missing-backfill-caller caveat: the command is one
+  // the report KNOWS will bounce (dispatch is disabled on archived repos), so
+  // the warning must land before the operator copies it — but the PR numbers
+  // are the finding, and the command is correct the moment the repo is
+  // unarchived.
+  const flagged = renderMarkdown(gapReport({ repoArchived: true }), CFG);
+  assert.match(flagged, /This repository is archived/);
+  assert.ok(
+    flagged.indexOf('This repository is archived') < flagged.indexOf('```sh'),
+    'the warning renders before the command block',
+  );
+  assert.match(flagged, /gh workflow run leaderboard-backfill-caller\.yml/);
+
+  const unflagged = renderMarkdown(gapReport(), CFG);
+  assert.doesNotMatch(unflagged, /This repository is archived/);
+});
+
+test('renderMarkdown: excluded disabled repos are disclosed beside the ceilings, by name', () => {
+  const withExclusions = renderMarkdown(
+    gapReport({
+      mode: 'fleet',
+      discovery: {
+        source: 'org-enumeration',
+        token_visibility_bounded: true,
+        excluded_disabled: ['dead-repo'],
+      },
+    }),
+    CFG,
+  );
+  assert.match(withExclusions, /1 disabled repository was\s+excluded from enumeration/);
+  assert.match(withExclusions, /`dead-repo`/);
+  assert.match(withExclusions, /makes no claim about them/);
+
+  const without = renderMarkdown(
+    gapReport({ mode: 'fleet', discovery: { source: 'org-enumeration', token_visibility_bounded: true } }),
+    CFG,
+  );
+  assert.doesNotMatch(without, /excluded from enumeration/);
 });
 
 test('renderMarkdown: the gap banner claims a missing VERIFIED ENQUEUE, never a consumer-side row', () => {
@@ -1742,6 +1824,74 @@ test('buildReport: mode reflects selfAudit', () => {
   const results = [repoResult('guard', { merged: 1, delivered: [rec(1)] })];
   assert.equal(buildReport(results, { since: '2026-07-05', selfAudit: true }, 1).mode, 'self');
   assert.equal(buildReport(results, { since: '2026-07-05', selfAudit: false }, 1).mode, 'fleet');
+});
+
+test('buildReport: discovery provenance rides the MACHINE channel, and only org enumeration is bounded', () => {
+  // PR #157 round 3 (codex P2): the token-visibility ceiling was disclosed only
+  // by renderMarkdown, so a machine consumer of audit.json (the ENG-5789
+  // dispatcher reads exactly that file) could not distinguish a token-truncated
+  // fleet from a complete org audit. The flag lives here and the markdown gate
+  // READS it — one derivation, two channels.
+  const results = [repoResult('guard', { merged: 1, delivered: [rec(1)] })];
+
+  const org = buildReport(results, { since: '2026-07-05', selfAudit: false }, 1);
+  assert.equal(org.discovery.source, 'org-enumeration');
+  assert.equal(org.discovery.token_visibility_bounded, true);
+
+  const explicit = buildReport(
+    results,
+    { since: '2026-07-05', selfAudit: false, repos: ['guard'] },
+    1,
+  );
+  assert.equal(explicit.discovery.source, 'explicit-list');
+  // Absent, not false: explicit names fail LOUDLY via assertReadable when the
+  // token cannot see them, so there is no bound to disclose — and a machine
+  // consumer keying on the field's presence must not find a reassuring `false`.
+  assert.equal('token_visibility_bounded' in explicit.discovery, false);
+
+  const self = buildReport(
+    results,
+    { since: '2026-07-05', selfAudit: true, repos: ['guard'] },
+    1,
+  );
+  assert.equal(self.discovery.source, 'self');
+  assert.equal('token_visibility_bounded' in self.discovery, false);
+});
+
+test('buildReport: fleetMeta exclusions and flags serialize into discovery and the gap rows', () => {
+  const flagged = repoResult('museum', { merged: 2, failed: [rec(4), rec(5)] });
+  flagged.caller_deleted = true;
+  flagged.repo_archived = true;
+  const plain = repoResult('guard', { merged: 1, failed: [rec(9)] });
+
+  const report = buildReport(
+    [flagged, plain],
+    { since: '2026-07-05', selfAudit: false },
+    1,
+    0,
+    { excludedDisabled: ['dead-repo'], callerDeleted: ['museum'], archived: ['museum'] },
+  );
+
+  assert.deepEqual(report.discovery.excluded_disabled, ['dead-repo']);
+  assert.deepEqual(report.discovery.caller_deleted, ['museum']);
+  assert.deepEqual(report.discovery.archived, ['museum']);
+
+  // Copied onto the gap row for the same reason as caller_workflow_missing /
+  // backfill_caller_missing: the gap row is what a dispatcher reads, and a
+  // dispatch against an archived repo bounces.
+  const museum = report.repos_with_gaps.find((g) => g.repo === 'museum');
+  assert.equal(museum.caller_deleted, true);
+  assert.equal(museum.repo_archived, true);
+  const guard = report.repos_with_gaps.find((g) => g.repo === 'guard');
+  assert.equal('caller_deleted' in guard, false);
+  assert.equal('repo_archived' in guard, false);
+
+  // No fleetMeta (self-audit path, or older callers): empty lists never render
+  // as reassuring empty arrays — they are simply absent.
+  const bare = buildReport([plain], { since: '2026-07-05', selfAudit: false }, 1);
+  assert.equal('excluded_disabled' in bare.discovery, false);
+  assert.equal('caller_deleted' in bare.discovery, false);
+  assert.equal('archived' in bare.discovery, false);
 });
 
 test('buildReport: a pre-onboarding-ONLY repo is not a repo with gaps', () => {
@@ -2042,20 +2192,23 @@ const FLEET_CFG = {
   reusable: 'praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@',
 };
 
-// Mirrors the two endpoints resolveFleet reaches through, keyed by repo name so a
-// mixed list can have per-repo behaviour. `readable` false makes EVERY path 404
-// for that repo, which is what a typo or an invisible private repo actually looks
-// like — not a special-cased contents 404.
+// Mirrors the three endpoints resolveFleet reaches through, keyed by repo name
+// so a mixed list can have per-repo behaviour. `readable` false makes EVERY path
+// 404 for that repo, which is what a typo or an invisible private repo actually
+// looks like — not a special-cased contents 404. `history` answers the
+// deleted-caller commits probe; `size` defaults to non-empty so the probe runs
+// unless a test says otherwise.
 const fleetClient = (repos) => {
   const calls = [];
   return {
     calls,
     gh: async (url) => {
       calls.push(url);
-      const m = url.match(/^\/repos\/[^/]+\/([^/?]+)(\/contents\/.*)?$/);
+      const m = url.match(/^\/repos\/[^/]+\/([^/?]+)(\/(contents|commits)\b)?/);
       const state = repos[m[1]];
       if (!state || !state.readable) return { __missing: true };
-      if (!m[2]) return { name: m[1] };
+      if (m[3] === 'commits') return state.history ? [{ sha: 'caffe1ed' }] : [];
+      if (!m[2]) return { name: m[1], archived: !!state.archived, size: state.size ?? 1 };
       if (!state.caller) return { __missing: true };
       return {
         content: Buffer.from(
@@ -2167,12 +2320,130 @@ test('resolveFleet: org-wide discovery does NOT assert readability per repo', as
   const fleet = await resolveFleet(client, { ...FLEET_CFG, repos: null });
 
   assert.deepEqual(fleet, ['caeruleus']);
-  // And it never made a bare repo-metadata call, which is what would prove the
-  // explicit-list guard had leaked into discovery mode.
+  // And it never made a BARE repo-metadata call, which is what would prove the
+  // explicit-list guard had leaked into discovery mode. (A /commits history
+  // probe against the caller-less repo is expected — that is the deleted-caller
+  // check, not a readability assertion.)
   assert.equal(
-    client.calls.filter((u) => !u.includes('/contents/')).length,
+    client.calls.filter((u) => /^\/repos\/[^/]+\/[^/?]+$/.test(u)).length,
     0,
   );
+});
+
+test('resolveFleet: a repo whose caller was DELETED stays in the fleet, flagged', async () => {
+  // PR #157 round 3 (codex): gating membership on the caller's PRESENT content
+  // removed exactly the repo most likely to be bleeding deliveries — onboarded,
+  // caller since deleted, every merged PR after the deletion a real never_fired
+  // (the ENG-5687 shape). The content probe cannot tell that repo from a
+  // never-onboarded one; the caller path's commit history can.
+  const client = fleetClient({
+    caeruleus: { readable: true, caller: true },
+    'once-onboarded': { readable: true, caller: false, history: true },
+    'never-onboarded': { readable: true, caller: false },
+  });
+
+  const meta = {};
+  const fleet = await resolveFleet(
+    client,
+    { ...FLEET_CFG, repos: ['caeruleus', 'once-onboarded', 'never-onboarded'] },
+    meta,
+  );
+
+  assert.deepEqual(fleet, ['caeruleus', 'once-onboarded']);
+  assert.deepEqual(meta.callerDeleted, ['once-onboarded']);
+  // The history probe asks about the CALLER PATH, not the whole repo — a repo
+  // with any commit at all would otherwise always look onboarded.
+  const probes = client.calls.filter((u) => u.includes('/commits'));
+  assert.ok(probes.every((u) => u.includes(encodeURIComponent(FLEET_CFG.callerPath))));
+  // And a repo whose caller is PRESENT is never probed: history costs a call
+  // per non-onboarded repo and proves nothing the content probe did not.
+  assert.ok(!probes.some((u) => u.includes('caeruleus')));
+});
+
+test('resolveFleet: org discovery also runs the deleted-caller probe', async () => {
+  const client = {
+    calls: [],
+    ghPaged: async () => [
+      { name: 'ghost', archived: false, disabled: false, size: 42 },
+      { name: 'blank', archived: false, disabled: false, size: 42 },
+    ],
+    gh: async (url) => {
+      client.calls.push(url);
+      if (url.includes('/contents/')) return { __missing: true };
+      if (url.includes('/commits')) return url.includes('ghost') ? [{ sha: 'caffe1ed' }] : [];
+      return { __missing: true };
+    },
+  };
+
+  const meta = {};
+  const fleet = await resolveFleet(client, { ...FLEET_CFG, repos: null }, meta);
+
+  assert.deepEqual(fleet, ['ghost']);
+  assert.deepEqual(meta.callerDeleted, ['ghost']);
+});
+
+test('resolveFleet: an EMPTY repo is never history-probed — /commits answers 409 there, not 404', async () => {
+  // client.gh throws on any non-OK status that is not a 404, correctly — so a
+  // single never-pushed repo in the org would brick every fleet run the moment
+  // the probe reached it. `size: 0` from the enumeration row (or the explicit
+  // branch's readability metadata) is the proof of emptiness that skips it.
+  const client = {
+    calls: [],
+    ghPaged: async () => [{ name: 'empty', archived: false, disabled: false, size: 0 }],
+    gh: async (url) => {
+      client.calls.push(url);
+      if (url.includes('/commits')) throw new Error('GET /commits on an empty repo is a 409');
+      return { __missing: true };
+    },
+  };
+
+  const fleet = await resolveFleet(client, { ...FLEET_CFG, repos: null });
+
+  assert.deepEqual(fleet, []);
+  assert.ok(!client.calls.some((u) => u.includes('/commits')));
+});
+
+test('resolveFleet: archived repos STAY in the fleet; disabled repos are excluded but recorded', async () => {
+  // PR #157 round 3 (codex): archiving freezes a repo's future, not its past —
+  // a repo archived after merging PRs still owns those PRs, and filtering it
+  // silently shrank the audited subject set (the false-clean direction again).
+  // Disabled repos remain the one exclusion, because the API itself is
+  // unreliable against them — but the exclusion is RECORDED, never silent.
+  const client = {
+    calls: [],
+    ghPaged: async () => [
+      { name: 'museum', archived: true, disabled: false, size: 7 },
+      { name: 'dead', archived: false, disabled: true, size: 7 },
+    ],
+    gh: async (url) => {
+      client.calls.push(url);
+      return {
+        content: Buffer.from(`uses: ${FLEET_CFG.reusable}v1`).toString('base64'),
+      };
+    },
+  };
+
+  const meta = {};
+  const fleet = await resolveFleet(client, { ...FLEET_CFG, repos: null }, meta);
+
+  assert.deepEqual(fleet, ['museum']);
+  assert.deepEqual(meta.archived, ['museum']);
+  assert.deepEqual(meta.excludedDisabled, ['dead']);
+  // Excluded means excluded: no probe of any kind reaches a disabled repo.
+  assert.ok(!client.calls.some((u) => u.includes('dead')));
+});
+
+test('resolveFleet: the explicit branch reads archived from the readability probe it already made', async () => {
+  const client = fleetClient({
+    museum: { readable: true, caller: true, archived: true },
+    guard: { readable: true, caller: true },
+  });
+
+  const meta = {};
+  const fleet = await resolveFleet(client, { ...FLEET_CFG, repos: ['museum', 'guard'] }, meta);
+
+  assert.deepEqual(fleet, ['museum', 'guard']);
+  assert.deepEqual(meta.archived, ['museum']);
 });
 
 // ── verifyPayloads: a `success` run that enqueued nothing ─────────────────────
