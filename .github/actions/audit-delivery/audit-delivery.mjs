@@ -1301,18 +1301,26 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
     if (verdict === 'sent') {
       return { sent: { run_id: run.id, attempt: null }, ownLatestSuccess, unreadable, unreadableReason };
     }
-    // Membership in the map, not equality against one verdict: the two undecided
-    // verdicts behave identically here, and hand-comparing against `'unknown'`
-    // alone is what let a step-less run fall through as though it were decided.
-    if (UNDECIDED_VERDICTS.has(verdict)) markUndecided(verdict);
     // Ordered AFTER the `sent` return above, deliberately: a run still in progress
     // may already have sent, and a send that IS found decides the head no matter
     // what else about it is unsettled. Only the NEGATIVE from an unfinished run is
     // untrustworthy, so only that is downgraded. `!== undefined` keeps this inert
     // for a synthesised record that carries no status rather than guessing one.
-    else if (run.status !== undefined && run.status !== 'completed') {
+    //
+    // And ordered BEFORE the undecided-verdict map (gemini, PR #157): a run still
+    // WRITING its history routinely has jobs whose step records do not exist yet,
+    // which probeSqsStep can only read as `unknown_no_steps` — the reaped-history
+    // wording, whose remedy ("narrow the window with --since") is wrong in every
+    // clause for a run that is simply not finished. In-flight is the true cause of
+    // every non-decision on an unfinished run, so it supplies the reason; the map
+    // keeps supplying it for runs that actually completed.
+    if (run.status !== undefined && run.status !== 'completed') {
       markReason(UNVERIFIABLE_RUN_IN_FLIGHT);
     }
+    // Membership in the map, not equality against one verdict: the two undecided
+    // verdicts behave identically here, and hand-comparing against `'unknown'`
+    // alone is what let a step-less run fall through as though it were decided.
+    else if (UNDECIDED_VERDICTS.has(verdict)) markUndecided(verdict);
     for (let n = (run.run_attempt || 1) - 1; n >= 1; n--) {
       const path = `${base}/attempts/${n}`;
       const att = await client.gh(path);

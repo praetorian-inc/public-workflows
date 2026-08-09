@@ -3392,6 +3392,43 @@ test('verifyPayloads: a sibling still IN PROGRESS is undecided, not a missing pa
   assert.equal(rec.unverifiable_reason, UNVERIFIABLE_RUN_IN_FLIGHT);
 });
 
+test('verifyPayloads: an in-progress sibling with NO step records yet is in-flight, not reaped history', async () => {
+  // gemini, PR #157. A run still writing its history routinely has jobs whose
+  // step records do not exist yet, and probeSqsStep can only read that shape as
+  // `unknown_no_steps` — the same verdict a 340-day-old reaped run produces. The
+  // walk used to consult UNDECIDED_VERDICTS before the in-flight downgrade, so
+  // this record's reason said "GitHub reaps step history … narrow the window
+  // with --since", a remedy wrong in every clause for a run that is simply not
+  // finished; the truthful remedy is "re-run once that run completes", and only
+  // the in-flight wording says so. The verdict was never at stake — both paths
+  // land on `unverifiable`, off the replay list — the REASON is the finding.
+  const client = jobsClient({
+    111: { jobs: [{ conclusion: 'success', steps: [{ name: 'Set up job', conclusion: 'success' }] }] },
+    999: { jobs: [{ conclusion: null, steps: [] }] },
+  });
+  const heads = new Map([[1, [{ id: 999, conclusion: null, status: 'in_progress', run_attempt: 1 }]]]);
+  const rec = { number: 1, run_id: 111, conclusion: 'failure', status: 'completed' };
+  const v = await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [rec], heads);
+  assert.equal(v.get(111), 'unverifiable');
+  assert.equal(rec.unverifiable_reason, UNVERIFIABLE_RUN_IN_FLIGHT);
+});
+
+test('verifyPayloads: a COMPLETED sibling with no step records keeps the reaped-history reason', async () => {
+  // The control for the reorder above: moving the in-flight check ahead of the
+  // undecided map must not steal the reaped wording from runs that actually
+  // finished — for those, "no steps at all" really is reaped (or too-fresh)
+  // history and the --since remedy is the right one.
+  const client = jobsClient({
+    111: { jobs: [{ conclusion: 'success', steps: [{ name: 'Set up job', conclusion: 'success' }] }] },
+    999: { jobs: [{ conclusion: 'success', steps: [] }] },
+  });
+  const heads = new Map([[1, [{ id: 999, conclusion: 'success', status: 'completed', run_attempt: 1 }]]]);
+  const rec = { number: 1, run_id: 111, conclusion: 'failure', status: 'completed' };
+  const v = await verifyPayloads(client, { owner: 'praetorian-inc' }, 'guard', [rec], heads);
+  assert.equal(v.get(111), 'unverifiable');
+  assert.equal(rec.unverifiable_reason, UNVERIFIABLE_STEPS_REAPED);
+});
+
 test('verifyPayloads: CONTROL — an in-progress sibling that ALREADY sent still decides the head', async () => {
   // The downgrade is ordered AFTER the `sent` return on purpose, and this is what
   // that ordering buys. A run still in progress may already have delivered, and a

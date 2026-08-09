@@ -51,9 +51,28 @@ on:
         required: false
         type: string
         default: ""
+      caller-path:
+        description: >-
+          Repo-relative path of the caller workflow to audit; leave empty
+          to auto-select (the fleet default, or this repo's own
+          self-caller when `repo` names this repository).
+        required: false
+        type: string
+        default: ""
 
+# All three scopes are read-only and load-bearing for the audit: contents
+# reads the caller-workflow file, actions reads the workflow-run list, and
+# pull-requests reads the merged-PR list the audit is built from. This block
+# is a CEILING on the github.token fallback used below — an unlisted scope
+# becomes none, not "whatever the token would otherwise have" — so without
+# the latter two grants the documented single-repo fallback can never pass
+# the composite action's own readability pre-check and every fallback run
+# exits status=unknown. (A PAT such as LEADERBOARD_AUDIT_TOKEN is not bound
+# by this ceiling; this block only constrains github.token.)
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
 
 jobs:
   audit:
@@ -105,7 +124,24 @@ jobs:
           days: ${{ inputs.days }}
           since: ${{ inputs.since }}
           until: ${{ inputs.until }}
+          # The composite action's own default caller-path
+          # (.github/workflows/leaderboard-metrics.yml) is right for every
+          # fleet repo, but wrong for THIS repo: here that path names the
+          # reusable workflow itself, which accrues no runs of its own — runs
+          # land against the real self-caller,
+          # .github/workflows/leaderboard-metrics-caller.yml. Auditing this
+          # repo with the fleet default would classify every merged PR
+          # never_fired and fabricate a replay list for PRs already
+          # delivered. Precedence: an explicit caller-path input always wins;
+          # otherwise self-audit (repo == github.repository) selects the
+          # -caller.yml file; otherwise the fleet default. `&&`/`||` chaining
+          # is safe here since every operand is a non-empty string.
+          caller-path: ${{ inputs.caller-path != '' && inputs.caller-path || (inputs.repo == github.repository && '.github/workflows/leaderboard-metrics-caller.yml' || '.github/workflows/leaderboard-metrics.yml') }}
 
+      # Gated on report-markdown only (not report-json): this step renders
+      # the markdown into the summary, so it has nothing to do on a
+      # JSON-only run. That run still surfaces via the "Upload reports"
+      # artifact below, which is gated on either output.
       - name: Publish report to job summary
         if: steps.audit.outputs.report-markdown != ''
         env:
@@ -118,8 +154,15 @@ jobs:
             cat "$REPORT_MARKDOWN"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Fires when EITHER report exists, not just report-markdown: the
+      # composite action documents that an exit-2 raised inside the markdown
+      # write can publish report-json COMPLETE while report-markdown stays
+      # unset — exactly the failure mode where diagnostics matter most, and
+      # gating on report-markdown alone uploaded nothing for it. The `path:`
+      # list still names both outputs; an empty line from the unset one is
+      # harmless because if-no-files-found is ignore.
       - name: Upload reports
-        if: steps.audit.outputs.report-markdown != ''
+        if: steps.audit.outputs.report-json != '' || steps.audit.outputs.report-markdown != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
         with:
           name: audit-delivery-report

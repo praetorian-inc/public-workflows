@@ -197,6 +197,18 @@ runs:
       run: |
         set -euo pipefail
 
+        # Workflow-command escape for VALUES interpolated into ::error/::warning
+        # lines: % is the escape character itself, CR/LF end the command and let
+        # the remainder forge a fresh one (e.g. ::add-mask::). Mirrors the JS-side
+        # wfEscape. Data only — never applied to the message literals.
+        wf_escape() {
+          local s=$1
+          s=${s//'%'/%25}
+          s=${s//$'\r'/%0D}
+          s=${s//$'\n'/%0A}
+          printf '%s' "$s"
+        }
+
         # `required: false` with a default on an action input is DOCUMENTATION,
         # not enforcement: the runner happily passes an unset expression
         # through as the default, or a caller-typo'd value straight through.
@@ -218,7 +230,7 @@ runs:
         : "${FLEET:=false}"
         if [ "$FLEET" != "true" ] && [ "$FLEET" != "false" ]; then
           echo "status=unknown" >> "$GITHUB_OUTPUT"
-          echo "::error::fleet input must be the literal string \"true\" or \"false\" — got \"${FLEET}\"."
+          echo "::error::fleet input must be the literal string \"true\" or \"false\" — got \"$(wf_escape "$FLEET")\"."
           exit 1
         fi
 
@@ -264,7 +276,7 @@ runs:
         # "audit the fleet" — refuse rather than silently prefer one.
         if [ "$FLEET" = "true" ] && [ -n "$REPO" ]; then
           echo "status=unknown" >> "$GITHUB_OUTPUT"
-          echo "::error::fleet=\"true\" and a non-empty repo (\"${REPO}\") were both passed — mutually exclusive; pass one or the other."
+          echo "::error::fleet=\"true\" and a non-empty repo (\"$(wf_escape "$REPO")\") were both passed — mutually exclusive; pass one or the other."
           exit 1
         fi
 
@@ -468,7 +480,11 @@ runs:
               exit 1
             fi
             echo "gap_count=$gap_count" >> "$GITHUB_OUTPUT"
-            echo "::warning::Leaderboard delivery gaps detected for ${SUBJECT}: ${gap_count} affected PR(s). See the report for the replay command."
+            # SUBJECT is caller-controlled (derived from REPO) and routed
+            # through wf_escape. gap_count is not: the node block above
+            # already rejects it unless Number.isInteger holds, so it cannot
+            # carry CR/LF or `%` by construction — left bare intentionally.
+            echo "::warning::Leaderboard delivery gaps detected for $(wf_escape "$SUBJECT"): ${gap_count} affected PR(s). See the report for the replay command."
             ;;
           *)
             echo "status=unknown" >> "$GITHUB_OUTPUT"
