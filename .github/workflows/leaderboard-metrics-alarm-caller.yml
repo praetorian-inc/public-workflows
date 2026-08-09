@@ -1,0 +1,32 @@
+# Self-caller: this repo dogfoods the ENG-5689 delivery alarm on itself,
+# auditing its own metrics caller (leaderboard-metrics-caller.yml). Named
+# leaderboard-metrics-alarm-caller.yml because leaderboard-metrics-alarm.yml
+# here IS the reusable — same path can't host both, mirroring the naming
+# rationale in leaderboard-metrics-caller.yml.
+name: Leaderboard Metrics Alarm Caller
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  # Manual trigger for on-demand runs / ENG-5689 AC-3 induced-failure
+  # verification (deliberately break the caller, then confirm this fires).
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  alarm:
+    permissions:
+      actions: read
+      pull-requests: read
+      issues: write
+      contents: read
+    # Local ref (same commit, no pin needed): the reusable lives in this same
+    # repo/commit, so there's nothing to pin. verify-pins.yml's regex only
+    # matches `uses:` lines prefixed with the OWNER_REPO/ literal, so a local
+    # `./...` ref is outside that gate's scope by construction — confirmed by
+    # reading verify-pins.yml, not a deviation from house convention.
+    uses: ./.github/workflows/leaderboard-metrics-alarm.yml
+    with:
+      metrics-workflow: leaderboard-metrics-caller.yml

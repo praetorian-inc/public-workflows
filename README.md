@@ -909,6 +909,44 @@ jobs:
 
 No secrets required — OIDC federation (`vars.LEADERBOARD_METRICS_ROLE_ARN`) + org-level vars (`ENGINEER_EMAIL_MAP`, `LEADERBOARD_METRICS_QUEUE_URL`).
 
+### `leaderboard-metrics-alarm.yml` — Delivery-failure alarm (scheduled self-check → issue)
+
+Implements [ENG-5689](https://linear.app/praetorianlabs/issue/ENG-5689): a per-repo scheduled self-check that audits the repo's own metrics-caller workflow over a recent window (default 7 days) and flags two anomaly classes — **bad runs** (failed/timed-out/action-required/cancelled/`startup_failure`, the last of which catches workflow-file-level breakage that never executes an in-run step) and **missing runs** (merged PRs with no caller run at all for their head SHA). The alert channel is deliberately **not another red workflow run** — it's an auto-filed/updated GitHub issue (label-driven, one kept open per repo); route to Slack by subscribing the channel to issues carrying the alarm label rather than teaching this workflow to speak Slack. **Evidence ceiling / non-coverage:** a run counts as "delivered" once it reaches ENQUEUE time (the SQS send in `leaderboard-metrics.yml`) — never evidence the metric was scored downstream (that consumer-side failure class, measured instance ENG-5775, needs a separate queue-side alarm); and a repo that never onboarded the metrics caller *or* this alarm stays invisible to both, which is a repo-onboarding control, not this workflow's job. No new secrets — uses the repo's own `GITHUB_TOKEN`, no IAM/OIDC coupling.
+
+**Minimal caller** (drop this in `.github/workflows/leaderboard-metrics-alarm.yml`):
+
+```yaml
+name: Leaderboard Metrics Alarm
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  alarm:
+    permissions:
+      actions: read
+      pull-requests: read
+      issues: write
+      contents: read
+    uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics-alarm.yml@<SHA>  # vX.Y.Z
+```
+
+Unlike `leaderboard-metrics.yml`, there is **no IAM/OIDC coupling** here — pin bumps are ordinary edits, no coordinated trust-policy runbook required.
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `metrics-workflow` | `leaderboard-metrics.yml` | File name of the caller workflow to audit. |
+| `window-days` | `7` | Lookback window for runs and merged PRs. |
+| `grace-hours` | `3` | Skip PRs merged more recently than this (run/index lag). |
+| `max-checked-prs` | `300` | Upper bound on merged PRs examined per run; when hit, the window is treated as truncated (evidence incomplete). |
+| `alarm-label` | `leaderboard-alarm` | Label identifying the alarm issue this workflow files/updates. |
+
+No secrets required — the caller's own `GITHUB_TOKEN`.
+
 ### Internal building blocks (not called directly by consumer repos)
 
 These reusables exist to be composed by the workflows above; consumer repos don't call them directly:
