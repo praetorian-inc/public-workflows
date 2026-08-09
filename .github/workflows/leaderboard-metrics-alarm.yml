@@ -92,6 +92,11 @@ permissions:
 jobs:
   alarm:
     name: Leaderboard metrics delivery check
+    # Serializes overlapping scheduled + manual runs so the check-then-create
+    # issue logic below can't race into duplicate open issues.
+    concurrency:
+      group: leaderboard-metrics-alarm-${{ github.repository }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     # 15m (up from 10m): the per-PR sequential `gh api` loop on a high-volume
     # repo (~100 merged PRs/week) costs a few minutes. The sequential design
@@ -126,6 +131,23 @@ jobs:
         run: |
           set -euo pipefail
 
+          # --- Step 0: input validation (before any API call) --------------
+          # WF is interpolated into a URL path segment that `gh api` does not
+          # URL-encode; reject unsafe input outright rather than attempt to
+          # encode it ourselves. Patterns live in variables (not inline in
+          # `=~`) so an unquoted literal space in the label charset can't be
+          # word-split by the shell before the regex engine sees it.
+          wf_pattern='^[A-Za-z0-9._-]+\.ya?ml$'
+          label_pattern='^[A-Za-z0-9._ -]+$'
+          if ! [[ "$WF" =~ $wf_pattern ]]; then
+            echo "::error::metrics-workflow '${WF}' is not a valid workflow filename (expected e.g. leaderboard-metrics.yml)" >&2
+            exit 1
+          fi
+          if ! [[ "$ALARM_LABEL" =~ $label_pattern ]]; then
+            echo "::error::alarm-label '${ALARM_LABEL}' contains characters outside the allowed charset (letters, digits, dot, underscore, space, hyphen)" >&2
+            exit 1
+          fi
+
           SINCE="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%dT%H:%M:%SZ)"
           SINCE_DATE="$(date -u -d "${WINDOW_DAYS} days ago" +%Y-%m-%d)"
           # Runs-fetch window carries a 1h skew buffer ahead of SINCE: a run
@@ -138,12 +160,18 @@ jobs:
           GRACE_CUTOFF="$(date -u -d "${GRACE_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+          # Stable issue-title marker, bound once so the create call below
+          # and the open-issue lookup match can never drift apart from each
+          # other (a label-only match could otherwise seize an unrelated
+          # issue someone labeled by hand).
+          ISSUE_TITLE="Leaderboard metrics delivery alarm: ${REPO}"
+
           # --- Step 2: list runs of the audited caller workflow -------------
           RUNS_RAW="$(mktemp)"
           ERR_LOG="$(mktemp)"
           WORKFLOW_MISSING=false
           if ! gh api "repos/${REPO}/actions/workflows/${WF}/runs?created=>=${SINCE_RUNS}&per_page=100" \
-               --paginate --jq '[.workflow_runs[] | {head_sha, conclusion, html_url, created_at, run_number}]' \
+               --paginate --jq '[.workflow_runs[] | {head_sha, conclusion, html_url, created_at, run_number, event}]' \
                >"$RUNS_RAW" 2>"$ERR_LOG"; then
             if grep -q "HTTP 404" "$ERR_LOG"; then
               # The audited workflow doesn't exist in this repo at all — the
@@ -162,67 +190,118 @@ jobs:
           fi
           RUNS_COUNT="$(printf '%s' "$RUNS_JSON" | jq 'length')"
 
+          # Delivery-scoped runs: restrict to the events the caller's merged-
+          # guard job actually runs under. A run of any OTHER event
+          # (workflow_dispatch, etc.) on a PR-gated caller skips that guard
+          # job and concludes success without ever delivering, so it must
+          # neither satisfy the missing-run join nor clear/raise bad-run
+          # state below. ALL downstream anomaly logic operates on this set,
+          # never on the raw RUNS_JSON.
+          DELIVERY_RUNS_JSON="$(printf '%s' "$RUNS_JSON" | jq -c \
+            '[.[] | select(.event == "pull_request_target" or .event == "pull_request")]')"
+
           # --- Step 3: BAD RUNS ---------------------------------------------
           # `cancelled` stays in the bad-run set: a cancelled caller run means
           # the metric was never enqueued — a real delivery gap the missing-
           # runs check cannot catch (a run DOES exist for that SHA). The
           # metrics callers carry no concurrency-cancel group, so a
           # cancellation is a human action, not routine churn.
-          BAD_RUNS_JSON="$(printf '%s' "$RUNS_JSON" | jq -c \
-            '[.[] | select(.conclusion as $c | ["failure","startup_failure","timed_out","action_required","cancelled"] | index($c) != null)]')"
+          #
+          # (a) The exact >=SINCE filter re-applies here even though
+          #     DELIVERY_RUNS_JSON was already fetched from SINCE_RUNS: that
+          #     1h skew buffer exists only for the head-SHA join below — a
+          #     bad run created in [SINCE_RUNS, SINCE) is outside the
+          #     REPORTED window and must not alarm.
+          # (b) Judging only the latest run per head SHA (group_by + max_by)
+          #     prevents permanent re-alarms for a failure already remediated
+          #     by a newer successful delivery run at the same SHA — a
+          #     stateless window re-read would otherwise re-report the old
+          #     failure daily until it ages out of the window.
+          BAD_RUNS_JSON="$(printf '%s' "$DELIVERY_RUNS_JSON" | jq -c --arg since "$SINCE" \
+            '[.[] | select(.created_at >= $since)]
+             | group_by(.head_sha) | map(max_by(.created_at))
+             | [.[] | select(.conclusion as $c | ["failure","startup_failure","timed_out","action_required","cancelled"] | index($c) != null)]')"
           BAD_RUNS_COUNT="$(printf '%s' "$BAD_RUNS_JSON" | jq 'length')"
 
           # --- Step 4: MISSING RUNS — merged PRs with no caller run --------
-          SEARCH_RAW="$(mktemp)"
-          gh api "search/issues?q=repo:${REPO}+is:pr+is:merged+merged:>=${SINCE_DATE}&per_page=100" \
-            --paginate --jq '{incomplete_results, total_count, numbers: [.items[].number]}' \
-            >"$SEARCH_RAW"
-          SEARCH_JSON="$(jq -s '.' "$SEARCH_RAW")"
-          INCOMPLETE="$(printf '%s' "$SEARCH_JSON" | jq -r 'any(.[]; .incomplete_results == true)')"
-          TOTAL_COUNT="$(printf '%s' "$SEARCH_JSON" | jq -r '[.[].total_count] | max // 0')"
-          PR_NUMBERS="$(printf '%s' "$SEARCH_JSON" | jq -c '[.[].numbers[]] | unique')"
-
           TRUNCATED=false
-          if [ "$INCOMPLETE" = "true" ] || [ "$TOTAL_COUNT" -ge 1000 ]; then
-            TRUNCATED=true
-          fi
-
           MISSING_JSON="[]"
           CHECKED_PR_COUNT=0
-          for num in $(printf '%s' "$PR_NUMBERS" | jq -r '.[]'); do
-            PR_DATA="$(gh api "repos/${REPO}/pulls/${num}" \
-              --jq '{number: .number, html_url: .html_url, head_sha: .head.sha, merged_at: .merged_at}')"
-            MERGED_AT="$(printf '%s' "$PR_DATA" | jq -r '.merged_at')"
-            # Skip PRs merged before the exact window cutoff: SINCE_DATE (the
-            # search query) is date-only/midnight, coarser than SINCE (exact
-            # timestamp) — without this, a PR merged between midnight and the
-            # exact SINCE cutoff would be checked here despite being outside
-            # the intended window. SINCE_DATE stays as the coarse net; this
-            # is the exact filter.
-            if [[ "$MERGED_AT" < "$SINCE" ]]; then
-              continue
+          if [ "$WORKFLOW_MISSING" != "true" ]; then
+            # With no caller workflow at all, every merged PR would
+            # redundantly list as "missing run" on top of the already-
+            # reported, highest-severity WORKFLOW_MISSING anomaly — pure
+            # noise. Skip the merged-PR search and per-PR loop entirely;
+            # MISSING stays empty and TRUNCATED stays false (no search ran).
+            SEARCH_RAW="$(mktemp)"
+            gh api "search/issues?q=repo:${REPO}+is:pr+is:merged+merged:>=${SINCE_DATE}&per_page=100" \
+              --paginate --jq '{incomplete_results, total_count, numbers: [.items[].number]}' \
+              >"$SEARCH_RAW"
+            SEARCH_JSON="$(jq -s '.' "$SEARCH_RAW")"
+            INCOMPLETE="$(printf '%s' "$SEARCH_JSON" | jq -r 'any(.[]; .incomplete_results == true)')"
+            TOTAL_COUNT="$(printf '%s' "$SEARCH_JSON" | jq -r '[.[].total_count] | max // 0')"
+            PR_NUMBERS="$(printf '%s' "$SEARCH_JSON" | jq -c '[.[].numbers[]] | unique')"
+
+            if [ "$INCOMPLETE" = "true" ] || [ "$TOTAL_COUNT" -ge 1000 ]; then
+              TRUNCATED=true
             fi
-            # Skip PRs merged more recently than the grace cutoff: their
-            # caller run and the search index may still be lagging.
-            if [[ "$MERGED_AT" > "$GRACE_CUTOFF" ]]; then
-              continue
+
+            # Accumulate matches as NDJSON lines instead of a per-iteration
+            # `jq '. + [$pr]'` array rebuild (O(n^2) re-parse/re-serialize of
+            # the growing array on every match); a single `jq -s '.'` after
+            # the loop assembles the final array in one pass.
+            MISSING_NDJSON="$(mktemp)"
+            for num in $(printf '%s' "$PR_NUMBERS" | jq -r '.[]'); do
+              PR_DATA="$(gh api "repos/${REPO}/pulls/${num}" \
+                --jq '{number: .number, html_url: .html_url, head_sha: .head.sha, merged_at: .merged_at}')"
+              MERGED_AT="$(printf '%s' "$PR_DATA" | jq -r '.merged_at')"
+              # Skip PRs merged before the exact window cutoff: SINCE_DATE
+              # (the search query) is date-only/midnight, coarser than SINCE
+              # (exact timestamp) — without this, a PR merged between
+              # midnight and the exact SINCE cutoff would be checked here
+              # despite being outside the intended window. SINCE_DATE stays
+              # as the coarse net; this is the exact filter.
+              if [[ "$MERGED_AT" < "$SINCE" ]]; then
+                continue
+              fi
+              # Skip PRs merged more recently than the grace cutoff: their
+              # caller run and the search index may still be lagging.
+              if [[ "$MERGED_AT" > "$GRACE_CUTOFF" ]]; then
+                continue
+              fi
+              CHECKED_PR_COUNT=$((CHECKED_PR_COUNT + 1))
+              HEAD_SHA="$(printf '%s' "$PR_DATA" | jq -r '.head_sha')"
+              # Fired = ANY delivery run exists for this head SHA, any
+              # conclusion (including in-progress/null) — see head-SHA join
+              # caveat above. Joined against the FULL buffered
+              # DELIVERY_RUNS_JSON (not the >=SINCE-filtered set from Step
+              # 3) — the SINCE_RUNS skew buffer exists precisely for this
+              # join.
+              HAS_RUN="$(printf '%s' "$DELIVERY_RUNS_JSON" | jq --arg sha "$HEAD_SHA" 'any(.[]; .head_sha == $sha)')"
+              if [ "$HAS_RUN" != "true" ]; then
+                printf '%s' "$PR_DATA" | jq -c '{number, html_url}' >>"$MISSING_NDJSON"
+              fi
+            done
+            # Explicit empty-file guard: `jq -s '.'` on empty input already
+            # returns `[]` (verified jq 1.6/1.8), matching the pre-set
+            # default above — this skips a needless jq spawn on the common
+            # all-clear case rather than working around any jq quirk.
+            if [ -s "$MISSING_NDJSON" ]; then
+              MISSING_JSON="$(jq -s '.' "$MISSING_NDJSON")"
             fi
-            CHECKED_PR_COUNT=$((CHECKED_PR_COUNT + 1))
-            HEAD_SHA="$(printf '%s' "$PR_DATA" | jq -r '.head_sha')"
-            # Fired = ANY run exists for this head SHA, any conclusion
-            # (including in-progress/null) — see head-SHA join caveat above.
-            HAS_RUN="$(printf '%s' "$RUNS_JSON" | jq --arg sha "$HEAD_SHA" 'any(.[]; .head_sha == $sha)')"
-            if [ "$HAS_RUN" != "true" ]; then
-              RECORD="$(printf '%s' "$PR_DATA" | jq -c '{number, html_url}')"
-              MISSING_JSON="$(printf '%s' "$MISSING_JSON" | jq --argjson pr "$RECORD" '. + [$pr]')"
-            fi
-          done
+          fi
           MISSING_RUNS_COUNT="$(printf '%s' "$MISSING_JSON" | jq 'length')"
 
           ANOMALIES=false
-          if [ "$WORKFLOW_MISSING" = "true" ] || [ "$BAD_RUNS_COUNT" -gt 0 ] || [ "$MISSING_RUNS_COUNT" -gt 0 ] || [ "$TRUNCATED" = "true" ]; then
+          if [ "$WORKFLOW_MISSING" = "true" ] || [ "$BAD_RUNS_COUNT" -gt 0 ] || [ "$MISSING_RUNS_COUNT" -gt 0 ]; then
             ANOMALIES=true
           fi
+          # TRUNCATED is deliberately NOT part of ANOMALIES: truncation alone
+          # opening an issue would alarm permanently on any repo whose
+          # merged-PR volume exceeds the 1000-result search cap for the
+          # configured window — alert fatigue. It still blocks auto-close
+          # below (incomplete evidence) and the step summary always
+          # surfaces it regardless of ANOMALIES.
 
           # --- Step 5: alerting (issue is the alert; the run exits 0) ------
           LABEL_ERR="$(mktemp)"
@@ -236,8 +315,16 @@ jobs:
             fi
           fi
 
-          OPEN_ISSUE_NUMBER="$(gh api "repos/${REPO}/issues?labels=${ALARM_LABEL}&state=open&per_page=100" \
-            --jq '[.[] | select(.pull_request == null)] | .[0].number // empty')"
+          # `-f`/`-F` are sent as query params on GET by `gh api` (and
+          # URL-encoded by it) — raw URL interpolation broke (and could
+          # inject) on labels containing spaces or `&`.
+          OPEN_ISSUES_JSON="$(gh api -X GET "repos/${REPO}/issues" \
+            -f labels="${ALARM_LABEL}" -f state=open -F per_page=100)"
+          # Title-prefix match (via ISSUE_TITLE, bound above) in addition to
+          # the label filter: label-only match could seize an unrelated
+          # issue someone labeled by hand.
+          OPEN_ISSUE_NUMBER="$(printf '%s' "$OPEN_ISSUES_JSON" | jq -r --arg prefix "$ISSUE_TITLE" \
+            '[.[] | select(.pull_request == null and (.title | startswith($prefix)))] | .[0].number // empty')"
 
           ACTION="none (window clean, no existing alarm issue)"
           if [ "$ANOMALIES" = "true" ]; then
@@ -273,7 +360,7 @@ jobs:
               if [ "$TRUNCATED" = "true" ]; then
                 echo "### Window truncated — results incomplete"
                 echo
-                echo "The merged-PR search reported \`incomplete_results\` or hit the 1000-result search cap. Missing-run counts above may undercount."
+                echo "The merged-PR search reported \`incomplete_results\` or hit the 1000-result search cap. Missing-run counts above may undercount. Consider lowering \`window-days\` for this repo's merged-PR volume."
                 echo
               fi
               echo "**Repair path:** leaderboard-backfill (ENG-5688); replay-list derivation: ENG-5973."
@@ -284,11 +371,24 @@ jobs:
               ACTION="commented on existing issue #${OPEN_ISSUE_NUMBER}"
             else
               NEW_ISSUE_NUMBER="$(gh api "repos/${REPO}/issues" \
-                -f title="Leaderboard metrics delivery alarm: ${REPO}" \
+                -f title="${ISSUE_TITLE}" \
                 -F body=@"$BODY_FILE" \
                 -f "labels[]=${ALARM_LABEL}" \
                 --jq '.number')"
               ACTION="created issue #${NEW_ISSUE_NUMBER}"
+            fi
+          elif [ "$TRUNCATED" = "true" ]; then
+            # Clean window but truncated evidence: never auto-open (alert
+            # fatigue on a >1000-PR/window repo) and never auto-close either
+            # (incomplete evidence) — if an issue is already open, post a
+            # status comment so it stays visible pending a complete window;
+            # otherwise leave things alone.
+            if [ -n "$OPEN_ISSUE_NUMBER" ]; then
+              gh api "repos/${REPO}/issues/${OPEN_ISSUE_NUMBER}/comments" \
+                -f body="Window read clean as of ${NOW}, but the merged-PR search was truncated (\`incomplete_results\` or the 1000-result cap) — evidence is incomplete, so this alarm stays open pending a complete window. Consider lowering \`window-days\` for this repo's merged-PR volume." >/dev/null
+              ACTION="commented on existing issue #${OPEN_ISSUE_NUMBER} (window clean but truncated — left open)"
+            else
+              ACTION="none (window clean but truncated, no existing alarm issue)"
             fi
           else
             if [ -n "$OPEN_ISSUE_NUMBER" ]; then
@@ -303,6 +403,10 @@ jobs:
           {
             echo "## Leaderboard metrics delivery check — ${REPO}"
             echo
+            if [ "$TRUNCATED" = "true" ]; then
+              echo "> **:warning: WARNING — merged-PR search truncated:** hit \`incomplete_results\` or the 1000-result cap; missing-run counts below may undercount and auto-close is blocked pending a complete window. Consider lowering \`window-days\` for this repo's merged-PR volume."
+              echo
+            fi
             echo "| Metric | Value |"
             echo "|---|---|"
             echo "| Workflow runs checked (\`${WF}\`) | ${RUNS_COUNT} |"
