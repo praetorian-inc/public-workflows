@@ -1,0 +1,169 @@
+# Operator-invoked replay-list derivation (ENG-5973).
+#
+# REPORT-ONLY CONTRACT: this workflow never dispatches a backfill and never
+# writes anywhere outside its own job summary and artifact upload. It runs
+# the audit-delivery composite action (see
+# .github/actions/audit-delivery/action.yml for the full audit semantics and
+# its four-valued `status` output), publishes whatever report the audit
+# produced, and stops. A human reads the report and copies the replay
+# command(s) it prints out of it by hand — nothing here invokes
+# leaderboard-backfill-caller.yml or any other write path.
+#
+# TOKEN: `github.token` (the default fallback below) is a repo-scoped Actions
+# token and only suits a single-repo audit of THIS repo, or of a public repo
+# within its 1,000 req/hr budget. Fleet mode audits every caller repo in the
+# org and needs contents:read + actions:read + pull-requests:read on EVERY
+# one of them — an org-read PAT. Set repository secret
+# LEADERBOARD_AUDIT_TOKEN to such a PAT (5,000 req/hr) before running this in
+# fleet mode; without it, fleet mode fails LOUDLY at the composite action's
+# own readability pre-check, never silently.
+name: Leaderboard Replay Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: >-
+          owner/name of one repo to audit; leave empty and set fleet for the
+          whole fleet.
+        required: false
+        type: string
+        default: ""
+      fleet:
+        required: false
+        type: boolean
+        default: false
+      days:
+        description: Size of the audit window in days, counted back from now. Ignored when `since` is set.
+        required: false
+        type: string
+        default: "30"
+      since:
+        description: >-
+          Explicit window start as YYYY-MM-DD. Overrides `days` when
+          non-empty.
+        required: false
+        type: string
+        default: ""
+      until:
+        description: >-
+          Explicit window end as YYYY-MM-DD, exclusive at midnight UTC.
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+
+      # continue-on-error is load-bearing, not an oversight: the composite
+      # action deliberately FAILS this step when its result is
+      # `status=unknown` (see that action's `status` output description), and
+      # the `Gate on audit result` step below re-derives this job's pass/fail
+      # from `status`/`gap-count` directly. Without continue-on-error, an
+      # unknown result would abort the job here and skip the summary/artifact
+      # steps below — exactly the run where an operator most wants to still
+      # see the partial report and the error.
+      - name: Audit leaderboard delivery
+        id: audit
+        continue-on-error: true
+        uses: ./.github/actions/audit-delivery
+        with:
+          # LEADERBOARD_AUDIT_TOKEN is an org-read PAT (contents:read,
+          # actions:read, pull-requests:read on every fleet repo; 5,000
+          # req/hr). The github.token fallback only suits single-repo audits
+          # of this repo or public repos within budget — fleet mode without
+          # the PAT fails loudly at the readability pre-check, never
+          # silently.
+          github-token: ${{ secrets.LEADERBOARD_AUDIT_TOKEN || github.token }}
+          repo: ${{ inputs.repo }}
+          # A `type: boolean` workflow_dispatch input stringifies to the
+          # literal "true"/"false" when interpolated into a string context
+          # like this `with:` value — exactly the two-valued string the
+          # composite action's own `fleet` input validates against.
+          fleet: ${{ inputs.fleet }}
+          days: ${{ inputs.days }}
+          since: ${{ inputs.since }}
+          until: ${{ inputs.until }}
+
+      - name: Publish report to job summary
+        if: steps.audit.outputs.report-markdown != ''
+        env:
+          REPORT_MARKDOWN: ${{ steps.audit.outputs.report-markdown }}
+          STATUS: ${{ steps.audit.outputs.status }}
+        run: |
+          set -euo pipefail
+          {
+            printf '## Leaderboard replay audit — status: `%s`\n\n' "$STATUS"
+            cat "$REPORT_MARKDOWN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload reports
+        if: steps.audit.outputs.report-markdown != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
+        with:
+          name: audit-delivery-report
+          path: |
+            ${{ steps.audit.outputs.report-json }}
+            ${{ steps.audit.outputs.report-markdown }}
+          if-no-files-found: ignore
+
+      # Re-derives this job's pass/fail from the composite action's own
+      # verdict rather than from step success/failure, since the audit step
+      # above runs under continue-on-error: true. `if: always()` so this
+      # still runs — and can still fail the job — even though nothing
+      # upstream hard-failed.
+      - name: Gate on audit result
+        if: always()
+        env:
+          STATUS: ${{ steps.audit.outputs.status }}
+          GAP_COUNT: ${{ steps.audit.outputs.gap-count }}
+        run: |
+          set -euo pipefail
+          case "$STATUS" in
+            unknown|"")
+              # A could-not-run audit must fail the job: a green job with no
+              # report would read, from the run list alone, as a clean fleet.
+              echo "::error::audit status is '${STATUS:-<empty>}' — the audit could not be trusted to have run. See the 'Audit leaderboard delivery' step log above for the cause."
+              exit 1
+              ;;
+            gaps)
+              echo "::warning::Leaderboard delivery gaps detected: ${GAP_COUNT} affected PR(s). See the job summary for the replay command(s)."
+              exit 0
+              ;;
+            undecided)
+              echo "::notice::Audit ran clean but at least one record is undecided (in flight or unverifiable) — re-run later once it settles."
+              exit 0
+              ;;
+            clean)
+              echo "Leaderboard delivery is clean for the audited window."
+              exit 0
+              ;;
+            *)
+              # Defensive: the composite action documents exactly these four
+              # values. An unrecognized one is treated as unknown rather than
+              # silently falling through to success.
+              echo "::error::audit status '${STATUS}' is not one of the four documented values (clean|gaps|undecided|unknown) — treating as unknown."
+              exit 1
+              ;;
+          esac

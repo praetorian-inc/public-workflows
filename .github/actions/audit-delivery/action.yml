@@ -38,8 +38,22 @@ inputs:
       window; the default 30-day window fits the Actions token.
     required: true
   repo:
-    description: "owner/repo to audit"
-    required: true
+    description: >-
+      owner/repo to audit. Required unless fleet=="true" — mutually exclusive
+      with fleet.
+    required: false
+    default: ""
+  fleet:
+    description: >-
+      Pass the literal string "true" to audit the whole org fleet (the script
+      enumerates caller repos org-wide); mutually exclusive with `repo`.
+      Fleet mode needs a token able to read contents, actions, and
+      pull-requests on EVERY fleet repo — an org-read PAT. A plain
+      repo-scoped GITHUB_TOKEN fails the readability pre-check loudly, and
+      its 1,000 req/hr budget is unfit for fleet windows; a PAT gets
+      5,000/hr.
+    required: false
+    default: "false"
   days:
     description: Size of the audit window in days, counted back from now. Ignored when `since` is set.
     required: false
@@ -173,6 +187,7 @@ runs:
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ inputs.repo }}
+        FLEET: ${{ inputs.fleet }}
         DAYS: ${{ inputs.days }}
         SINCE: ${{ inputs.since }}
         UNTIL: ${{ inputs.until }}
@@ -181,6 +196,31 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
+
+        # `required: false` with a default on an action input is DOCUMENTATION,
+        # not enforcement: the runner happily passes an unset expression
+        # through as the default, or a caller-typo'd value straight through.
+        # Validate fleet's charset here, before it can reach either branch
+        # below — a value that is neither "true" nor "false" is a caller bug.
+        #
+        # Empty is normalized to "false" rather than refused: this input's own
+        # `default: "false"` means a real GitHub Actions run never leaves FLEET
+        # actually unset (the runner applies that default before this env
+        # mapping ever evaluates), so an empty value here only arises from
+        # something invoking this run body directly without going through that
+        # default machinery. Normalizing keeps that case identical to a caller
+        # who never mentioned fleet at all — which is what "false" already
+        # means — rather than making it a hard failure of its own. This is
+        # NOT the fallthrough the safety invariant below forbids: that
+        # invariant is about emptiness never being read as fleet="true"; empty
+        # staying non-fleet (still requiring `repo`, still refused by the next
+        # guard if `repo` is also empty) is the opposite of that.
+        : "${FLEET:=false}"
+        if [ "$FLEET" != "true" ] && [ "$FLEET" != "false" ]; then
+          echo "status=unknown" >> "$GITHUB_OUTPUT"
+          echo "::error::fleet input must be the literal string \"true\" or \"false\" — got \"${FLEET}\"."
+          exit 1
+        fi
 
         # `required: true` on an action input is DOCUMENTATION, not enforcement:
         # the runner happily passes an unset expression through as an empty
@@ -193,7 +233,14 @@ runs:
         # "resolved ZERO caller repos", blaming the fleet probe for a bad input.
         # parseArgs now rejects '' too — belt and braces, since the script is
         # also runnable by hand.
-        if [ -z "$REPO" ]; then
+        #
+        # Fleet is the only legitimate reason for repo to be empty, so this
+        # guard is gated on FLEET != "true": an explicit opt-in into fleet mode
+        # still passes, while an unset caller interpolation — which arrives as
+        # that same empty string — still refuses instead of silently falling
+        # through to a fleet sweep the caller never asked for. Fleet must be
+        # opt-in, never a fallthrough from emptiness.
+        if [ "$FLEET" != "true" ] && [ -z "$REPO" ]; then
           # status FIRST, then the diagnostic, then the exit — and the same at
           # the token guard below. Both guards run BEFORE the detector, so
           # neither the `case "$rc"` block nor its status=unknown arm is ever
@@ -209,6 +256,26 @@ runs:
           echo "status=unknown" >> "$GITHUB_OUTPUT"
           echo "::error::repo input is empty — refusing to run. An empty value would audit the whole org instead of one repo."
           exit 1
+        fi
+
+        # The other half of the ambiguity: fleet="true" together with a
+        # non-empty repo contradicts itself, and there is no safe default to
+        # pick on the caller's behalf between "audit just this repo" and
+        # "audit the fleet" — refuse rather than silently prefer one.
+        if [ "$FLEET" = "true" ] && [ -n "$REPO" ]; then
+          echo "status=unknown" >> "$GITHUB_OUTPUT"
+          echo "::error::fleet=\"true\" and a non-empty repo (\"${REPO}\") were both passed — mutually exclusive; pass one or the other."
+          exit 1
+        fi
+
+        # Named once the three guards above have settled which mode this run
+        # is in, so every later message that used to name ${REPO} (the exit-1
+        # gap warning) names the right subject instead of an empty string in
+        # fleet mode.
+        if [ "$FLEET" = "true" ]; then
+          SUBJECT="fleet"
+        else
+          SUBJECT="$REPO"
         fi
 
         # Same class, different consequence. The script USED TO read
@@ -275,12 +342,18 @@ runs:
         # Built as an array so every value stays one argv element no matter what
         # it contains — a flat string would word-split on spaces.
         args=(
-          "--repo=$REPO"
           "--caller-path=$CALLER_PATH"
           "--backfill-caller=$BACKFILL_CALLER"
           "--json=$json"
           "--markdown=$md"
         )
+        # Absent, not empty, in fleet mode: the script refuses an explicitly
+        # empty --repo by design (the same guard this step's own empty-repo
+        # guard above exists to pre-empt), so fleet mode must never pass the
+        # flag at all rather than pass it with an empty value.
+        if [ "$FLEET" != "true" ]; then
+          args+=("--repo=$REPO")
+        fi
         if [ -n "$SINCE" ]; then
           args+=("--since=$SINCE")
         else
@@ -395,7 +468,7 @@ runs:
               exit 1
             fi
             echo "gap_count=$gap_count" >> "$GITHUB_OUTPUT"
-            echo "::warning::Leaderboard delivery gaps detected for ${REPO}: ${gap_count} affected PR(s). See the report for the replay command."
+            echo "::warning::Leaderboard delivery gaps detected for ${SUBJECT}: ${gap_count} affected PR(s). See the report for the replay command."
             ;;
           *)
             echo "status=unknown" >> "$GITHUB_OUTPUT"
