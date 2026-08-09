@@ -942,6 +942,7 @@ Unlike `leaderboard-metrics.yml`, there is **no IAM/OIDC coupling** here — pin
 | `metrics-workflow` | `leaderboard-metrics.yml` | File name of the caller workflow to audit. |
 | `window-days` | `7` | Lookback window for runs and merged PRs. |
 | `grace-hours` | `3` | Skip PRs merged more recently than this (run/index lag). |
+| `max-checked-prs` | `300` | Upper bound on merged PRs examined per run; when hit, the window is treated as truncated (evidence incomplete). |
 | `alarm-label` | `leaderboard-alarm` | Label identifying the alarm issue this workflow files/updates. |
 
 No secrets required — the caller's own `GITHUB_TOKEN`.

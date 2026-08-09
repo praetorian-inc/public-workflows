@@ -62,6 +62,12 @@ on:
         type: number
         default: 3
 
+      max-checked-prs:
+        description: "Upper bound on merged PRs examined per run; when hit, the window is treated as truncated (evidence incomplete)."
+        required: false
+        type: number
+        default: 300
+
       alarm-label:
         description: "Label identifying the alarm issue this workflow files/updates."
         required: false
@@ -114,6 +120,7 @@ jobs:
       WF: ${{ inputs.metrics-workflow }}
       WINDOW_DAYS: ${{ inputs.window-days }}
       GRACE_HOURS: ${{ inputs.grace-hours }}
+      MAX_CHECKED_PRS: ${{ inputs.max-checked-prs }}
       ALARM_LABEL: ${{ inputs.alarm-label }}
     steps:
       - name: Harden Runner
@@ -166,12 +173,18 @@ jobs:
           # issue someone labeled by hand).
           ISSUE_TITLE="Leaderboard metrics delivery alarm: ${REPO}"
 
+          # Truncation flag: shared across the runs-list guard (Step 2) and
+          # the merged-PR search guard (Step 4) — either can flag incomplete
+          # evidence, so init once, here, before either guard can fire.
+          # Nothing below this line may re-assign it to false.
+          TRUNCATED=false
+
           # --- Step 2: list runs of the audited caller workflow -------------
           RUNS_RAW="$(mktemp)"
           ERR_LOG="$(mktemp)"
           WORKFLOW_MISSING=false
           if ! gh api "repos/${REPO}/actions/workflows/${WF}/runs?created=>=${SINCE_RUNS}&per_page=100" \
-               --paginate --jq '[.workflow_runs[] | {head_sha, conclusion, html_url, created_at, run_number, event}]' \
+               --paginate --jq '{total_count, runs: [.workflow_runs[] | {head_sha, conclusion, html_url, created_at, run_number, event}]}' \
                >"$RUNS_RAW" 2>"$ERR_LOG"; then
             if grep -q "HTTP 404" "$ERR_LOG"; then
               # The audited workflow doesn't exist in this repo at all — the
@@ -185,10 +198,30 @@ jobs:
             fi
           fi
           RUNS_JSON="[]"
+          RUNS_TOTAL=0
           if [ -s "$RUNS_RAW" ]; then
-            RUNS_JSON="$(jq -s 'add' "$RUNS_RAW")"
+            # Each page emits its own {total_count, runs} object (--paginate
+            # + --jq runs the filter per page); flatten the runs arrays
+            # across pages and take the max total_count (stable across pages
+            # in practice, but max is the conservative read).
+            RUNS_JSON="$(jq -s '[.[].runs[]]' "$RUNS_RAW")"
+            RUNS_TOTAL="$(jq -s '[.[].total_count] | max // 0' "$RUNS_RAW")"
           fi
           RUNS_COUNT="$(printf '%s' "$RUNS_JSON" | jq 'length')"
+
+          # Runs-list truncation guard: the list-runs API reports total_count
+          # independently of what pagination actually returned. A shortfall
+          # means BAD_RUNS_JSON and the head-SHA join below silently
+          # undercount their evidence — the same incomplete-evidence
+          # condition as the merged-PR search truncation in Step 4, so it
+          # folds into the same TRUNCATED policy (blocks auto-close, loud
+          # step-summary warning). Skipped when the workflow is missing: the
+          # runs fetch 404'd, so there's no total_count to compare, and the
+          # highest-severity WORKFLOW_MISSING anomaly already covers that
+          # case — TRUNCATED correctly stays false there.
+          if [ "$WORKFLOW_MISSING" != "true" ] && [ "$RUNS_COUNT" -lt "$RUNS_TOTAL" ]; then
+            TRUNCATED=true
+          fi
 
           # Delivery-scoped runs: restrict to the events the caller's merged-
           # guard job actually runs under. A run of any OTHER event
@@ -217,14 +250,29 @@ jobs:
           #     by a newer successful delivery run at the same SHA — a
           #     stateless window re-read would otherwise re-report the old
           #     failure daily until it ages out of the window.
+          # (c) Filter each head-SHA group to completed runs (conclusion !=
+          #     null) BEFORE max_by: otherwise max_by could pick a queued/
+          #     in-progress replacement run whose null conclusion passes the
+          #     bad-run filter as "clean", reading the window as clean (and
+          #     auto-closing an open alarm) while the latest COMPLETED run
+          #     for that SHA is still a failure. Judging the latest completed
+          #     run keeps the failure active until the replacement actually
+          #     finishes. `select(length > 0)` skips groups left empty by an
+          #     all-in-progress SHA so max_by never errors on [].
+          # (d) max_by KEY is .run_number, not .created_at: run numbers are
+          #     strictly monotonically increasing per workflow, while two
+          #     rapid re-triggers can share the same second-resolution
+          #     created_at, making a created_at-keyed max_by pick either one
+          #     nondeterministically. created_at stays the >=SINCE window
+          #     filter above — only the "latest" selection key changes.
           BAD_RUNS_JSON="$(printf '%s' "$DELIVERY_RUNS_JSON" | jq -c --arg since "$SINCE" \
             '[.[] | select(.created_at >= $since)]
-             | group_by(.head_sha) | map(max_by(.created_at))
+             | group_by(.head_sha)
+             | map(map(select(.conclusion != null)) | select(length > 0) | max_by(.run_number))
              | [.[] | select(.conclusion as $c | ["failure","startup_failure","timed_out","action_required","cancelled"] | index($c) != null)]')"
           BAD_RUNS_COUNT="$(printf '%s' "$BAD_RUNS_JSON" | jq 'length')"
 
           # --- Step 4: MISSING RUNS — merged PRs with no caller run --------
-          TRUNCATED=false
           MISSING_JSON="[]"
           CHECKED_PR_COUNT=0
           if [ "$WORKFLOW_MISSING" != "true" ]; then
@@ -272,14 +320,35 @@ jobs:
               CHECKED_PR_COUNT=$((CHECKED_PR_COUNT + 1))
               HEAD_SHA="$(printf '%s' "$PR_DATA" | jq -r '.head_sha')"
               # Fired = ANY delivery run exists for this head SHA, any
-              # conclusion (including in-progress/null) — see head-SHA join
-              # caveat above. Joined against the FULL buffered
-              # DELIVERY_RUNS_JSON (not the >=SINCE-filtered set from Step
-              # 3) — the SINCE_RUNS skew buffer exists precisely for this
-              # join.
-              HAS_RUN="$(printf '%s' "$DELIVERY_RUNS_JSON" | jq --arg sha "$HEAD_SHA" 'any(.[]; .head_sha == $sha)')"
+              # conclusion INCLUDING in-progress/null — see head-SHA join
+              # caveat above — EXCEPT `skipped`: a skipped run is not a
+              # delivery attempt (path filter or `if:` guard misfire), so a
+              # merged PR whose only run skipped must read as MISSING, not
+              # delivered. `skipped` is deliberately NOT added to the Step 3
+              # bad-run list instead: closed-without-merge PRs legitimately
+              # produce skipped `pull_request_target: closed` runs, and this
+              # merged-PR-only join is the correct place to catch a skipped
+              # delivery without false-alarming on those. Joined against the
+              # FULL buffered DELIVERY_RUNS_JSON (not the >=SINCE-filtered
+              # set from Step 3) — the SINCE_RUNS skew buffer exists
+              # precisely for this join.
+              HAS_RUN="$(printf '%s' "$DELIVERY_RUNS_JSON" | jq --arg sha "$HEAD_SHA" \
+                'any(.[]; .head_sha == $sha and .conclusion != "skipped")')"
               if [ "$HAS_RUN" != "true" ]; then
                 printf '%s' "$PR_DATA" | jq -c '{number, html_url}' >>"$MISSING_NDJSON"
+              fi
+              # Rate-limit budget guard: the Actions GITHUB_TOKEN budget is
+              # 1,000 requests/hour per repo. An uncapped loop over a large
+              # in-window merged-PR count would exhaust that budget mid-loop
+              # and kill the job before it can preserve/comment on the alarm
+              # issue. Capping keeps the worst case (~cap + ~20 pagination
+              # calls + issue ops) comfortably inside budget; TRUNCATED
+              # already means exactly "evidence incomplete" (blocks
+              # auto-close, loud step-summary warning), so an early stop
+              # folds cleanly into the existing policy.
+              if [ "$CHECKED_PR_COUNT" -ge "$MAX_CHECKED_PRS" ]; then
+                TRUNCATED=true
+                break
               fi
             done
             # Explicit empty-file guard: `jq -s '.'` on empty input already
