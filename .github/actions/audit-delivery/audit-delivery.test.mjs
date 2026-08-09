@@ -70,6 +70,7 @@ import {
   probeSqsStep,
   needsPayloadProbe,
   assertActionsReadable,
+  annotateAvailability,
   undecidedCaveats,
   RETRY_STATUS,
   API_CAP,
@@ -1364,8 +1365,12 @@ const gapReport = ({
   replay = [9, 10, 100],
   preOnboarding = 0,
   inFlight = 0,
+  mode,
+  callerWorkflowMissing = false,
+  backfillCallerMissing = false,
 } = {}) => ({
   since: '2026-07-05',
+  ...(mode ? { mode } : {}),
   totals: { merged_prs: 12, delivered: 9, in_flight: inFlight },
   repos_with_gaps: [
     {
@@ -1376,9 +1381,16 @@ const gapReport = ({
       pre_onboarding: preOnboarding,
       in_flight: inFlight,
       replay,
+      ...(backfillCallerMissing ? { backfill_caller_missing: true } : {}),
     },
   ],
-  repos: [{ repo: 'guard', has_caller: hasCaller }],
+  repos: [
+    {
+      repo: 'guard',
+      has_caller: hasCaller,
+      ...(callerWorkflowMissing ? { caller_workflow_missing: true } : {}),
+    },
+  ],
 });
 
 test('renderMarkdown: emits the no-caller callout only when has_caller is false', () => {
@@ -1392,6 +1404,72 @@ test('renderMarkdown: emits the no-caller callout only when has_caller is false'
   // are about the callout and nothing else.
   assert.match(withCaller, /### `guard`/);
   assert.match(withCaller, /A leaderboard metrics delivery gap was detected/);
+});
+
+test('renderMarkdown: warns when the audited caller workflow is not REGISTERED at all', () => {
+  // PR #157 round 2 (codex): a typo'd --caller-path 404s the runs probe,
+  // total_count falls to 0, and every merged PR classifies never_fired — a
+  // fabricated replay list. The classifier deliberately does not gate on this
+  // (an un-onboarded repo must scream, not be excused), so the report has to
+  // carry the one distinction the operator needs: "no runs" vs "no such
+  // workflow".
+  const flagged = renderMarkdown(gapReport({ callerWorkflowMissing: true }), CFG);
+  assert.match(flagged, /not registered in this repo at all/);
+  assert.match(flagged, /artifact of a wrong\s+`--caller-path`/);
+
+  const unflagged = renderMarkdown(gapReport(), CFG);
+  assert.doesNotMatch(unflagged, /not registered in this repo at all/);
+});
+
+test('renderMarkdown: warns BEFORE the replay command when the backfill caller is absent', () => {
+  // The command dispatches cfg.backfillCaller in the gap repo, and the
+  // ENG-5688 rollout is per-repo: a repo without it gets a paste the report
+  // KNOWS will bounce. The warning must land before the ```sh block — after
+  // it, the operator has already copied the command.
+  const flagged = renderMarkdown(gapReport({ backfillCallerMissing: true }), CFG);
+  assert.match(flagged, /`leaderboard-backfill-caller\.yml` does not exist in this repo yet/);
+  assert.ok(
+    flagged.indexOf('does not exist in this repo yet') < flagged.indexOf('```sh'),
+    'the warning renders before the command block',
+  );
+  // The command itself still renders: the PR numbers are the finding, and the
+  // command becomes correct the moment the caller is onboarded.
+  assert.match(flagged, /gh workflow run leaderboard-backfill-caller\.yml/);
+
+  const unflagged = renderMarkdown(gapReport(), CFG);
+  assert.doesNotMatch(unflagged, /does not exist in this repo yet/);
+});
+
+test('renderMarkdown: the discovery ceiling renders ONLY for org-enumerated fleet runs', () => {
+  // PR #157 round 2 (codex): /orgs/{owner}/repos lists what the token can
+  // see, so a token-invisible private repo never enters the fleet — no probe,
+  // no error, fleet_size quietly under-counts. Explicit --repos and self-audit
+  // are exempt: every named repo passes assertReadable and fails loudly.
+  const orgFleet = renderMarkdown(gapReport({ mode: 'fleet' }), CFG);
+  assert.match(orgFleet, /org enumeration lists only the\s+repositories the supplied token can see/);
+
+  const explicitFleet = renderMarkdown(gapReport({ mode: 'fleet' }), { ...CFG, repos: ['guard'] });
+  assert.doesNotMatch(explicitFleet, /org enumeration lists only/);
+
+  const self = renderMarkdown(gapReport({ mode: 'self' }), CFG);
+  assert.doesNotMatch(self, /org enumeration lists only/);
+
+  // The clean early-return branch pushes the same ceiling block — it is the
+  // branch that says "nothing to do", which is exactly where an invisible
+  // repo's absence is most misleading.
+  const clean = renderMarkdown(
+    {
+      since: '2026-07-05',
+      mode: 'fleet',
+      totals: { merged_prs: 2, delivered: 2 },
+      unverifiable_reasons: [],
+      repos_with_gaps: [],
+      repos: [{ repo: 'guard', has_caller: true }],
+    },
+    CFG,
+  );
+  assert.match(clean, /No gaps/);
+  assert.match(clean, /org enumeration lists only/);
 });
 
 test('renderMarkdown: the gap banner claims a missing VERIFIED ENQUEUE, never a consumer-side row', () => {
@@ -1770,6 +1848,107 @@ test('buildReport: a gap entry carries the per-class counts and the numeric repl
   assert.equal(report.repos_with_gaps[0].replay.includes(50), false);
   // Reported on the entry, absent from the replay list: #2 is running, not lost.
   assert.equal(report.repos_with_gaps[0].replay.includes(2), false);
+});
+
+test('buildReport: availability flags ride the gap row when set, and ONLY when set', () => {
+  // The gap row is what a machine consumer of the replay list reads
+  // (ENG-5789), so the flags must be THERE, not only on repos[]. And an
+  // unprobed repo must not carry a reassuring `false` — fleet mode never
+  // probes registration, so false would claim knowledge the audit lacks.
+  const flagged = repoResult('guard', { merged: 1, never_fired: [rec(9)] });
+  flagged.caller_workflow_missing = true;
+  flagged.backfill_caller_missing = true;
+  const plain = repoResult('other', { merged: 1, failed: [rec(3)] });
+
+  const report = buildReport([flagged, plain], { since: '2026-07-05', selfAudit: true }, 1);
+  const [g1, g2] = report.repos_with_gaps;
+
+  assert.equal(g1.caller_workflow_missing, true);
+  assert.equal(g1.backfill_caller_missing, true);
+  assert.ok(!('caller_workflow_missing' in g2), 'unprobed/absent flag must not appear as false');
+  assert.ok(!('backfill_caller_missing' in g2), 'unprobed/absent flag must not appear as false');
+});
+
+// ── annotateAvailability ─────────────────────────────────────────────────────
+
+// A stub client in the runsInRange style: annotateAvailability's only route to
+// the network is `client.gh`, so the stub decides which probes 404 and records
+// every URL asked — the probe SELECTION is the property under test.
+const availClient = (missingSubstrings = []) => {
+  const urls = [];
+  return {
+    urls,
+    gh: async (url) => {
+      urls.push(url);
+      if (missingSubstrings.some((s) => url.includes(s))) return { __missing: true };
+      return url.includes('/contents/') ? { name: 'f', content: 'x' } : { id: 1 };
+    },
+  };
+};
+
+const AVAIL_CFG = {
+  owner: 'praetorian-inc',
+  callerFile: 'leaderboard-metrics-caller.yml',
+  callerPath: '.github/workflows/leaderboard-metrics-caller.yml',
+  backfillCaller: 'leaderboard-backfill-caller.yml',
+};
+
+test('annotateAvailability: self-audit flags an UNREGISTERED caller workflow, not a registered one', async () => {
+  const missing = availClient(['/actions/workflows/']);
+  const r1 = [repoResult('public-workflows', { merged: 2, never_fired: [rec(1), rec(2)] })];
+  await annotateAvailability(missing, { ...AVAIL_CFG, selfAudit: true }, r1);
+  assert.equal(r1[0].caller_workflow_missing, true);
+
+  const present = availClient();
+  const r2 = [repoResult('public-workflows', { merged: 2, never_fired: [rec(1), rec(2)] })];
+  await annotateAvailability(present, { ...AVAIL_CFG, selfAudit: true }, r2);
+  assert.ok(
+    !('caller_workflow_missing' in r2[0]),
+    'a registered workflow must leave the flag ABSENT, not set it to false',
+  );
+});
+
+test('annotateAvailability: fleet mode never probes workflow registration', async () => {
+  // Fleet repos arrive through hasCaller's CONTENT probe, which already proved
+  // the caller file exists — a second registration probe would double the cost
+  // and answer a question already answered.
+  const client = availClient();
+  const results = [repoResult('caeruleus', { merged: 1, never_fired: [rec(1)] })];
+  await annotateAvailability(client, { ...AVAIL_CFG, selfAudit: false }, results);
+  assert.ok(
+    client.urls.every((u) => !u.includes('/actions/workflows/')),
+    `no registration probe expected, saw: ${client.urls.join(', ')}`,
+  );
+  assert.ok(!('caller_workflow_missing' in results[0]));
+});
+
+test('annotateAvailability: the backfill-caller probe runs ONLY where a replay command will render', async () => {
+  const client = availClient(['/contents/']);
+  const results = [
+    // never_fired → replayable → probed, and the probe 404s → flagged.
+    repoResult('guard', { merged: 1, never_fired: [rec(9)] }),
+    // payload_missing is a gap but NOT replayable (replayList excludes it):
+    // no command renders, so no probe and no flag.
+    repoResult('julius', { merged: 1, payload_missing: [rec(5)] }),
+    // Clean repo: nothing to replay, no probe.
+    repoResult('nerva', { merged: 1, delivered: [rec(7)] }),
+  ];
+  await annotateAvailability(client, { ...AVAIL_CFG, selfAudit: false }, results);
+
+  assert.equal(results[0].backfill_caller_missing, true);
+  assert.ok(!('backfill_caller_missing' in results[1]));
+  assert.ok(!('backfill_caller_missing' in results[2]));
+  const contentsProbes = client.urls.filter((u) => u.includes('/contents/'));
+  assert.deepEqual(contentsProbes, [
+    '/repos/praetorian-inc/guard/contents/.github/workflows/leaderboard-backfill-caller.yml',
+  ]);
+});
+
+test('annotateAvailability: a PRESENT backfill caller leaves the flag absent', async () => {
+  const client = availClient();
+  const results = [repoResult('caeruleus', { merged: 1, failed: [rec(4)] })];
+  await annotateAvailability(client, { ...AVAIL_CFG, selfAudit: false }, results);
+  assert.ok(!('backfill_caller_missing' in results[0]));
 });
 
 test('buildReport: an in_flight-ONLY repo is not a repo with gaps', () => {

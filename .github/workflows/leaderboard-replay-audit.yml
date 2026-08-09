@@ -15,8 +15,11 @@
 # org and needs contents:read + actions:read + pull-requests:read on EVERY
 # one of them — an org-read PAT. Set repository secret
 # LEADERBOARD_AUDIT_TOKEN to such a PAT (5,000 req/hr) before running this in
-# fleet mode; without it, fleet mode fails LOUDLY at the composite action's
-# own readability pre-check, never silently.
+# fleet mode. Without it, org-wide discovery silently enumerates only the
+# repos github.token can see — invisible private repos never enter the
+# fleet, and no readability pre-check ever fires for them. That is why the
+# guard step below refuses fleet mode without the secret rather than relying
+# on downstream checks.
 name: Leaderboard Replay Audit
 
 on:
@@ -85,6 +88,40 @@ jobs:
           egress-policy: audit
           disable-sudo-and-containers: true
 
+      # Fleet mode discovers its repo list by enumerating
+      # /orgs/{owner}/repos with whatever token it gets — that call only
+      # ever returns repos the token can see. The composite action's own
+      # readability pre-checks guard repos already IN the fleet; they
+      # cannot catch a repo that never entered it, because org enumeration
+      # bounds the fleet before any per-repo probe runs. So the repo-scoped
+      # github.token fallback doesn't fail fleet mode loudly — it silently
+      # produces a SMALLER fleet, omitting every private repo it can't see,
+      # and the audit reports clean on the visible subset. That
+      # false-clean result is exactly the direction this tool exists to
+      # refuse, so this step hard-fails fleet-mode runs before discovery
+      # ever happens unless the org-read PAT secret is set.
+      #
+      # `secrets` is not available in a step-level `if:` expression on some
+      # runner expression-context versions, but it IS available in `env:`
+      # — so the presence check is passed through HAS_PAT and tested in
+      # shell instead of written directly into `if:`.
+      #
+      # Residual: this only detects an ABSENT secret. A PAT that is set
+      # but under-scoped (missing contents/actions/pull-requests read on
+      # some fleet repo) is not detectable here — secrets are opaque
+      # values, not inspectable tokens. The composite action's own report
+      # carries a discovery-ceiling caveat for that case.
+      - name: Refuse fleet mode without the org-read PAT
+        if: ${{ inputs.fleet }}
+        env:
+          HAS_PAT: ${{ secrets.LEADERBOARD_AUDIT_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::error::fleet mode requires the LEADERBOARD_AUDIT_TOKEN repository secret (an org-read PAT). The github.token fallback is repo-scoped: org discovery would silently enumerate only the repos that token can see, and every invisible private repo would be absent from the report with no error. Set the secret, or audit repos one at a time with the repo input."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -112,8 +149,9 @@ jobs:
           # actions:read, pull-requests:read on every fleet repo; 5,000
           # req/hr). The github.token fallback only suits single-repo audits
           # of this repo or public repos within budget — fleet mode without
-          # the PAT fails loudly at the readability pre-check, never
-          # silently.
+          # the PAT is refused by the "Refuse fleet mode without the
+          # org-read PAT" guard step above, because discovery omission is
+          # silent, not loud.
           github-token: ${{ secrets.LEADERBOARD_AUDIT_TOKEN || github.token }}
           repo: ${{ inputs.repo }}
           # A `type: boolean` workflow_dispatch input stringifies to the

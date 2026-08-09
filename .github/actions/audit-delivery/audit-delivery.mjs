@@ -3142,8 +3142,35 @@ const COVERAGE_CEILING =
   'invisible here; consumer-side verification is out of reach of the GitHub API — the ' +
   'DLQ/alarm territory of ENG-5689 option 2 (measured instance: ENG-5775)._';
 
+// Rendered ONLY for org-discovered fleet runs, because it states a ceiling
+// specific to that path: /orgs/{owner}/repos lists what the TOKEN can see, so
+// a private repo invisible to the token never enters the fleet at all — no
+// probe runs against it, no error fires, and `fleet_size` quietly under-counts.
+// The explicit --repos path is exempt because every named repo passes
+// assertReadable and fails LOUDLY when invisible; self-audit names one repo the
+// same way. This is a ceiling the report cannot lift from inside — a token
+// cannot enumerate what it cannot list — so the remedy is operational (run
+// fleet mode under the org-read PAT) and the sentence's job is to stop
+// "fleet_size=N, clean" from being read as a claim about the whole org.
+const DISCOVERY_CEILING =
+  '_Discovery: this was an org-enumerated fleet run, and org enumeration lists only the ' +
+  'repositories the supplied token can see — a private repo invisible to the token never ' +
+  'enters the fleet and is absent from this report without any error. Treat `fleet_size` ' +
+  'as a claim about the token’s visibility, not about the org; run fleet mode under the ' +
+  'org-read PAT (`LEADERBOARD_AUDIT_TOKEN`) to close the gap._';
+
 export function renderMarkdown(report, cfg) {
   const L = [];
+  // Both exit paths (the clean early return and the footer) push the same
+  // ceiling block, so it is built once — the clean branch is the one that
+  // needs these MOST, and a second call site is how one of them drifts.
+  const pushCeilings = () => {
+    L.push(COVERAGE_CEILING);
+    if (report.mode === 'fleet' && !cfg.repos) {
+      L.push('');
+      L.push(DISCOVERY_CEILING);
+    }
+  };
   L.push('## Leaderboard delivery audit');
   L.push('');
   L.push(
@@ -3185,7 +3212,7 @@ export function renderMarkdown(report, cfg) {
     // so the ceiling has to be pushed here as well as there. This is the branch
     // that needs it MOST: it is the one that says "nothing to do".
     L.push('');
-    L.push(COVERAGE_CEILING);
+    pushCeilings();
     return L.join('\n');
   }
   L.push(
@@ -3228,6 +3255,23 @@ export function renderMarkdown(report, cfg) {
         '> **This repo has no `leaderboard-metrics.yml` caller that references the ' +
           'reusable.** Nothing was ever going to deliver, so every merged PR below ' +
           'is a never-fired delivery, not a failure.',
+      );
+      L.push('');
+    }
+    if (r && r.caller_workflow_missing) {
+      // Self-audit only (see annotateAvailability): the workflow-registration
+      // probe 404'd, which is compatible with exactly two states the
+      // classifier cannot tell apart — a repo that was never onboarded (the
+      // never_fired scream below is then correct and owed a backfill) and a
+      // typo'd --caller-path (the scream is then an artifact and the replay
+      // list below is fabricated). Only the operator can tell which, so the
+      // report says so where the operator reads, before any command.
+      L.push(
+        '> **The audited caller workflow is not registered in this repo at all** — the ' +
+          'Actions API has no workflow for the audited `--caller-path`. Every `never_fired` ' +
+          'below is correct if this repo was never onboarded, and an artifact of a wrong ' +
+          '`--caller-path` if it was. Verify the path against the repo before acting on ' +
+          'any replay command in this report.',
       );
       L.push('');
     }
@@ -3311,6 +3355,22 @@ export function renderMarkdown(report, cfg) {
     // the report KNOWS will bounce; batch it here instead of handing over a
     // paste that fails. (The shell is not the constraint: 188 PR numbers is
     // ~940 bytes against a 1MB ARG_MAX.)
+    if (g.backfill_caller_missing) {
+      // Proven absent by annotateAvailability's contents probe, so the command
+      // below is one the report KNOWS will bounce ("could not find any
+      // workflows") — the same class of defect as an unbatched >256 list. The
+      // command still renders, because it is correct the moment the caller is
+      // onboarded and the PR numbers are the finding either way; what must not
+      // happen is the operator (or ENG-5789's dispatcher) pasting it first and
+      // debugging gh's error second.
+      L.push(
+        `> **\`${cfg.backfillCaller}\` does not exist in this repo yet**, so the replay ` +
+          'command below will fail with "could not find any workflows" until the backfill ' +
+          'caller is onboarded there (the ENG-5688 per-repo rollout). Onboard it first; do ' +
+          'not retarget the dispatch at a different workflow.',
+      );
+      L.push('');
+    }
     const batches = chunk(g.replay, REPLAY_BATCH);
     L.push(
       batches.length > 1
@@ -3349,7 +3409,7 @@ export function renderMarkdown(report, cfg) {
       '`audit.json` artifact.',
   );
   L.push('');
-  L.push(COVERAGE_CEILING);
+  pushCeilings();
   return L.join('\n');
 }
 
@@ -3404,6 +3464,14 @@ export function buildReport(results, cfg, apiCalls, dupes = 0) {
     unverifiable_prs: r.classes.unverifiable.map((p) => p.number).sort((a, b) => a - b),
     unverifiable_reasons: unverifiableReasons(r.classes.unverifiable),
     replay: replayList(r.classes),
+    // Present ONLY when annotateAvailability proved the absence — see that
+    // function for why an unprobed repo must not carry a reassuring `false`.
+    // Copied onto the gap row, not left solely on `repos`, because this row is
+    // what a machine consumer of the replay list reads (ENG-5789), and a
+    // dispatcher that reads `replay` here without this flag would dispatch
+    // against a workflow the audit already proved absent.
+    ...(r.caller_workflow_missing ? { caller_workflow_missing: true } : {}),
+    ...(r.backfill_caller_missing ? { backfill_caller_missing: true } : {}),
   }));
   return {
     since: cfg.since,
@@ -3449,6 +3517,56 @@ export function buildReport(results, cfg, apiCalls, dupes = 0) {
   };
 }
 
+// ── Availability annotation (PR #157 round 2) ───────────────────────────────
+//
+// Two flags, both about whether the report's own instructions can be FOLLOWED,
+// neither allowed to change a verdict:
+//
+// `caller_workflow_missing` (self-audit only): runsInRange keys runs to
+// `cfg.callerFile`, and the Actions API answers "no such workflow" with the
+// same 404 → total_count=0 → zero runs that "registered, zero runs" produces —
+// so a typo'd --caller-path classifies every merged PR never_fired and the
+// replay list is fabricated. The classification deliberately does NOT gate on
+// this probe: an absent caller MUST scream never_fired, not be excused — the
+// caeruleus case at the top of this file — and a repo can also be genuinely
+// un-onboarded. What the probe adds is the distinction the operator needs and
+// the classifier cannot make: the workflow-REGISTRATION endpoint separates
+// "this workflow exists and has no runs in the window" from "no workflow by
+// this name exists at all", and only the second is compatible with a wrong
+// --caller-path. Self-audit only because fleet mode reaches a repo through
+// hasCaller's content probe, which already proved the caller file exists.
+//
+// `backfill_caller_missing` (any repo with a non-empty replay list): the
+// replay command this report prints dispatches `cfg.backfillCaller` in the gap
+// repo, and that workflow's rollout (ENG-5688) is per-repo and incomplete —
+// measured 2026-08-08: present in caeruleus and nerva, absent from guard,
+// julius, brutus, titus, vespasian, and public-workflows itself. A command the
+// report KNOWS will bounce ("could not find any workflows") is the same defect
+// as the unbatched >256 list: a paste that fails, handed over as if it works.
+// Probed only where a replay command will actually render, so the annotation
+// costs one contents call per gap repo, zero on a clean fleet.
+//
+// Flags are set only when the absence is PROVEN (a 404 from the probe). They
+// are never set to false: fleet mode does not probe registration, so a false
+// there would claim knowledge the audit does not have.
+export async function annotateAvailability(client, cfg, results) {
+  for (const r of results) {
+    if (cfg.selfAudit) {
+      const wf = await client.gh(
+        `/repos/${cfg.owner}/${r.repo}/actions/workflows/${encodeURIComponent(cfg.callerFile)}`,
+      );
+      if (!wf || wf.__missing) r.caller_workflow_missing = true;
+    }
+    if (replayList(r.classes).length) {
+      const probe = await client.gh(
+        `/repos/${cfg.owner}/${r.repo}/contents/.github/workflows/${encodeURIComponent(cfg.backfillCaller)}`,
+      );
+      if (!probe || probe.__missing) r.backfill_caller_missing = true;
+    }
+  }
+  return results;
+}
+
 // ── Emitting a workflow command safely ──────────────────────────────────────
 //
 // `::error::<message>` is LINE-ORIENTED: the runner reads it to the end of the
@@ -3481,6 +3599,7 @@ export const wfEscape = (s) =>
 // through here anyway, because a rule with two exceptions is how the next
 // interpolated message ends up emitted raw.
 export const wfError = (msg) => console.error(`::error::${wfEscape(msg)}`);
+export const wfWarn = (msg) => console.error(`::warning::${wfEscape(msg)}`);
 
 // The credential sources, in precedence order. Named once so the picker below and
 // its refusal message cannot drift apart from each other.
@@ -3571,6 +3690,25 @@ async function main() {
 
   const results = [];
   for (const repo of fleet) results.push(await auditRepo(client, cfg, repo));
+
+  // After the audit, before the report is built, so the flags ride both
+  // channels (repos[] and the repos_with_gaps rows). Warnings surface in the
+  // run log too: the report says the same thing, but a ::warning is what an
+  // operator scanning the Actions UI actually sees.
+  await annotateAvailability(client, cfg, results);
+  for (const r of results) {
+    if (r.caller_workflow_missing) {
+      wfWarn(
+        `${cfg.owner}/${r.repo}: the audited caller workflow (--caller-path ${cfg.callerPath}) is not registered in this repo — never_fired verdicts are correct only if the repo was never onboarded; a typo'd --caller-path produces the same result. Verify before replaying.`,
+      );
+    }
+    if (r.backfill_caller_missing) {
+      wfWarn(
+        `${cfg.owner}/${r.repo}: ${cfg.backfillCaller} does not exist in this repo — the replay command in the report will fail until the backfill caller is onboarded (ENG-5688).`,
+      );
+    }
+  }
+
   const report = buildReport(results, cfg, client.state.calls, client.state.dupes);
 
   const { writeFileSync } = await import('node:fs');
