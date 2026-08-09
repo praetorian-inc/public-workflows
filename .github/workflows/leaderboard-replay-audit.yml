@@ -1,0 +1,250 @@
+# Operator-invoked replay-list derivation (ENG-5973).
+#
+# REPORT-ONLY CONTRACT: this workflow never dispatches a backfill and never
+# writes anywhere outside its own job summary and artifact upload. It runs
+# the audit-delivery composite action (see
+# .github/actions/audit-delivery/action.yml for the full audit semantics and
+# its four-valued `status` output), publishes whatever report the audit
+# produced, and stops. A human reads the report and copies the replay
+# command(s) it prints out of it by hand — nothing here invokes
+# leaderboard-backfill-caller.yml or any other write path.
+#
+# TOKEN: `github.token` (the default fallback below) is a repo-scoped Actions
+# token and only suits a single-repo audit of THIS repo, or of a public repo
+# within its 1,000 req/hr budget. Fleet mode audits every caller repo in the
+# org and needs contents:read + actions:read + pull-requests:read on EVERY
+# one of them — an org-read PAT. Set repository secret
+# LEADERBOARD_AUDIT_TOKEN to such a PAT (5,000 req/hr) before running this in
+# fleet mode. Without it, org-wide discovery silently enumerates only the
+# repos github.token can see — invisible private repos never enter the
+# fleet, and no readability pre-check ever fires for them. That is why the
+# guard step below refuses fleet mode without the secret rather than relying
+# on downstream checks.
+name: Leaderboard Replay Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: >-
+          owner/name of one repo to audit; leave empty and set fleet for the
+          whole fleet.
+        required: false
+        type: string
+        default: ""
+      fleet:
+        required: false
+        type: boolean
+        default: false
+      days:
+        description: Size of the audit window in days, counted back from now. Ignored when `since` is set.
+        required: false
+        type: string
+        default: "30"
+      since:
+        description: >-
+          Explicit window start as YYYY-MM-DD. Overrides `days` when
+          non-empty.
+        required: false
+        type: string
+        default: ""
+      until:
+        description: >-
+          Explicit window end as YYYY-MM-DD, exclusive at midnight UTC.
+        required: false
+        type: string
+        default: ""
+      caller-path:
+        description: >-
+          Repo-relative path of the caller workflow to audit; leave empty
+          to auto-select (the fleet default, or this repo's own
+          self-caller when `repo` names this repository).
+        required: false
+        type: string
+        default: ""
+
+# All three scopes are read-only and load-bearing for the audit: contents
+# reads the caller-workflow file, actions reads the workflow-run list, and
+# pull-requests reads the merged-PR list the audit is built from. This block
+# is a CEILING on the github.token fallback used below — an unlisted scope
+# becomes none, not "whatever the token would otherwise have" — so without
+# the latter two grants the documented single-repo fallback can never pass
+# the composite action's own readability pre-check and every fallback run
+# exits status=unknown. (A PAT such as LEADERBOARD_AUDIT_TOKEN is not bound
+# by this ceiling; this block only constrains github.token.)
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      # Fleet mode discovers its repo list by enumerating
+      # /orgs/{owner}/repos with whatever token it gets — that call only
+      # ever returns repos the token can see. The composite action's own
+      # readability pre-checks guard repos already IN the fleet; they
+      # cannot catch a repo that never entered it, because org enumeration
+      # bounds the fleet before any per-repo probe runs. So the repo-scoped
+      # github.token fallback doesn't fail fleet mode loudly — it silently
+      # produces a SMALLER fleet, omitting every private repo it can't see,
+      # and the audit reports clean on the visible subset. That
+      # false-clean result is exactly the direction this tool exists to
+      # refuse, so this step hard-fails fleet-mode runs before discovery
+      # ever happens unless the org-read PAT secret is set.
+      #
+      # `secrets` is not available in a step-level `if:` expression on some
+      # runner expression-context versions, but it IS available in `env:`
+      # — so the presence check is passed through HAS_PAT and tested in
+      # shell instead of written directly into `if:`.
+      #
+      # Residual: this only detects an ABSENT secret. A PAT that is set
+      # but under-scoped (missing contents/actions/pull-requests read on
+      # some fleet repo) is not detectable here — secrets are opaque
+      # values, not inspectable tokens. The composite action's own report
+      # carries a discovery-ceiling caveat for that case.
+      - name: Refuse fleet mode without the org-read PAT
+        if: ${{ inputs.fleet }}
+        env:
+          HAS_PAT: ${{ secrets.LEADERBOARD_AUDIT_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::error::fleet mode requires the LEADERBOARD_AUDIT_TOKEN repository secret (an org-read PAT). The github.token fallback is repo-scoped: org discovery would silently enumerate only the repos that token can see, and every invisible private repo would be absent from the report with no error. Set the secret, or audit repos one at a time with the repo input."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+
+      # continue-on-error is load-bearing, not an oversight: the composite
+      # action deliberately FAILS this step when its result is
+      # `status=unknown` (see that action's `status` output description), and
+      # the `Gate on audit result` step below re-derives this job's pass/fail
+      # from `status`/`gap-count` directly. Without continue-on-error, an
+      # unknown result would abort the job here and skip the summary/artifact
+      # steps below — exactly the run where an operator most wants to still
+      # see the partial report and the error.
+      - name: Audit leaderboard delivery
+        id: audit
+        continue-on-error: true
+        uses: ./.github/actions/audit-delivery
+        with:
+          # LEADERBOARD_AUDIT_TOKEN is an org-read PAT (contents:read,
+          # actions:read, pull-requests:read on every fleet repo; 5,000
+          # req/hr). The github.token fallback only suits single-repo audits
+          # of this repo or public repos within budget — fleet mode without
+          # the PAT is refused by the "Refuse fleet mode without the
+          # org-read PAT" guard step above, because discovery omission is
+          # silent, not loud.
+          github-token: ${{ secrets.LEADERBOARD_AUDIT_TOKEN || github.token }}
+          repo: ${{ inputs.repo }}
+          # A `type: boolean` workflow_dispatch input stringifies to the
+          # literal "true"/"false" when interpolated into a string context
+          # like this `with:` value — exactly the two-valued string the
+          # composite action's own `fleet` input validates against.
+          fleet: ${{ inputs.fleet }}
+          days: ${{ inputs.days }}
+          since: ${{ inputs.since }}
+          until: ${{ inputs.until }}
+          # The composite action's own default caller-path
+          # (.github/workflows/leaderboard-metrics.yml) is right for every
+          # fleet repo, but wrong for THIS repo: here that path names the
+          # reusable workflow itself, which accrues no runs of its own — runs
+          # land against the real self-caller,
+          # .github/workflows/leaderboard-metrics-caller.yml. Auditing this
+          # repo with the fleet default would classify every merged PR
+          # never_fired and fabricate a replay list for PRs already
+          # delivered. Precedence: an explicit caller-path input always wins;
+          # otherwise self-audit (repo == github.repository) selects the
+          # -caller.yml file; otherwise the fleet default. `&&`/`||` chaining
+          # is safe here since every operand is a non-empty string.
+          caller-path: ${{ inputs.caller-path != '' && inputs.caller-path || (inputs.repo == github.repository && '.github/workflows/leaderboard-metrics-caller.yml' || '.github/workflows/leaderboard-metrics.yml') }}
+
+      # Gated on report-markdown only (not report-json): this step renders
+      # the markdown into the summary, so it has nothing to do on a
+      # JSON-only run. That run still surfaces via the "Upload reports"
+      # artifact below, which is gated on either output.
+      - name: Publish report to job summary
+        if: steps.audit.outputs.report-markdown != ''
+        env:
+          REPORT_MARKDOWN: ${{ steps.audit.outputs.report-markdown }}
+          STATUS: ${{ steps.audit.outputs.status }}
+        run: |
+          set -euo pipefail
+          {
+            printf '## Leaderboard replay audit — status: `%s`\n\n' "$STATUS"
+            cat "$REPORT_MARKDOWN"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fires when EITHER report exists, not just report-markdown: the
+      # composite action documents that an exit-2 raised inside the markdown
+      # write can publish report-json COMPLETE while report-markdown stays
+      # unset — exactly the failure mode where diagnostics matter most, and
+      # gating on report-markdown alone uploaded nothing for it. The `path:`
+      # list still names both outputs; an empty line from the unset one is
+      # harmless because if-no-files-found is ignore.
+      - name: Upload reports
+        if: steps.audit.outputs.report-json != '' || steps.audit.outputs.report-markdown != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
+        with:
+          name: audit-delivery-report
+          path: |
+            ${{ steps.audit.outputs.report-json }}
+            ${{ steps.audit.outputs.report-markdown }}
+          if-no-files-found: ignore
+
+      # Re-derives this job's pass/fail from the composite action's own
+      # verdict rather than from step success/failure, since the audit step
+      # above runs under continue-on-error: true. `if: always()` so this
+      # still runs — and can still fail the job — even though nothing
+      # upstream hard-failed.
+      - name: Gate on audit result
+        if: always()
+        env:
+          STATUS: ${{ steps.audit.outputs.status }}
+          GAP_COUNT: ${{ steps.audit.outputs.gap-count }}
+        run: |
+          set -euo pipefail
+          case "$STATUS" in
+            unknown|"")
+              # A could-not-run audit must fail the job: a green job with no
+              # report would read, from the run list alone, as a clean fleet.
+              echo "::error::audit status is '${STATUS:-<empty>}' — the audit could not be trusted to have run. See the 'Audit leaderboard delivery' step log above for the cause."
+              exit 1
+              ;;
+            gaps)
+              echo "::warning::Leaderboard delivery gaps detected: ${GAP_COUNT} affected PR(s). See the job summary for the replay command(s)."
+              exit 0
+              ;;
+            undecided)
+              echo "::notice::Audit ran clean but at least one record is undecided (in flight or unverifiable) — re-run later once it settles."
+              exit 0
+              ;;
+            clean)
+              echo "Leaderboard delivery is clean for the audited window."
+              exit 0
+              ;;
+            *)
+              # Defensive: the composite action documents exactly these four
+              # values. An unrecognized one is treated as unknown rather than
+              # silently falling through to success.
+              echo "::error::audit status '${STATUS}' is not one of the four documented values (clean|gaps|undecided|unknown) — treating as unknown."
+              exit 1
+              ;;
+          esac
