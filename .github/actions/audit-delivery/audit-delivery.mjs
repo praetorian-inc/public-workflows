@@ -1649,8 +1649,13 @@ export function splitPayloadMissing(recs) {
 // author whose email is linked to no GitHub account (`.author` is null on the
 // commit row): there is no login to probe or to add to the map, but "never
 // answer 'no' when you mean 'don't know'" applies, so the record fails closed
-// as an engineer gap and the marker says why no login is listed for it.
-export const UNLINKED_COMMIT_AUTHOR = '(unlinked commit author — no GitHub login)';
+// as an engineer gap and the marker says why no login is listed for it. The
+// marker carries the raw commit email (present on `commit.author` even when
+// no account is linked) because that email IS the remediation handle: no map
+// edit can attribute an unlinked commit — the collector drops them — so the
+// fix is finding the person and linking that address to a GitHub account.
+export const unlinkedCommitAuthor = (email) =>
+  `(unlinked commit author ${email || 'unknown email'} — no GitHub login)`;
 
 // The one membership probe, shared by the opener triage and the commit-author
 // re-triage so the two paths cannot diverge. 204 = member. Direct 404 = proven
@@ -1692,16 +1697,27 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
   );
   const responsible = new Set();
   const probed = new Set();
-  let unlinked = false;
+  const unlinkedEmails = new Set();
   for (const c of commits) {
+    // MERGE commits never attribute in the live pipeline: the collector's
+    // determine_authors reads `git log --numstat --no-renames`, which prints a
+    // bare hash and no numstat rows for a merge, so its author is never seen
+    // there — probing one here would manufacture a gap no map edit can clear
+    // (e.g. an engineer merging main into a dependabot branch). The listing
+    // rows carry no stats, so `parents` is the faithful available predicate.
+    // Residual: an EMPTY non-merge commit is equally numstat-less but
+    // indistinguishable in this listing; it still fails closed — the loud
+    // direction.
+    if ((c.parents?.length ?? 0) > 1) continue;
     // `.author` is the LINKED GitHub user of the commit's author email — null
     // when the email is linked to no account. Bots are skipped by the same
     // test as openers; an unlinked non-bot author is unprobeable, and
-    // unprobeable fails closed (engineer), never open (excluded).
+    // unprobeable fails closed (engineer), never open (excluded). The raw
+    // commit email is kept for the marker — it is the remediation handle.
     const author = c.author ?? null;
     if (isBotAuthor(author)) continue;
     if (!author?.login) {
-      unlinked = true;
+      unlinkedEmails.add(c.commit?.author?.email ?? '');
       continue;
     }
     if (probed.has(author.login)) continue;
@@ -1711,14 +1727,15 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
     responsible.add(author.login);
     if (unproven) rec.membership_unproven = true;
   }
-  if (!responsible.size && !unlinked) return;
+  if (!responsible.size && !unlinkedEmails.size) return;
   rec.author_kind = AUTHOR_KIND.engineer;
   // The map edit is owed to the COMMIT authors, never to the bot/external
   // opener — buildReport reads this list into payload_missing_unmapped_logins
-  // in place of `author_login` for re-triaged records.
+  // in place of `author_login` for re-triaged records. One marker per distinct
+  // unlinked email, since each address is a separate account-linking action.
   rec.commit_author_logins = [
     ...[...responsible].sort(),
-    ...(unlinked ? [UNLINKED_COMMIT_AUTHOR] : []),
+    ...[...unlinkedEmails].sort().map((email) => unlinkedCommitAuthor(email)),
   ];
 }
 
@@ -1977,7 +1994,10 @@ export function makeClient(token) {
   // truthfully only to a token that can see private membership and 302s every
   // other requester toward the public-members endpoint — followed, that
   // arrives as a 404 byte-identical to "proven non-member", the false-external
-  // direction. RETRY_STATUS carries no 3xx entry, so the manual 302 passes
+  // direction. Measured 2026-08-09 against live GitHub on node v22 (undici):
+  // the manual 302 arrives as a REAL response — status 302, type 'basic',
+  // Location header present — never a browser-style status-0 opaqueredirect.
+  // RETRY_STATUS carries no 3xx entry, so the manual 302 passes
   // through request()'s retry loop untouched. Still routed through request(),
   // so the retry loop and api_calls accounting cover it. `allowed` is required,
   // like ghPaged's `identity`: every status reaching the caller is read as an

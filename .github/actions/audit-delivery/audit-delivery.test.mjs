@@ -52,7 +52,7 @@ import {
   verifyPayloads,
   applyPayloadVerdicts,
   AUTHOR_KIND,
-  UNLINKED_COMMIT_AUTHOR,
+  unlinkedCommitAuthor,
   isBotAuthor,
   splitPayloadMissing,
   triagePayloadMissingAuthors,
@@ -2843,7 +2843,16 @@ const membershipClient = (statuses = {}, commitsByPr = {}) => {
   return {
     probes,
     listings,
-    ghStatus: async (path) => {
+    ghStatus: async (path, allowed) => {
+      // The triage call site must declare exactly the three readable statuses.
+      // A stub that discarded `allowed` kept the suite green while a call site
+      // narrowed to [204, 404] would abort production (exit 2) on the first
+      // 302 — so the contract is pinned here, at the only stub of ghStatus.
+      assert.deepEqual(
+        allowed,
+        [204, 302, 404],
+        'membership probe must declare exactly the three readable statuses',
+      );
       probes.push(path);
       if (!(path in statuses)) throw new Error(`unexpected membership probe: ${path}`);
       return statuses[path];
@@ -2860,8 +2869,14 @@ const membershipClient = (statuses = {}, commitsByPr = {}) => {
 const TCFG = { owner: 'praetorian-inc' };
 const userPr = (number, user) => [number, { number, user }];
 // A row of GET /repos/{o}/{r}/pulls/{n}/commits: `.author` is the LINKED user
-// object (null for an unlinked email), which is all the re-triage reads.
-const commitBy = (sha, author) => ({ sha, author });
+// object (null for an unlinked email); `parents` and `commit.author.email`
+// join it for the merge-skip and unlinked-marker paths.
+const commitBy = (sha, author, { email, parents } = {}) => ({
+  sha,
+  author,
+  ...(email !== undefined ? { commit: { author: { email } } } : {}),
+  ...(parents !== undefined ? { parents } : {}),
+});
 
 test('triagePayloadMissingAuthors: a [bot]-suffixed login is bot — decided locally, zero probes', async () => {
   // The opener verdict is local, but the EXCLUSION is not opener-only: the
@@ -3114,8 +3129,17 @@ test('re-triage: a 302 on a commit author fails CLOSED — engineer, flagged unp
 
 test('re-triage: a non-bot commit author with NO login (unlinked email) fails CLOSED as engineer', async () => {
   // `.author` null means the commit email is linked to no GitHub account —
-  // unprobeable, and unprobeable is "don't know", never "no".
-  const client = membershipClient({}, { 15: [commitBy('eee1', null)] });
+  // unprobeable, and unprobeable is "don't know", never "no". The marker
+  // carries the raw commit email (the remediation handle: no map edit can
+  // attribute an unlinked commit — the fix is linking that address); a row
+  // with no email at all falls back to the 'unknown email' text. One marker
+  // per distinct email, sorted.
+  const client = membershipClient({}, {
+    15: [
+      commitBy('eee1', null, { email: 'jane.doe@praetorian.com' }),
+      commitBy('eee2', null),
+    ],
+  });
   const classes = { payload_missing: [rec(15)] };
   await triagePayloadMissingAuthors(
     client,
@@ -3127,16 +3151,69 @@ test('re-triage: a non-bot commit author with NO login (unlinked email) fails CL
   );
   const r = classes.payload_missing[0];
   assert.equal(r.author_kind, AUTHOR_KIND.engineer);
-  assert.deepEqual(r.commit_author_logins, [UNLINKED_COMMIT_AUTHOR]);
+  const markers = [unlinkedCommitAuthor(''), unlinkedCommitAuthor('jane.doe@praetorian.com')];
+  assert.deepEqual(r.commit_author_logins, markers);
+  assert.match(markers[1], /jane\.doe@praetorian\.com/, 'the email must be readable in the marker');
+  assert.match(markers[0], /unknown email/, 'a missing email falls back, never renders empty');
   assert.deepEqual(client.probes, [], 'nothing probeable — but nothing excused either');
   // The marker rides the map-edit list so the operator sees WHY no login is
-  // named for the gap.
+  // named for the gap (buildReport re-sorts the list lexically, so the marker
+  // order there is its own, not the record's).
   const report = buildReport(
     [repoResult('guard', { merged: 1, payload_missing: classes.payload_missing })],
     { since: '2026-07-01', selfAudit: true },
     5,
   );
-  assert.deepEqual(report.repos_with_gaps[0].payload_missing_unmapped_logins, [UNLINKED_COMMIT_AUTHOR]);
+  assert.deepEqual(
+    report.repos_with_gaps[0].payload_missing_unmapped_logins,
+    [...markers].sort(),
+  );
+});
+
+test('re-triage: a member-authored MERGE commit alone does NOT reclassify — merges never attribute', async () => {
+  // The live collector's determine_authors reads `git log --numstat`, which
+  // prints no numstat rows for a merge commit, so its author is never scored.
+  // Probing it here would manufacture a gap no map edit can clear (e.g. an
+  // engineer merging main into a dependabot branch).
+  const client = membershipClient({}, {
+    18: [
+      commitBy('aba1', { login: 'dependabot[bot]', type: 'Bot' }, { parents: [{ sha: 'p0' }] }),
+      commitBy('aba2', { login: 'maintainer', type: 'User' }, { parents: [{ sha: 'p1' }, { sha: 'p2' }] }),
+    ],
+  });
+  const classes = { payload_missing: [rec(18)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(18, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot);
+  assert.equal(classes.payload_missing[0].commit_author_logins, undefined);
+  assert.deepEqual(client.probes, [], 'a merge-commit author must cost zero probes');
+});
+
+test('re-triage: the same member author on a NON-merge commit still reclassifies — the control', async () => {
+  // Single parent → the collector attributes it → the gap is real and
+  // map-fixable, so the merge skip must not swallow ordinary commits.
+  const client = membershipClient(
+    { '/orgs/praetorian-inc/members/maintainer': 204 },
+    { 19: [commitBy('aba3', { login: 'maintainer', type: 'User' }, { parents: [{ sha: 'p1' }] })] },
+  );
+  const classes = { payload_missing: [rec(19)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(19, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer);
+  assert.deepEqual(r.commit_author_logins, ['maintainer']);
 });
 
 test('re-triage: commit-author probes share the run-scoped memberCache across records', async () => {
