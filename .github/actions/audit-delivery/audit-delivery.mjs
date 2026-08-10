@@ -1579,18 +1579,22 @@ export function applyPayloadVerdicts(classes, verdicts) {
 //   bot                   — `[bot]`-suffixed login or `user.type === 'Bot'`.
 //                           Excluded from the leaderboard by design; no gap, no
 //                           remediation. Decided locally, zero API calls.
-//   external_or_invisible — the org-membership probe answered 404. GitHub
-//                           defines that answer as "not a member, OR the
-//                           requester cannot see membership", so the report
-//                           must say both: an employee with private membership
-//                           under a weak token is byte-identical to a drive-by
-//                           contributor here. Not a gap either way — an
-//                           external has no score to miss, and the invisible
-//                           case is unactionable without a better token — but
+//   external_or_invisible — the org-membership probe answered a DIRECT 404.
+//                           GitHub answers 204/404 truthfully only to a token
+//                           that can see private membership and REDIRECTS any
+//                           other requester toward the public-members
+//                           endpoint, so under `redirect: 'manual'` a direct
+//                           404 is a PROVEN non-member at audit time. Not a
+//                           gap — an external has no score to miss — but
 //                           listed for operator eyeballing, never silently
-//                           dropped.
-//   unmapped_engineer     — the probe answered 204: an org member the map does
-//                           not resolve. The ONLY subclass that keeps the
+//                           dropped. A token that cannot see membership never
+//                           produces this kind: its probes answer 302 and fail
+//                           closed into unmapped_engineer, and the report says
+//                           so (`membership_visibility: 'unproven'`).
+//   unmapped_engineer     — the probe answered 204 (an org member the map does
+//                           not resolve) or 302 (membership invisible to this
+//                           token — "cannot prove external" must never read as
+//                           external). The ONLY subclass that keeps the
 //                           map-edit-then-replay remediation and the gap /
 //                           exit-1 accounting.
 //
@@ -1601,6 +1605,16 @@ export function applyPayloadVerdicts(classes, verdicts) {
 // FAIL-CLOSED default: a record with NO annotation (no PR row, no `.user`, or a
 // report built before this split) reads as unmapped_engineer, because "could
 // not tell who" must stay a reported gap, never become an exclusion.
+//
+// The OPENER alone is not enough identity to exclude on. The live pipeline
+// attributes COMMIT AUTHORS first and falls back to the opener only when no
+// commit author resolves (collect_leaderboard_metrics.py, determine_authors),
+// so a bot- or external-opened PR whose commits an unmapped org engineer
+// authored is a real, map-fixable gap. Records whose opener triages
+// bot/external therefore get their PR commits listed and every distinct
+// non-bot commit author probed through the same cache; only a record whose
+// opener AND every non-bot commit author are proven bot/external stays
+// excluded.
 export const AUTHOR_KIND = Object.freeze({
   bot: 'bot',
   external: 'external_or_invisible',
@@ -1631,44 +1645,113 @@ export function splitPayloadMissing(recs) {
   return { bot, external, engineer };
 }
 
+// The marker carried in `payload_missing_unmapped_logins` for a non-bot commit
+// author whose email is linked to no GitHub account (`.author` is null on the
+// commit row): there is no login to probe or to add to the map, but "never
+// answer 'no' when you mean 'don't know'" applies, so the record fails closed
+// as an engineer gap and the marker says why no login is listed for it.
+export const UNLINKED_COMMIT_AUTHOR = '(unlinked commit author — no GitHub login)';
+
+// The one membership probe, shared by the opener triage and the commit-author
+// re-triage so the two paths cannot diverge. 204 = member. Direct 404 = proven
+// non-member (see AUTHOR_KIND above for why manual-redirect makes it proof).
+// 302 = membership invisible to this token: fail CLOSED — engineer — and mark
+// the answer unproven so the run-level `membership_visibility` flag and its
+// markdown warning can surface it. ghStatus throws on anything else (→ exit 2):
+// a probe that could not be read must abort the audit, not silently classify.
+// Cached per login, verdict and unproven bit together, so a cache hit carries
+// the flag to every record that reuses it.
+async function resolveMembership(client, cfg, login, memberCache) {
+  let hit = memberCache.get(login);
+  if (hit === undefined) {
+    const status = await client.ghStatus(
+      `/orgs/${cfg.owner}/members/${encodeURIComponent(login)}`,
+      [204, 302, 404],
+    );
+    hit = {
+      kind: status === 404 ? AUTHOR_KIND.external : AUTHOR_KIND.engineer,
+      unproven: status === 302,
+    };
+    memberCache.set(login, hit);
+  }
+  return hit;
+}
+
+// The FIX for opener-only identity (see the triage note above): a record whose
+// OPENER is bot/external is excluded only after its commits clear too. One
+// commits listing per such record (~53 on the measured fleet, most of them
+// single-page); membership probes only for NEW distinct logins, through the
+// same run-scoped cache as the opener path.
+async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
+  const commits = await client.ghPaged(
+    `/repos/${cfg.owner}/${repo}/pulls/${rec.number}/commits?per_page=100`,
+    undefined,
+    // A commit SHA genuinely IS the row identity here — a declared choice, not
+    // the shape coincidence ghPaged's identity contract exists to prevent.
+    { identity: (c) => c.sha },
+  );
+  const responsible = new Set();
+  const probed = new Set();
+  let unlinked = false;
+  for (const c of commits) {
+    // `.author` is the LINKED GitHub user of the commit's author email — null
+    // when the email is linked to no account. Bots are skipped by the same
+    // test as openers; an unlinked non-bot author is unprobeable, and
+    // unprobeable fails closed (engineer), never open (excluded).
+    const author = c.author ?? null;
+    if (isBotAuthor(author)) continue;
+    if (!author?.login) {
+      unlinked = true;
+      continue;
+    }
+    if (probed.has(author.login)) continue;
+    probed.add(author.login);
+    const { kind, unproven } = await resolveMembership(client, cfg, author.login, memberCache);
+    if (kind !== AUTHOR_KIND.engineer) continue;
+    responsible.add(author.login);
+    if (unproven) rec.membership_unproven = true;
+  }
+  if (!responsible.size && !unlinked) return;
+  rec.author_kind = AUTHOR_KIND.engineer;
+  // The map edit is owed to the COMMIT authors, never to the bot/external
+  // opener — buildReport reads this list into payload_missing_unmapped_logins
+  // in place of `author_login` for re-triaged records.
+  rec.commit_author_logins = [
+    ...[...responsible].sort(),
+    ...(unlinked ? [UNLINKED_COMMIT_AUTHOR] : []),
+  ];
+}
+
 // Annotates every payload_missing record in place. `prsByNumber` is required
 // because classify's records deliberately carry no author — `.user` lives only
 // on the PR rows, which auditRepo has in scope.
 //
 // Cost budget (the ticket's): at most ONE membership call per DISTINCT
 // non-bot login per run — dependabot alone was 44 of the 53 records in the
-// first fleet run, and it costs zero calls (decided locally); repeated human
-// logins hit `memberCache`, which is run-scoped and shared across repos
-// because org membership is org-scoped, not repo-scoped.
-export async function triagePayloadMissingAuthors(client, cfg, classes, prsByNumber, memberCache) {
+// first fleet run; repeated logins (opener or commit author) hit
+// `memberCache`, which is run-scoped and shared across repos because org
+// membership is org-scoped, not repo-scoped — plus ONE commits listing per
+// bot/external-OPENED record, the price of not excluding on opener identity
+// the live pipeline does not score by.
+export async function triagePayloadMissingAuthors(client, cfg, repo, classes, prsByNumber, memberCache) {
   for (const rec of classes.payload_missing) {
     const user = prsByNumber.get(rec.number)?.user ?? null;
     if (user?.login) rec.author_login = user.login;
     if (isBotAuthor(user)) {
       rec.author_kind = AUTHOR_KIND.bot;
-      continue;
-    }
-    if (!user?.login) {
+    } else if (!user?.login) {
       // Nothing to probe. Fail closed: an unattributable record stays a gap.
       rec.author_kind = AUTHOR_KIND.engineer;
       continue;
+    } else {
+      const { kind, unproven } = await resolveMembership(client, cfg, user.login, memberCache);
+      rec.author_kind = kind;
+      if (unproven) rec.membership_unproven = true;
+      if (kind === AUTHOR_KIND.engineer) continue;
     }
-    let member = memberCache.get(user.login);
-    if (member === undefined) {
-      // 204 = member. 404 = not a member OR membership invisible to this token
-      // (GitHub's documented ambiguity — carried into the report downstream,
-      // never flattened to "external"). A non-member requester is answered 302
-      // toward the public-members endpoint; fetch follows it, so the status
-      // read here is the followed one and still lands on 204/404. Any other
-      // status throws → exit 2: a probe that could not be read must abort the
-      // audit, not silently classify.
-      const status = await client.ghStatus(
-        `/orgs/${cfg.owner}/members/${encodeURIComponent(user.login)}`,
-      );
-      member = status === 204;
-      memberCache.set(user.login, member);
-    }
-    rec.author_kind = member ? AUTHOR_KIND.engineer : AUTHOR_KIND.external;
+    // Opener is bot or external — less identity than the live pipeline uses,
+    // so the exclusion is provisional until the commit authors clear.
+    await retriageByCommitAuthors(client, cfg, repo, rec, memberCache);
   }
   return classes;
 }
@@ -1823,7 +1906,10 @@ export function makeClient(token) {
   // one that makes most of the calls (every page of PRs and of workflow runs —
   // 40 of guard's 42). A 403/429 mid-pagination therefore aborted the whole
   // audit with no retry at all, on precisely the busiest repos.
-  async function request(rawUrl) {
+  // `init` extends the fetch options for callers whose ANSWER depends on them
+  // (ghStatus passes `redirect: 'manual'` — the redirect is data there); the
+  // auth headers and the stall timeout stay on unless deliberately overridden.
+  async function request(rawUrl, init = {}) {
     const url = resolveApiUrl(rawUrl);
     for (let attempt = 0; attempt < 4; attempt++) {
       let res;
@@ -1835,7 +1921,7 @@ export function makeClient(token) {
         // and nothing naming the cause. AbortSignal.timeout turns that into an
         // AbortError, which the catch below already treats as a retryable
         // transport failure, so a stall costs one retry instead of the run.
-        res = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+        res = await fetch(url, { headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), ...init });
         state.calls++;
       } catch (e) {
         // A REJECTED fetch is a transport failure (dropped socket, DNS, TLS
@@ -1883,16 +1969,33 @@ export function makeClient(token) {
   }
 
   // For probes whose ANSWER is a status, not a body (the org-membership check:
-  // 204 = member, 404 = not-a-member-or-invisible). gh() cannot express either
-  // half — a 204 has no bytes for res.json() to parse, and its `__missing`
-  // sentinel erases the very distinction the caller is asking about. Still
-  // routed through request(), so the retry loop and api_calls accounting cover
-  // it. 404 passes through as data; every other non-ok status throws, exactly
-  // as gh() would.
-  async function ghStatus(path) {
-    const res = await request(path);
-    if (!res.ok && res.status !== 404) {
-      throw new Error(`${res.status} ${res.statusText} on ${path}`);
+  // 204 = member, direct 404 = proven non-member, 302 = membership invisible
+  // to this token). gh() cannot express any of it — a 204 has no bytes for
+  // res.json() to parse, and its `__missing` sentinel erases the very
+  // distinction the caller is asking about. Issued with `redirect: 'manual'`,
+  // because a redirect IS an answer here: GitHub answers the membership probe
+  // truthfully only to a token that can see private membership and 302s every
+  // other requester toward the public-members endpoint — followed, that
+  // arrives as a 404 byte-identical to "proven non-member", the false-external
+  // direction. RETRY_STATUS carries no 3xx entry, so the manual 302 passes
+  // through request()'s retry loop untouched. Still routed through request(),
+  // so the retry loop and api_calls accounting cover it. `allowed` is required,
+  // like ghPaged's `identity`: every status reaching the caller is read as an
+  // answer, so the readable set must be declared — anything outside it throws
+  // (→ exit 2 / status=unknown), never classifies.
+  async function ghStatus(path, allowed) {
+    if (!Array.isArray(allowed) || allowed.length === 0) {
+      throw new Error(
+        `ghStatus(${path}): an explicit \`allowed\` status list is required — the caller ` +
+          'reads the status as data, so the statuses it can read must be declared.',
+      );
+    }
+    const res = await request(path, { redirect: 'manual' });
+    if (!allowed.includes(res.status)) {
+      throw new Error(
+        `${res.status} ${res.statusText} on ${path} — not an answer this probe can read ` +
+          `(expected one of: ${allowed.join(', ')})`,
+      );
     }
     return res.status;
   }
@@ -3205,6 +3308,7 @@ export async function auditRepo(client, cfg, repo) {
     await triagePayloadMissingAuthors(
       client,
       cfg,
+      repo,
       classes,
       new Map(prs.map((p) => [p.number, p])),
       memberCache,
@@ -3401,13 +3505,13 @@ export function renderMarkdown(report, cfg) {
     L.push('### Ran but sent no payload — excluded by design (not gaps)');
     L.push('');
     L.push(
-      'These PRs concluded `success` without enqueueing a payload because their author ' +
-        'is not a leaderboard subject. They are NOT gaps, do NOT affect the exit code, ' +
-        'and need no map edit or replay. "External/invisible" means the org-membership ' +
-        'probe answered 404, which GitHub defines as *not an org member, OR membership ' +
-        'not visible to this token* — an employee whose membership this token cannot see ' +
-        'lands here too, so eyeball the logins rather than trusting the audit to have ' +
-        'proven them external.',
+      'These PRs concluded `success` without enqueueing a payload because neither their ' +
+        'opener nor any commit author is a leaderboard subject. They are NOT gaps, do NOT ' +
+        'affect the exit code, and need no map edit or replay. "External/invisible" means ' +
+        'the org-membership probe answered a direct 404 — under a token that can see org ' +
+        'membership, a proven non-member at audit time. A token that cannot see membership ' +
+        'is answered with a redirect instead, and those authors fail CLOSED into the ' +
+        'unmapped-engineer gap class rather than landing here.',
     );
     L.push('');
     const fmt = (list) => list.map((p) => `#${p.number}${p.login ? ` (@${p.login})` : ''}`).join(', ');
@@ -3436,6 +3540,19 @@ export function renderMarkdown(report, cfg) {
       'enqueued a payload, not merely to have a successful run.',
   );
   L.push('');
+  if (report.membership_visibility === 'unproven') {
+    // Before either branch, because it qualifies both: on the gaps branch it
+    // explains why the unmapped-engineer list may hold externals; on the clean
+    // branch it says why no external exclusion happened at all.
+    L.push(
+      '> **This audit token cannot see org membership** — the membership probe was ' +
+        'answered with a redirect, not a verdict, so no author could be proven external ' +
+        'and every unmapped author fails CLOSED into the unmapped-engineer gap class. ' +
+        'Grant the token org Members read (classic `read:org`, or the fine-grained ' +
+        '"Members" organization permission) to activate the external-author exclusion.',
+    );
+    L.push('');
+  }
   if (!report.repos_with_gaps.length) {
     // "No gaps" is a claim about the PRs this audit could DECIDE, and two
     // classes are deliberately left undecided. Naming them is not hedging — it
@@ -3789,10 +3906,20 @@ export function buildReport(results, cfg, apiCalls, dupes = 0, fleetMeta = null)
       .engineer.map((p) => p.number)
       .sort((a, b) => a - b),
     // The distinct logins the map edit needs, precomputed so the operator (or
-    // ENG-5789's dispatcher) is not re-deriving them from PR numbers. Records
-    // that fail closed with no author carry no login, hence the filter.
+    // ENG-5789's dispatcher) is not re-deriving them from PR numbers. A record
+    // the commit-author re-triage reclassified owes its map edit to the commit
+    // authors (that is who the live pipeline scores), never to its bot/external
+    // opener, so `commit_author_logins` replaces `author_login` wholesale
+    // there. Records that fail closed with no author carry no login at all,
+    // hence the empty arm.
     payload_missing_unmapped_logins: [
-      ...new Set(pmSplit.get(r.repo).engineer.map((p) => p.author_login).filter(Boolean)),
+      ...new Set(
+        pmSplit
+          .get(r.repo)
+          .engineer.flatMap(
+            (p) => p.commit_author_logins ?? (p.author_login ? [p.author_login] : []),
+          ),
+      ),
     ].sort(),
     // Same reasoning, opposite remediation: these need a consumer-side lookup,
     // and a replay of them would re-deliver whatever already succeeded.
@@ -3867,6 +3994,16 @@ export function buildReport(results, cfg, apiCalls, dupes = 0, fleetMeta = null)
       external_or_invisible: sum((r) => pmSplit.get(r.repo).external.length),
       unmapped_engineer: sum((r) => pmSplit.get(r.repo).engineer.length),
     },
+    // Run-level: at least one membership probe was answered with a redirect —
+    // this token cannot see org membership, so every author it could not prove
+    // external was kept as an unmapped engineer (fail closed) and the external
+    // exclusion is INACTIVE. Derived from the per-record annotation the triage
+    // leaves (a cached 302 verdict marks every record it reaches), so this
+    // channel and the markdown warning cannot diverge. Absent when every
+    // answer was direct: absence means proven, never unknown.
+    ...(results.some((r) => r.classes.payload_missing.some((p) => p.membership_unproven))
+      ? { membership_visibility: 'unproven' }
+      : {}),
     // The expected non-deliveries, per repo, with the PR numbers and logins the
     // gap rows deliberately do NOT carry. Built from ALL results, not from
     // `gaps`: a repo whose only payload_missing records are bot/external never
