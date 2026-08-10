@@ -2542,16 +2542,19 @@ export const callsReusable = (text, reusable) =>
 //   - .github — hosted the OLD reusable before the 2026-07-07 migration;
 //     a definition, never a caller.
 //
-// The walk is newest-first and STOPS at the first revision where the file
-// exists: the newest surviving content is what the repo last ran, which is the
-// question fleet membership asks. per_page=10 bounds the cost — the listing
-// usually leads with the deletion commit (the path appears in it, the file
-// does not), and one contents read per surviving revision is ~1 extra call per
-// history-probe hit. Residual under-admission, accepted and stated: a genuine
-// caller overwritten with junk before the deletion reads never-onboarded. That
-// errs toward a smaller fleet, the same direction as "never onboarded", and
-// the repo surfaces the moment anyone audits it explicitly (self-audit mode
-// bypasses fleet resolution entirely).
+// The walk is newest-first and continues PAST non-calling surviving revisions:
+// one revision that called the reusable, anywhere in the probed window, is
+// caller-hood. Stopping at the first surviving revision read a genuine caller
+// overwritten with a non-calling stub before its deletion as never-onboarded —
+// the repo struck from the fleet and every one of its delivery gaps vanished
+// with it, the false-clean direction. per_page=10 bounds the cost — the
+// listing usually leads with the deletion commit (the path appears in it, the
+// file does not), and one contents read per surviving revision is ~1 extra
+// call per history-probe hit. Residual under-admission, accepted and stated: a
+// genuine caller older than the 10 newest path-touching commits reads
+// never-onboarded. That errs toward a smaller fleet, the same direction as
+// "never onboarded", and the repo surfaces the moment anyone audits it
+// explicitly (self-audit mode bypasses fleet resolution entirely).
 export async function historicalCaller(client, cfg, repo) {
   const hist = await client.gh(
     `/repos/${cfg.owner}/${repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=10`,
@@ -2564,10 +2567,12 @@ export async function historicalCaller(client, cfg, repo) {
     const f = await client.gh(
       `/repos/${cfg.owner}/${repo}/contents/${path}?ref=${encodeURIComponent(c.sha)}`,
     );
-    // The deletion commit lists the path but carries no file at it; keep
-    // walking to the newest revision where the file exists.
+    // The deletion commit lists the path but carries no file at it, and a
+    // surviving revision that does not CALL proves nothing about the ones
+    // below it — both keep the walk moving; only the exhausted listing
+    // answers false.
     if (!f || f.__missing || !f.content) continue;
-    return callsReusable(b64(f.content), cfg.reusable);
+    if (callsReusable(b64(f.content), cfg.reusable)) return true;
   }
   return false;
 }
@@ -3153,17 +3158,38 @@ export async function auditRepo(client, cfg, repo) {
   const headRunIds = headRunsByPr(prs, runs);
   // Probed BEFORE the delivery walks because they consume it: probeSqsStep's
   // rename halt presumes the run executed the reusable, and a repo whose
-  // caller-path file does not call it (self-audit stub, deleted caller) must
-  // get a per-repo `unverifiable` there instead of aborting the whole fleet —
-  // see UNVERIFIABLE_NONCALLER_NO_STEP.
+  // caller-path file NEVER called it (self-audit stub, the reusable's own
+  // definition) must get a per-repo `unverifiable` there instead of aborting
+  // the whole fleet — see UNVERIFIABLE_NONCALLER_NO_STEP.
   const caller = await hasCaller(client, cfg, repo);
+  // The walks need caller-HOOD, not HEAD state: a DELETED caller's
+  // pre-deletion success run executed the reusable, so its missing SQS_STEP
+  // is the rename signal — `caller` alone downgraded it to
+  // UNVERIFIABLE_NONCALLER_NO_STEP, whose "this workflow never runs it" text
+  // is false for a former caller, and silenced the fleet-wide rename detector
+  // (in self-audit of that repo, the only rename warning). `has_caller` in
+  // the report stays HEAD state. The history probe runs ONLY when a record
+  // will actually reach a walk — the same populations the walks consume —
+  // which bounds its cost to caller-less repos with probe-able records and
+  // keeps `/commits` off empty repos (409 there, and an empty repo has no
+  // records — the same safety resolveFleet takes from sizeByName and
+  // annotateSelfProvenance from `meta?.size !== 0`).
+  let callerVerified = caller;
+  if (
+    !caller &&
+    (classes.failed.length ||
+      classes.skipped_anomaly.length ||
+      classes.delivered.some(needsPayloadProbe))
+  ) {
+    callerVerified = await historicalCaller(client, cfg, repo);
+  }
   // Recover BEFORE the payload probe, not after: a record rescued from a prior
   // attempt or a sibling run joins `delivered` or `payload_missing` with its
   // verdict already determined by the run it was rescued from, so running it
   // through verifyPayloads again would re-probe the CURRENT (failed) run and
   // demote it straight back. Ordering is the whole correctness of this pair, and
   // `needsPayloadProbe` is the other half of it.
-  await recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds, caller);
+  await recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds, callerVerified);
   // Only the successful runs need the payload probe: every other class already
   // knows it did not deliver, so there is nothing to demote.
   applyPayloadVerdicts(
@@ -3174,7 +3200,7 @@ export async function auditRepo(client, cfg, repo) {
       repo,
       classes.delivered.filter(needsPayloadProbe),
       headRunIds,
-      caller,
+      callerVerified,
     ),
   );
 
