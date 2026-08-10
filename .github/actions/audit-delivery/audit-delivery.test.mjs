@@ -53,6 +53,7 @@ import {
   applyPayloadVerdicts,
   AUTHOR_KIND,
   unlinkedCommitAuthor,
+  commitListTruncated,
   isBotAuthor,
   splitPayloadMissing,
   triagePayloadMissingAuthors,
@@ -3214,6 +3215,69 @@ test('re-triage: the same member author on a NON-merge commit still reclassifies
   const r = classes.payload_missing[0];
   assert.equal(r.author_kind, AUTHOR_KIND.engineer);
   assert.deepEqual(r.commit_author_logins, ['maintainer']);
+});
+
+test('re-triage: a commits listing AT the 250-row cap fails CLOSED — unread authors cannot clear a record', async () => {
+  // GitHub serves at most 250 rows from /pulls/{n}/commits and ends
+  // pagination normally at the cap, so a full-to-the-cap list may hide the
+  // one unmapped engineer behind it. Even though every VISIBLE author here is
+  // a proven external, the record must stay a gap — and cost zero probes,
+  // since no readable subset can justify the exclusion.
+  const rows = Array.from({ length: 250 }, (_, i) =>
+    commitBy(`cap${i}`, { login: 'drive-by', type: 'User' }, { parents: [{ sha: 'p' }] }));
+  const client = membershipClient({}, { 20: rows });
+  const classes = { payload_missing: [rec(20)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(20, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer);
+  assert.deepEqual(r.commit_author_logins, [commitListTruncated(20, 250)]);
+  assert.deepEqual(client.probes, [], 'a truncated listing must cost zero probes — no subset clears it');
+  // The marker rides the map-edit list like the unlinked one, so the report
+  // says WHY the record could not be cleared.
+  const report = buildReport(
+    [repoResult('guard', { merged: 1, payload_missing: classes.payload_missing })],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  assert.deepEqual(report.repos_with_gaps[0].payload_missing_unmapped_logins, [commitListTruncated(20, 250)]);
+});
+
+test('re-triage: 249 rows is BELOW the cap — the guard is not blanket, exclusion still works', async () => {
+  const rows = Array.from({ length: 249 }, (_, i) =>
+    commitBy(`sub${i}`, { login: 'drive-by', type: 'User' }, { parents: [{ sha: 'p' }] }));
+  const client = membershipClient(
+    { '/orgs/praetorian-inc/members/drive-by': 404 },
+    { 21: rows },
+  );
+  const classes = { payload_missing: [rec(21)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(21, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot);
+  assert.equal(client.probes.length, 1, 'one distinct login, one probe — below the cap the walk is normal');
+});
+
+test('unlinkedCommitAuthor: markdown metacharacters in the email are flattened, the address stays readable', () => {
+  // The commit email is the one report value an outsider controls with no
+  // GitHub account; the render site wraps markers in backticks.
+  const marker = unlinkedCommitAuthor('a`b|c[d](e)@x.com');
+  // The template itself carries parentheses; the assertion is that none of
+  // the INJECTED metacharacters survive (backtick, pipe, brackets — the ones
+  // that close a code span or open a link).
+  assert.doesNotMatch(marker, /[`|[\]*\\]/, 'no injected metacharacter may survive');
+  assert.match(marker, /a_b_c_d__e_@x\.com/, 'the address must stay recognizable as a remediation handle');
 });
 
 test('re-triage: commit-author probes share the run-scoped memberCache across records', async () => {

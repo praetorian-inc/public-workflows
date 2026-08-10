@@ -1650,12 +1650,29 @@ export function splitPayloadMissing(recs) {
 // commit row): there is no login to probe or to add to the map, but "never
 // answer 'no' when you mean 'don't know'" applies, so the record fails closed
 // as an engineer gap and the marker says why no login is listed for it. The
-// marker carries the raw commit email (present on `commit.author` even when
-// no account is linked) because that email IS the remediation handle: no map
+// marker carries the commit email (present on `commit.author` even when no
+// account is linked) because that email IS the remediation handle: no map
 // edit can attribute an unlinked commit — the collector drops them — so the
 // fix is finding the person and linking that address to a GitHub account.
+// The email is the ONE value on this report that an outsider controls with no
+// GitHub account (git ident strips newlines and <>, but backticks, brackets,
+// and pipes survive), and the render site wraps markers in backticks — so
+// markdown metacharacters are flattened here, at the single emitter, keeping
+// the address recognizable without letting it close the code span or plant a
+// link in the report.
+const mdSafe = (s) => String(s).replace(/[`|*[\]()\\]/g, '_');
 export const unlinkedCommitAuthor = (email) =>
-  `(unlinked commit author ${email || 'unknown email'} — no GitHub login)`;
+  `(unlinked commit author ${mdSafe(email || 'unknown email')} — no GitHub login)`;
+
+// GET /pulls/{n}/commits serves at most 250 commits and signals the cap ONLY
+// by ending pagination normally (measured on a 283-commit PR: three pages,
+// 250 rows, no rel="next" on the last) — indistinguishable from completion,
+// so ghPaged cannot guard it the way it guards every other truncation. An
+// author past the cap is unread, and an unread author cannot justify an
+// exclusion: at the cap the record fails CLOSED with this marker instead.
+export const PR_COMMITS_CAP = 250;
+export const commitListTruncated = (number, seen) =>
+  `(commit list truncated at GitHub's ${seen}-commit cap on #${number} — authors past it unread)`;
 
 // The one membership probe, shared by the opener triage and the commit-author
 // re-triage so the two paths cannot diverge. 204 = member. Direct 404 = proven
@@ -1695,6 +1712,14 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
     // the shape coincidence ghPaged's identity contract exists to prevent.
     { identity: (c) => c.sha },
   );
+  // Fail closed at the listing cap (see PR_COMMITS_CAP): a full-to-the-cap
+  // list may have unread authors behind it, and clearing the record on a
+  // partial read is the false-clean exclusion this whole re-triage refuses.
+  if (commits.length >= PR_COMMITS_CAP) {
+    rec.author_kind = AUTHOR_KIND.engineer;
+    rec.commit_author_logins = [commitListTruncated(rec.number, commits.length)];
+    return;
+  }
   const responsible = new Set();
   const probed = new Set();
   const unlinkedEmails = new Set();
@@ -1706,8 +1731,11 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
     // (e.g. an engineer merging main into a dependabot branch). The listing
     // rows carry no stats, so `parents` is the faithful available predicate.
     // Residual: an EMPTY non-merge commit is equally numstat-less but
-    // indistinguishable in this listing; it still fails closed — the loud
-    // direction.
+    // indistinguishable in this listing (the row carries neither stats nor a
+    // parent tree sha to compare — measured; detecting emptiness would cost
+    // one GET /commits/{sha} per commit per record against the budget that
+    // aborts the audit when exhausted); it still fails closed — the loud
+    // direction, and one no repo convention here produces.
     if ((c.parents?.length ?? 0) > 1) continue;
     // `.author` is the LINKED GitHub user of the commit's author email — null
     // when the email is linked to no account. Bots are skipped by the same
