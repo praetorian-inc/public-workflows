@@ -53,7 +53,8 @@ import {
   applyPayloadVerdicts,
   AUTHOR_KIND,
   unlinkedCommitAuthor,
-  commitListTruncated,
+  isOrgDomainEmail,
+  DEFAULT_ORG_EMAIL_DOMAINS,
   isBotAuthor,
   splitPayloadMissing,
   triagePayloadMissingAuthors,
@@ -2838,12 +2839,24 @@ test('renderMarkdown: both a replayable gap and an unmapped-author gap are repor
 // commits listings from a PR-number -> rows map and records those too. In
 // both, anything unmapped throws, so a call the test did not expect fails
 // loudly instead of classifying.
-const membershipClient = (statuses = {}, commitsByPr = {}) => {
+const membershipClient = (statuses = {}, commitsByPr = {}, prFetches = {}) => {
   const probes = [];
   const listings = [];
+  const fetches = [];
   return {
     probes,
     listings,
+    fetches,
+    // The cap-disambiguation call: GET /pulls/{n}, answered from a PR-number →
+    // PR-object map (`.commits` carries the true count). Recorded so tests can
+    // pin that below-cap walks spend ZERO of these; unmapped throws like the
+    // other two arms.
+    gh: async (path) => {
+      fetches.push(path);
+      const m = /\/pulls\/(\d+)$/.exec(path);
+      if (!m || !(m[1] in prFetches)) throw new Error(`unexpected PR fetch: ${path}`);
+      return prFetches[m[1]];
+    },
     ghStatus: async (path, allowed) => {
       // The triage call site must declare exactly the three readable statuses.
       // A stub that discarded `allowed` kept the suite green while a call site
@@ -3217,15 +3230,21 @@ test('re-triage: the same member author on a NON-merge commit still reclassifies
   assert.deepEqual(r.commit_author_logins, ['maintainer']);
 });
 
-test('re-triage: a commits listing AT the 250-row cap fails CLOSED — unread authors cannot clear a record', async () => {
-  // GitHub serves at most 250 rows from /pulls/{n}/commits and ends
-  // pagination normally at the cap, so a full-to-the-cap list may hide the
-  // one unmapped engineer behind it. Even though every VISIBLE author here is
-  // a proven external, the record must stay a gap — and cost zero probes,
-  // since no readable subset can justify the exclusion.
+test('re-triage: a TRUNCATED listing fails CLOSED as a flag, never a pseudo-login — and the bot opener must not leak into the map list', async () => {
+  // 250 visible rows, GET /pulls/20 says the true count is 283: authors past
+  // the cap are unread, and an unread author cannot justify an exclusion. The
+  // visible rows are still walked (drive-by is probed — a proven external),
+  // so with no visible engineer the record carries an EMPTY logins list: the
+  // gap survives on `commit_list_truncated`, and leaving the field unset
+  // would let buildReport's `author_login` fallback prescribe a map edit for
+  // the dependabot OPENER.
   const rows = Array.from({ length: 250 }, (_, i) =>
     commitBy(`cap${i}`, { login: 'drive-by', type: 'User' }, { parents: [{ sha: 'p' }] }));
-  const client = membershipClient({}, { 20: rows });
+  const client = membershipClient(
+    { '/orgs/praetorian-inc/members/drive-by': 404 },
+    { 20: rows },
+    { 20: { commits: 283 } },
+  );
   const classes = { payload_missing: [rec(20)] };
   await triagePayloadMissingAuthors(
     client,
@@ -3237,16 +3256,107 @@ test('re-triage: a commits listing AT the 250-row cap fails CLOSED — unread au
   );
   const r = classes.payload_missing[0];
   assert.equal(r.author_kind, AUTHOR_KIND.engineer);
-  assert.deepEqual(r.commit_author_logins, [commitListTruncated(20, 250)]);
-  assert.deepEqual(client.probes, [], 'a truncated listing must cost zero probes — no subset clears it');
-  // The marker rides the map-edit list like the unlinked one, so the report
-  // says WHY the record could not be cleared.
+  assert.equal(r.commit_list_truncated, true);
+  assert.deepEqual(r.commit_author_logins, [], 'no visible engineer — an empty list, never a marker or the opener');
+  assert.equal(client.fetches.length, 1, 'exactly one disambiguation fetch for the at-cap record');
+  // The flag rides its own machine channel and its own markdown caveat: the
+  // collector reads the same capped listing, so a map edit cannot attribute
+  // the unread authors and the pseudo-login remediation was unactionable.
   const report = buildReport(
     [repoResult('guard', { merged: 1, payload_missing: classes.payload_missing })],
     { since: '2026-07-01', selfAudit: true },
     5,
   );
-  assert.deepEqual(report.repos_with_gaps[0].payload_missing_unmapped_logins, [commitListTruncated(20, 250)]);
+  const g = report.repos_with_gaps[0];
+  assert.deepEqual(g.payload_missing_unmapped_logins, [], 'the bot opener must not surface as a map edit');
+  assert.deepEqual(g.commit_list_truncated_prs, [20]);
+  const md = renderMarkdown(report);
+  assert.match(md, /Commit-listing cap:.*#20/);
+  assert.match(md, /a map edit alone cannot attribute them/);
+  assert.doesNotMatch(md, /Logins to add/, 'an empty logins list must not render an empty prescription');
+});
+
+test('re-triage: truncation keeps the VISIBLE engineer — the one actionable login is named alongside the caveat', async () => {
+  // The old pre-walk guard printed a truncation marker WHERE the map edit
+  // should have been; alice at row 0 of a 300-commit dependabot PR is exactly
+  // the evidence it discarded. Org-domain email, so she costs zero probes.
+  const rows = [
+    commitBy('vis0', { login: 'alice', type: 'User' }, { email: 'alice@praetorian.com', parents: [{ sha: 'p' }] }),
+    ...Array.from({ length: 249 }, (_, i) =>
+      commitBy(`vis${i + 1}`, { login: 'dependabot[bot]', type: 'Bot' }, { parents: [{ sha: 'p' }] })),
+  ];
+  const client = membershipClient({}, { 22: rows }, { 22: { commits: 300 } });
+  const classes = { payload_missing: [rec(22)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(22, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer);
+  assert.equal(r.commit_list_truncated, true);
+  assert.deepEqual(r.commit_author_logins, ['alice']);
+  assert.deepEqual(client.probes, [], 'org-domain email classifies without a probe');
+  const report = buildReport(
+    [repoResult('guard', { merged: 1, payload_missing: classes.payload_missing })],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  const g = report.repos_with_gaps[0];
+  assert.deepEqual(g.payload_missing_unmapped_logins, ['alice']);
+  assert.deepEqual(g.commit_list_truncated_prs, [22]);
+  const md = renderMarkdown(report);
+  assert.match(md, /Logins to add: `alice`/);
+  assert.match(md, /cover only the visible rows/);
+});
+
+test('re-triage: EXACTLY 250 commits with nothing truncated is a normal walk — one fetch, no manufactured gap', async () => {
+  // `>=` at the cap is ambiguous, not proof: GET /pulls/{n} `.commits`
+  // carries the true count, and when it says 250 the listing was complete —
+  // an all-bot PR must stay bot, because the collector saw the same 250 rows
+  // and its non-delivery was by design, unfixable by any map edit.
+  const rows = Array.from({ length: 250 }, (_, i) =>
+    commitBy(`ex${i}`, { login: 'dependabot[bot]', type: 'Bot' }, { parents: [{ sha: 'p' }] }));
+  const client = membershipClient({}, { 23: rows }, { 23: { commits: 250 } });
+  const classes = { payload_missing: [rec(23)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(23, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.bot, 'a complete 250-commit bot PR is not a gap');
+  assert.equal(r.commit_list_truncated, undefined);
+  assert.equal(client.fetches.length, 1);
+  assert.deepEqual(client.probes, []);
+});
+
+test('re-triage: an UNREADABLE disambiguation fetch fails closed to truncated — the 404 sentinel has no .commits', async () => {
+  // gh() maps 404 to `{ __missing: true }` rather than throwing; a PR whose
+  // true count cannot be read must be treated as truncated (a gap), never as
+  // complete (an exclusion).
+  const rows = Array.from({ length: 250 }, (_, i) =>
+    commitBy(`gone${i}`, { login: 'dependabot[bot]', type: 'Bot' }, { parents: [{ sha: 'p' }] }));
+  const client = membershipClient({}, { 24: rows }, { 24: { __missing: true } });
+  const classes = { payload_missing: [rec(24)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(24, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer);
+  assert.equal(r.commit_list_truncated, true);
+  assert.deepEqual(r.commit_author_logins, []);
 });
 
 test('re-triage: 249 rows is BELOW the cap — the guard is not blanket, exclusion still works', async () => {
@@ -3267,6 +3377,122 @@ test('re-triage: 249 rows is BELOW the cap — the guard is not blanket, exclusi
   );
   assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot);
   assert.equal(client.probes.length, 1, 'one distinct login, one probe — below the cap the walk is normal');
+  assert.deepEqual(client.fetches, [], 'below the cap there is nothing to disambiguate — zero PR fetches');
+});
+
+// ── merge-time email evidence (round 4: departed-member false-clean) ─────────
+
+test('re-triage: an org-domain commit email classifies a DEPARTED member as the subject — zero probes, no membership claim', async () => {
+  // vespasian#57's shape: the author left the org after the merge, so the
+  // membership probe would answer 404 today and the record used to flip from
+  // gap to clean by the calendar. The commit row's author email is MERGE-TIME
+  // evidence the probe cannot give — no status is mapped for the login, so a
+  // probe here would throw: the assertion that it is never consulted is
+  // structural, not just counted.
+  const client = membershipClient({}, {
+    30: [commitBy('dep1', { login: 'departed', type: 'User' },
+      { email: 'peter.mueller@praetorian.com', parents: [{ sha: 'p' }] })],
+  });
+  const classes = { payload_missing: [rec(30)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(30, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer);
+  assert.deepEqual(r.commit_author_logins, ['departed']);
+  assert.deepEqual(client.probes, [], 'merge-time evidence costs zero probes');
+  assert.equal(r.membership_unproven, undefined, 'commit evidence is not a membership claim — no unproven flag');
+});
+
+test('re-triage: a departed member under a noreply address still slips — the documented residual, pinned', async () => {
+  // Without an org-domain email the only signal left is the probe, which
+  // truthfully answers 404 about TODAY. The record stays excluded — this test
+  // exists so the residual narrows deliberately, never silently.
+  const client = membershipClient(
+    { '/orgs/praetorian-inc/members/departed': 404 },
+    {
+      31: [commitBy('dep2', { login: 'departed', type: 'User' },
+        { email: '12345+departed@users.noreply.github.com', parents: [{ sha: 'p' }] })],
+    },
+  );
+  const classes = { payload_missing: [rec(31)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(31, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot, 'no org email, probe says external — record keeps the opener verdict');
+  assert.equal(client.probes.length, 1);
+});
+
+test('re-triage: the email arm outranks the probed-dedup — a noreply FIRST commit does not mask an org-domain later one', async () => {
+  // First commit probes (noreply, 404 — already judged external); second
+  // carries the org address. Checked before `probed.has`, the evidence still
+  // lands; checked after, the login would have been skipped as already
+  // decided and the false-clean would survive on commit ORDER.
+  const client = membershipClient(
+    { '/orgs/praetorian-inc/members/departed': 404 },
+    {
+      32: [
+        commitBy('ord1', { login: 'departed', type: 'User' },
+          { email: '12345+departed@users.noreply.github.com', parents: [{ sha: 'p' }] }),
+        commitBy('ord2', { login: 'departed', type: 'User' },
+          { email: 'peter.mueller@praetorian.com', parents: [{ sha: 'p' }] }),
+      ],
+    },
+  );
+  const classes = { payload_missing: [rec(32)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(32, { login: 'dependabot[bot]', type: 'Bot' })]),
+    new Map(),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer);
+  assert.deepEqual(r.commit_author_logins, ['departed']);
+  assert.equal(client.probes.length, 1, 'the first commit still probed — only the dedup is outranked');
+});
+
+test('isOrgDomainEmail: the @ is anchored and matching is case-insensitive', () => {
+  assert.equal(isOrgDomainEmail('alice@praetorian.com'), true);
+  assert.equal(isOrgDomainEmail('Alice@PRAETORIAN.COM'), true);
+  // Suffix riders must not match — the '@' anchor is the whole defense.
+  assert.equal(isOrgDomainEmail('evil@notpraetorian.com'), false);
+  assert.equal(isOrgDomainEmail('praetorian.com@evil.com'), false);
+  // Absent/odd input falls toward false — through to the probe path.
+  assert.equal(isOrgDomainEmail(undefined), false);
+  assert.equal(isOrgDomainEmail(null), false);
+  assert.equal(isOrgDomainEmail(''), false);
+  // The domains parameter is honored, and the default is the frozen constant.
+  assert.equal(isOrgDomainEmail('bob@example.io', ['example.io']), true);
+  assert.equal(isOrgDomainEmail('bob@praetorian.com', ['example.io']), false);
+  assert.deepEqual([...DEFAULT_ORG_EMAIL_DOMAINS], ['praetorian.com']);
+});
+
+test('parseArgs: --org-email-domains normalizes to a lowercased array and defaults to the frozen constant', () => {
+  assert.deepEqual(parseArgs([]).orgEmailDomains, [...DEFAULT_ORG_EMAIL_DOMAINS]);
+  assert.deepEqual(
+    parseArgs(['--org-email-domains', 'A.com, @b.io']).orgEmailDomains,
+    ['a.com', 'b.io'],
+  );
+});
+
+test('parseArgs: an EMPTY --org-email-domains throws — it would silently switch the merge-time evidence off', () => {
+  // Same caller-bug class as --repo/--repos/--since/--until: '' from an unset
+  // shell variable must be named, not read as "no domains, exclude freely".
+  assert.throws(() => parseArgs(['--org-email-domains=']), /contained no domains/);
+  assert.throws(() => parseArgs(['--org-email-domains=,,']), /contained no domains/);
 });
 
 test('unlinkedCommitAuthor: markdown metacharacters in the email are flattened, the address stays readable', () => {

@@ -61,6 +61,12 @@
 
 const API = 'https://api.github.com';
 
+// The org's email domains, for the merge-time-evidence test in the commit
+// re-triage (see isOrgDomainEmail). A frozen module constant AND the parseArgs
+// default: a caller that never heard of the flag still gets the protection —
+// "no config" must never silently disable a fail-closed check.
+export const DEFAULT_ORG_EMAIL_DOMAINS = Object.freeze(['praetorian.com']);
+
 const DEFAULTS = {
   repo: null, // "owner/name" — self-audit mode
   owner: 'praetorian-inc', // fleet mode
@@ -78,6 +84,10 @@ const DEFAULTS = {
   // replay list. hasCaller anchors this string at the START of the value.
   reusable: 'praetorian-inc/public-workflows/.github/workflows/leaderboard-metrics.yml@',
   backfillCaller: 'leaderboard-backfill-caller.yml',
+  // Comma list of email domains whose commit authors are leaderboard subjects
+  // at MERGE TIME (see the AUTHOR_KIND note on merge-time evidence). Defaults
+  // on, from the frozen constant above.
+  orgEmailDomains: DEFAULT_ORG_EMAIL_DOMAINS.join(','),
   json: null,
   markdown: null,
 };
@@ -202,6 +212,25 @@ export function parseArgs(argv, now = Date.now()) {
         );
       }
     }
+  }
+
+  // Normalized to a lowercased array; matching is case-insensitive because
+  // RFC 1035 domains are. A leading '@' is stripped so `--org-email-domains
+  // @praetorian.com` means what it says instead of silently matching nothing.
+  // The empty-value arm is the same caller-bug class as --repo/--repos/--since/
+  // --until above, with a sharper edge: an empty list would run every commit
+  // through `domains.some(...)` over ZERO domains — always false — silently
+  // switching the merge-time email evidence OFF and reopening the departed-
+  // member false-clean this flag exists to close.
+  out.orgEmailDomains = String(out.orgEmailDomains)
+    .split(',')
+    .map((s) => s.trim().toLowerCase().replace(/^@/, ''))
+    .filter(Boolean);
+  if (!out.orgEmailDomains.length) {
+    throw new Error(
+      '--org-email-domains contained no domains — an empty list would silently disable the ' +
+        'merge-time commit-email evidence, not "allow everything"',
+    );
   }
 
   // The SAME class two flags further on. The `--repo` fix and then the `--repos`
@@ -1591,6 +1620,29 @@ export function applyPayloadVerdicts(classes, verdicts) {
 //                           produces this kind: its probes answer 302 and fail
 //                           closed into unmapped_engineer, and the report says
 //                           so (`membership_visibility: 'unproven'`).
+//
+//                           "At audit time" is the probe's blind spot, and it
+//                           points in the FALSE-CLEAN direction: the delivery
+//                           was owed at MERGE time, and a member the org has
+//                           since removed answers the same direct 404 as a
+//                           lifelong outsider — measured live on vespasian#57,
+//                           whose sole author left the org months after the
+//                           merge, flipping the repo's verdict from gap to
+//                           clean by the calendar. No API reports historical
+//                           membership (the org audit log needs owner scope
+//                           and floors at ~180 days), but the commit rows
+//                           already carry merge-time evidence the probe
+//                           cannot: the author EMAIL recorded in the commit
+//                           itself. An org-domain email (isOrgDomainEmail,
+//                           --org-email-domains) therefore classifies the
+//                           author a leaderboard subject directly — no probe,
+//                           no membership claim about today. Residuals, both
+//                           documented and both loud-or-accepted: a forged
+//                           org-domain email on an outsider's commit yields a
+//                           false GAP (the direction the prime directive
+//                           prefers), and a departed member who committed
+//                           under a noreply.github.com address still slips —
+//                           narrower than before, when EVERY departee did.
 //   unmapped_engineer     — the probe answered 204 (an org member the map does
 //                           not resolve) or 302 (membership invisible to this
 //                           token — "cannot prove external" must never read as
@@ -1667,12 +1719,38 @@ export const unlinkedCommitAuthor = (email) =>
 // GET /pulls/{n}/commits serves at most 250 commits and signals the cap ONLY
 // by ending pagination normally (measured on a 283-commit PR: three pages,
 // 250 rows, no rel="next" on the last) — indistinguishable from completion,
-// so ghPaged cannot guard it the way it guards every other truncation. An
-// author past the cap is unread, and an unread author cannot justify an
-// exclusion: at the cap the record fails CLOSED with this marker instead.
+// so ghPaged cannot guard it the way it guards every other truncation. Two
+// consequences shape the handling in retriageByCommitAuthors:
+//
+//   1. The visible rows still get WALKED — an unmapped engineer inside the 250
+//      is real, actionable evidence, and a guard that discarded it printed a
+//      truncation marker where the one fixable login should have been.
+//   2. A listing that measures exactly 250 is ambiguous, not proof of
+//      truncation: the true count lives on GET /pulls/{n} `.commits` (present
+//      there and measured ABSENT on the list rows), so at-cap records spend
+//      ONE extra call to disambiguate — a genuinely-250-commit PR walks
+//      normally, while a larger one marks `commit_list_truncated` and fails
+//      CLOSED as an engineer gap (unread authors may be owed a score).
+//
+// Truncation is a record FLAG with its own report caveat, never a pseudo-login
+// in the map-edit list: the live collector's `gh api --paginate` reads the
+// SAME capped endpoint (measured stopping at the same 250 rows), so authors
+// past the cap were equally invisible to the original payload decision and no
+// ENGINEER_EMAIL_MAP edit can attribute them — the remediation is manual
+// attribution or splitting the PR, and the markdown says so where it says it.
 export const PR_COMMITS_CAP = 250;
-export const commitListTruncated = (number, seen) =>
-  `(commit list truncated at GitHub's ${seen}-commit cap on #${number} — authors past it unread)`;
+
+// MERGE-TIME evidence of leaderboard subjecthood, from the commit row itself:
+// an author email under an org domain. Complements resolveMembership, which
+// can only answer about TODAY (see the AUTHOR_KIND note on departed members).
+// The '@' is anchored so `evil@notpraetorian.com` cannot ride a suffix match;
+// comparison is lowercase both sides because domains are case-insensitive.
+// Fails toward `false` on absent/odd input — a non-match just falls through to
+// the probe path, it never excludes anyone.
+export const isOrgDomainEmail = (email, domains = DEFAULT_ORG_EMAIL_DOMAINS) => {
+  const e = String(email ?? '').toLowerCase();
+  return domains.some((d) => e.endsWith(`@${d}`));
+};
 
 // The one membership probe, shared by the opener triage and the commit-author
 // re-triage so the two paths cannot diverge. 204 = member. Direct 404 = proven
@@ -1712,14 +1790,6 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
     // the shape coincidence ghPaged's identity contract exists to prevent.
     { identity: (c) => c.sha },
   );
-  // Fail closed at the listing cap (see PR_COMMITS_CAP): a full-to-the-cap
-  // list may have unread authors behind it, and clearing the record on a
-  // partial read is the false-clean exclusion this whole re-triage refuses.
-  if (commits.length >= PR_COMMITS_CAP) {
-    rec.author_kind = AUTHOR_KIND.engineer;
-    rec.commit_author_logins = [commitListTruncated(rec.number, commits.length)];
-    return;
-  }
   const responsible = new Set();
   const probed = new Set();
   const unlinkedEmails = new Set();
@@ -1748,6 +1818,18 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
       unlinkedEmails.add(c.commit?.author?.email ?? '');
       continue;
     }
+    // MERGE-TIME evidence first (see isOrgDomainEmail): an org-domain author
+    // email makes the login a subject regardless of what the membership probe
+    // would say about TODAY — a since-departed member 404s exactly like an
+    // outsider, and this is the arm that catches them. Checked BEFORE the
+    // probed-dedup so a login whose first commit carried a noreply address is
+    // still caught by a later org-domain one. No `membership_unproven` here:
+    // this is commit evidence, not a membership claim. Side effect in the
+    // common case: current members with org emails skip the probe entirely.
+    if (isOrgDomainEmail(c.commit?.author?.email, cfg.orgEmailDomains)) {
+      responsible.add(author.login);
+      continue;
+    }
     if (probed.has(author.login)) continue;
     probed.add(author.login);
     const { kind, unproven } = await resolveMembership(client, cfg, author.login, memberCache);
@@ -1755,16 +1837,35 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
     responsible.add(author.login);
     if (unproven) rec.membership_unproven = true;
   }
-  if (!responsible.size && !unlinkedEmails.size) return;
-  rec.author_kind = AUTHOR_KIND.engineer;
   // The map edit is owed to the COMMIT authors, never to the bot/external
   // opener — buildReport reads this list into payload_missing_unmapped_logins
   // in place of `author_login` for re-triaged records. One marker per distinct
   // unlinked email, since each address is a separate account-linking action.
-  rec.commit_author_logins = [
+  const logins = () => [
     ...[...responsible].sort(),
     ...[...unlinkedEmails].sort().map((email) => unlinkedCommitAuthor(email)),
   ];
+  // Cap disambiguation AFTER the walk (see PR_COMMITS_CAP): the visible rows'
+  // findings are kept either way. One GET /pulls/{n} only for at-cap records;
+  // `.commits` carries the true count there. gh()'s 404 sentinel has no
+  // `.commits`, so an unreadable PR reads as truncated — the closed direction.
+  if (commits.length >= PR_COMMITS_CAP) {
+    const pr = await client.gh(`/repos/${cfg.owner}/${repo}/pulls/${rec.number}`);
+    if (!(Number.isFinite(pr?.commits) && pr.commits <= commits.length)) {
+      rec.author_kind = AUTHOR_KIND.engineer;
+      rec.commit_list_truncated = true;
+      // Possibly [] — deliberately: with no visible engineer there is no login
+      // to list, and leaving the field unset would let buildReport's
+      // `author_login` fallback print the bot/external OPENER as the map edit.
+      // The gap survives on the flag; the caveat renders from
+      // `commit_list_truncated_prs`, not from a pseudo-login here.
+      rec.commit_author_logins = logins();
+      return;
+    }
+  }
+  if (!responsible.size && !unlinkedEmails.size) return;
+  rec.author_kind = AUTHOR_KIND.engineer;
+  rec.commit_author_logins = logins();
 }
 
 // Annotates every payload_missing record in place. `prsByNumber` is required
@@ -1777,7 +1878,10 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
 // `memberCache`, which is run-scoped and shared across repos because org
 // membership is org-scoped, not repo-scoped — plus ONE commits listing per
 // bot/external-OPENED record, the price of not excluding on opener identity
-// the live pipeline does not score by.
+// the live pipeline does not score by, plus ONE PR fetch per record whose
+// listing hit the 250-row cap (a vanishing fraction; zero on the measured
+// fleet). The org-domain email arm SAVES probes on top: a current member
+// committing under their org address is classified from the row, cache-free.
 export async function triagePayloadMissingAuthors(client, cfg, repo, classes, prsByNumber, memberCache) {
   for (const rec of classes.payload_missing) {
     const user = prsByNumber.get(rec.number)?.user ?? null;
@@ -3557,7 +3661,9 @@ export function renderMarkdown(report, cfg) {
         'opener nor any commit author is a leaderboard subject. They are NOT gaps, do NOT ' +
         'affect the exit code, and need no map edit or replay. "External/invisible" means ' +
         'the org-membership probe answered a direct 404 — under a token that can see org ' +
-        'membership, a proven non-member at audit time. A token that cannot see membership ' +
+        'membership, a proven non-member at audit time — AND no commit of theirs carries an ' +
+        'org-domain author email, the merge-time evidence that keeps a since-departed member ' +
+        'a gap rather than an exclusion. A token that cannot see membership ' +
         'is answered with a redirect instead, and those authors fail CLOSED into the ' +
         'unmapped-engineer gap class rather than landing here.',
     );
@@ -3793,6 +3899,23 @@ export function renderMarkdown(report, cfg) {
         L.push(`Logins to add: ${logins.map((l) => `\`${l}\``).join(', ')}`);
         L.push('');
       }
+      // A map edit is NOT the whole remediation for these: the live collector
+      // reads the same 250-row-capped commit listing this audit did, so
+      // authors past the cap were invisible to the original payload decision
+      // and stay invisible to a replay. Prescribing only the map edit would
+      // hand over a remediation that cannot work for the unread authors.
+      const capped = g.commit_list_truncated_prs || [];
+      if (capped.length) {
+        L.push(
+          `> **Commit-listing cap:** ${capped.map((n) => `#${n}`).join(', ')} ` +
+            `hold${capped.length === 1 ? 's' : ''} more commits than GitHub's 250-row listing ` +
+            'serves, and the live collector reads the same capped listing — authors past the ' +
+            'cap are unreadable on BOTH sides, so a map edit alone cannot attribute them. ' +
+            'Any logins listed above cover only the visible rows; attribute the remainder ' +
+            'manually (or split the PR) in addition to any map edit.',
+        );
+        L.push('');
+      }
       L.push(`Unmapped-engineer PRs (${pmEngineer}): ${g.payload_missing_prs.map((n) => `#${n}`).join(', ')}`);
       L.push('');
     }
@@ -3969,6 +4092,19 @@ export function buildReport(results, cfg, apiCalls, dupes = 0, fleetMeta = null)
           ),
       ),
     ].sort(),
+    // PRs whose commit listing hit GitHub's 250-row cap with a genuinely
+    // higher true count (see PR_COMMITS_CAP). A machine channel of its own
+    // because the logins list above covers only the VISIBLE rows for these —
+    // a dispatcher (ENG-5789) that treated the map edit as their complete
+    // remediation would replay into the same cap the collector reads.
+    ...(() => {
+      const capped = pmSplit
+        .get(r.repo)
+        .engineer.filter((p) => p.commit_list_truncated)
+        .map((p) => p.number)
+        .sort((a, b) => a - b);
+      return capped.length ? { commit_list_truncated_prs: capped } : {};
+    })(),
     // Same reasoning, opposite remediation: these need a consumer-side lookup,
     // and a replay of them would re-deliver whatever already succeeded.
     unverifiable_prs: r.classes.unverifiable.map((p) => p.number).sort((a, b) => a - b),
