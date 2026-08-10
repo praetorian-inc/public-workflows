@@ -1628,11 +1628,18 @@ export function applyPayloadVerdicts(classes, verdicts) {
 //                           lifelong outsider — measured live on vespasian#57,
 //                           whose sole author left the org months after the
 //                           merge, flipping the repo's verdict from gap to
-//                           clean by the calendar. No API reports historical
-//                           membership (the org audit log needs owner scope
-//                           and floors at ~180 days), but the commit rows
-//                           already carry merge-time evidence the probe
-//                           cannot: the author EMAIL recorded in the commit
+//                           clean by the calendar. Historical membership is
+//                           not flatly unreachable — the org audit log
+//                           (GET /orgs/{org}/audit-log?phrase=
+//                           action:org.remove_member) answered 200 in live
+//                           testing and its X-Accepted-Oauth-Scopes include
+//                           read:org — but it additionally demands the org
+//                           OWNER role of the CALLER and retains ~180 days
+//                           (measured to 2026-02-20), and this action's token
+//                           is specified only as an org-read PAT, so that arm
+//                           is deliberately not taken: the commit rows carry
+//                           the merge-time evidence a non-owner token CAN
+//                           reach — the author EMAIL recorded in the commit
 //                           itself. An org-domain email (isOrgDomainEmail,
 //                           --org-email-domains) therefore classifies the
 //                           author a leaderboard subject directly — no probe,
@@ -1640,9 +1647,24 @@ export function applyPayloadVerdicts(classes, verdicts) {
 //                           documented and both loud-or-accepted: a forged
 //                           org-domain email on an outsider's commit yields a
 //                           false GAP (the direction the prime directive
-//                           prefers), and a departed member who committed
-//                           under a noreply.github.com address still slips —
-//                           narrower than before, when EVERY departee did.
+//                           prefers), and a departed member whose commits
+//                           carry NO org-domain address still slips — a
+//                           users.noreply.github.com address, a personal
+//                           address, and a former-employer domain are all
+//                           equally invisible here, so the arm narrows the
+//                           residual to authors who never committed under an
+//                           org address; it does not restrict it to one
+//                           spelling. Measured 2026-08-10 over six org repos'
+//                           recent commits (42 distinct non-bot authors): 16
+//                           carried an org-domain address, 23 noreply-only,
+//                           3 personal-domain — noreply dominates the
+//                           residual, and every proven departee in the sample
+//                           was noreply-only. The exit-0 exclusion of this
+//                           bucket therefore remains a standing judgment
+//                           call, revisitable via an audit-log arm (owner-
+//                           role token) or an undecided exit-3 channel; the
+//                           markdown tells the operator to eyeball the list
+//                           for exactly this case.
 //   unmapped_engineer     — the probe answered 204 (an org member the map does
 //                           not resolve) or 302 (membership invisible to this
 //                           token — "cannot prove external" must never read as
@@ -3665,7 +3687,11 @@ export function renderMarkdown(report, cfg) {
         'org-domain author email, the merge-time evidence that keeps a since-departed member ' +
         'a gap rather than an exclusion. A token that cannot see membership ' +
         'is answered with a redirect instead, and those authors fail CLOSED into the ' +
-        'unmapped-engineer gap class rather than landing here.',
+        'unmapped-engineer gap class rather than landing here. This list is decided as of ' +
+        'TODAY: an engineer who left the org after their PR merged answers the same direct ' +
+        '404 as a lifelong outsider, and only an org-domain commit email rescues them — so ' +
+        'scan these logins for former colleagues before treating the section as settled. A ' +
+        "name you recognize here is an unmapped-engineer gap wearing an external's answer.",
     );
     L.push('');
     const fmt = (list) => list.map((p) => `#${p.number}${p.login ? ` (@${p.login})` : ''}`).join(', ');

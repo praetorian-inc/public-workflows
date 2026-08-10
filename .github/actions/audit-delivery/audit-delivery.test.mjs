@@ -3409,10 +3409,12 @@ test('re-triage: an org-domain commit email classifies a DEPARTED member as the 
   assert.equal(r.membership_unproven, undefined, 'commit evidence is not a membership claim — no unproven flag');
 });
 
-test('re-triage: a departed member under a noreply address still slips — the documented residual, pinned', async () => {
+test('re-triage: a departed member with NO org-domain commit email still slips — the documented residual, pinned', async () => {
   // Without an org-domain email the only signal left is the probe, which
   // truthfully answers 404 about TODAY. The record stays excluded — this test
-  // exists so the residual narrows deliberately, never silently.
+  // exists so the residual narrows deliberately, never silently. The residual
+  // is the CLASS "no org-domain address", not the noreply spelling: the
+  // sibling test below pins a personal-domain address to the same outcome.
   const client = membershipClient(
     { '/orgs/praetorian-inc/members/departed': 404 },
     {
@@ -3431,6 +3433,34 @@ test('re-triage: a departed member under a noreply address still slips — the d
   );
   assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot, 'no org email, probe says external — record keeps the opener verdict');
   assert.equal(client.probes.length, 1);
+});
+
+test('re-triage: a departed member under a PERSONAL address slips identically — the residual is a class, not a spelling', async () => {
+  // Same shape with a human external opener and a gmail commit address, so
+  // the pinned outcome is the external_or_invisible verdict itself: gmail,
+  // noreply, and former-employer domains are equally invisible to the
+  // org-domain arm, and the probe truthfully answers 404 about today.
+  const client = membershipClient(
+    {
+      '/orgs/praetorian-inc/members/ghost-opener': 404,
+      '/orgs/praetorian-inc/members/departed': 404,
+    },
+    {
+      33: [commitBy('per1', { login: 'departed', type: 'User' },
+        { email: 'departed.person@gmail.com', parents: [{ sha: 'p' }] })],
+    },
+  );
+  const classes = { payload_missing: [rec(33)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    'guard',
+    classes,
+    new Map([userPr(33, { login: 'ghost-opener', type: 'User' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.external);
+  assert.equal(client.probes.length, 2);
 });
 
 test('re-triage: the email arm outranks the probed-dedup — a noreply FIRST commit does not mask an org-domain later one', async () => {
