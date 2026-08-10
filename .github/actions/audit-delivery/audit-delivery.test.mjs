@@ -51,6 +51,10 @@ import {
   resolveFleet,
   verifyPayloads,
   applyPayloadVerdicts,
+  AUTHOR_KIND,
+  isBotAuthor,
+  splitPayloadMissing,
+  triagePayloadMissingAuthors,
   SQS_STEP,
   chunk,
   REPLAY_BATCH,
@@ -2004,8 +2008,16 @@ test('buildReport: a gap entry carries the per-class counts and the numeric repl
       pre_onboarding: 1,
       in_flight: 1,
       payload_missing: 1,
+      // Un-annotated records fail CLOSED into the engineer subclass (ENG-5991):
+      // #50 carries no author_kind, so it must count as an actionable gap, not
+      // vanish into an exclusion.
+      payload_missing_unmapped_engineer: 1,
+      payload_missing_bot: 0,
+      payload_missing_external: 0,
       unverifiable: 1,
       payload_missing_prs: [50],
+      // No author_login on the fail-closed record, so no login to prescribe.
+      payload_missing_unmapped_logins: [],
       unverifiable_prs: [77],
       // Carried per repo, and from the RECORDS rather than restated in prose:
       // the class has more than one cause now, and a sentence naming one is
@@ -2793,7 +2805,9 @@ test('renderMarkdown: names the map fix and emits NO replay command when that is
   const md = renderMarkdown(report, { owner: 'praetorian-inc', backfillCaller: 'leaderboard-backfill.yml' });
   assert.match(md, /ran successfully but sent no payload/);
   assert.match(md, /ENGINEER_EMAIL_MAP/);
-  assert.match(md, /Unmapped-author PRs \(1\): #2/);
+  // rec(2) carries no author_kind — the fail-closed default renders it as an
+  // unmapped ENGINEER, the one subclass that keeps this remediation.
+  assert.match(md, /Unmapped-engineer PRs \(1\): #2/);
   // The load-bearing absence: a `-f pr_numbers=''` paste would dispatch a
   // backfill over nothing, and telling someone to replay these is wrong advice.
   assert.doesNotMatch(md, /pr_numbers=/);
@@ -2807,11 +2821,350 @@ test('renderMarkdown: both a replayable gap and an unmapped-author gap are repor
     10,
   );
   const md = renderMarkdown(report, { owner: 'praetorian-inc', backfillCaller: 'leaderboard-backfill.yml' });
-  assert.match(md, /Unmapped-author PRs \(1\): #8/);
+  assert.match(md, /Unmapped-engineer PRs \(1\): #8/);
   assert.match(md, /Affected PRs \(1\): #7/);
   // #8 must NOT reach the replay command even when a command is emitted for #7.
   assert.match(md, /-f pr_numbers='7'/);
   assert.doesNotMatch(md, /pr_numbers='7,8'/);
+});
+
+// ── payload_missing author triage (ENG-5991) ─────────────────────────────────
+
+// A client stub for the triage path: ghStatus answers from a path -> status
+// map and records every probe, so both the classification AND the call count
+// (the cache's whole contract) are assertable. Anything unmapped throws, so a
+// probe the test did not expect fails loudly instead of classifying.
+const membershipClient = (statuses = {}) => {
+  const probes = [];
+  return {
+    probes,
+    ghStatus: async (path) => {
+      probes.push(path);
+      if (!(path in statuses)) throw new Error(`unexpected membership probe: ${path}`);
+      return statuses[path];
+    },
+  };
+};
+
+const TCFG = { owner: 'praetorian-inc' };
+const userPr = (number, user) => [number, { number, user }];
+
+test('triagePayloadMissingAuthors: a [bot]-suffixed login is bot — decided locally, zero probes', async () => {
+  const client = membershipClient();
+  const classes = { payload_missing: [rec(1)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    classes,
+    // type deliberately 'User': the suffix alone must suffice, or a row that
+    // lost its type field silently costs a probe and a wrong verdict.
+    new Map([userPr(1, { login: 'dependabot[bot]', type: 'User' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot);
+  assert.equal(classes.payload_missing[0].author_login, 'dependabot[bot]');
+  assert.deepEqual(client.probes, [], 'a bot author must cost zero API calls');
+});
+
+test('triagePayloadMissingAuthors: user.type Bot is bot even without the [bot] suffix', async () => {
+  const client = membershipClient();
+  const classes = { payload_missing: [rec(2)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    classes,
+    new Map([userPr(2, { login: 'some-integration', type: 'Bot' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.bot);
+  assert.deepEqual(client.probes, []);
+});
+
+test('isBotAuthor: the suffix means SUFFIX — logins merely containing "bot" are not bots', () => {
+  // The negative space of the two positive tests above: a human whose login
+  // contains "bot" must reach the membership probe, not the exclusion.
+  assert.equal(isBotAuthor({ login: 'abbott', type: 'User' }), false);
+  assert.equal(isBotAuthor({ login: 'bot-ross', type: 'User' }), false);
+  assert.equal(isBotAuthor(null), false);
+  assert.equal(isBotAuthor({ type: 'Bot' }), true, 'type alone suffices');
+  assert.equal(isBotAuthor({ login: 'dependabot[bot]' }), true, 'suffix alone suffices');
+});
+
+test('triagePayloadMissingAuthors: a 404 membership answer is external_or_invisible', async () => {
+  // 404 is GitHub's documented "not a member OR membership not visible to this
+  // token" — the ambiguity survives into the kind's NAME so no consumer can
+  // read it as a proven external.
+  const client = membershipClient({ '/orgs/praetorian-inc/members/hugo-syn': 404 });
+  const classes = { payload_missing: [rec(3)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    classes,
+    new Map([userPr(3, { login: 'hugo-syn', type: 'User' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.external);
+  assert.equal(classes.payload_missing[0].author_login, 'hugo-syn');
+});
+
+test('triagePayloadMissingAuthors: a 204 membership answer is unmapped_engineer — the actionable subclass', async () => {
+  const client = membershipClient({ '/orgs/praetorian-inc/members/new-hire': 204 });
+  const classes = { payload_missing: [rec(4)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    classes,
+    new Map([userPr(4, { login: 'new-hire', type: 'User' })]),
+    new Map(),
+  );
+  assert.equal(classes.payload_missing[0].author_kind, AUTHOR_KIND.engineer);
+});
+
+test('triagePayloadMissingAuthors: one membership probe per DISTINCT login per run, across repos', async () => {
+  // The ticket's cost budget: dependabot alone was 44 of 53 records in the
+  // first fleet run, and the human logins repeat too. The cache is passed in
+  // (auditRepo holds it on client.state) precisely so a SECOND repo's triage
+  // reuses the first's answers — membership is org-scoped.
+  const client = membershipClient({ '/orgs/praetorian-inc/members/new-hire': 204 });
+  const cache = new Map();
+  const prsByNumber = new Map([
+    userPr(5, { login: 'new-hire', type: 'User' }),
+    userPr(6, { login: 'new-hire', type: 'User' }),
+  ]);
+  const repoA = { payload_missing: [rec(5), rec(6)] };
+  await triagePayloadMissingAuthors(client, TCFG, repoA, prsByNumber, cache);
+  const repoB = { payload_missing: [rec(5)] };
+  await triagePayloadMissingAuthors(client, TCFG, repoB, prsByNumber, cache);
+  assert.equal(client.probes.length, 1, 'three records, one login, ONE probe');
+  assert.deepEqual(
+    repoA.payload_missing.map((r) => r.author_kind),
+    [AUTHOR_KIND.engineer, AUTHOR_KIND.engineer],
+  );
+  assert.equal(repoB.payload_missing[0].author_kind, AUTHOR_KIND.engineer);
+});
+
+test('triagePayloadMissingAuthors: a record with no resolvable user fails CLOSED into unmapped_engineer', async () => {
+  // No PR row for #7 at all, and #8's row has a null user. Neither can be
+  // probed; both must stay REPORTED gaps — "could not tell who" is never an
+  // exclusion.
+  const client = membershipClient();
+  const classes = { payload_missing: [rec(7), rec(8)] };
+  await triagePayloadMissingAuthors(
+    client,
+    TCFG,
+    classes,
+    new Map([[8, { number: 8, user: null }]]),
+    new Map(),
+  );
+  assert.deepEqual(
+    classes.payload_missing.map((r) => r.author_kind),
+    [AUTHOR_KIND.engineer, AUTHOR_KIND.engineer],
+  );
+  assert.deepEqual(client.probes, [], 'nothing to probe — but nothing excused either');
+});
+
+test('splitPayloadMissing: an un-annotated record fails CLOSED into engineer', () => {
+  // The pure half of the fail-closed default: a record that never met the
+  // triage (an old report, a future populator that forgets to annotate) must
+  // land in the subclass that stays a gap.
+  const split = splitPayloadMissing([
+    rec(1),
+    { ...rec(2), author_kind: AUTHOR_KIND.bot },
+    { ...rec(3), author_kind: AUTHOR_KIND.external },
+  ]);
+  assert.deepEqual(split.engineer.map((r) => r.number), [1]);
+  assert.deepEqual(split.bot.map((r) => r.number), [2]);
+  assert.deepEqual(split.external.map((r) => r.number), [3]);
+});
+
+test('exit-code semantics (ENG-5991): bot/external-only payload_missing is NOT a gap — the exit-0 arm', () => {
+  // main()'s exit line is `repos_with_gaps.length ? 1 : undecided ? 3 : 0`, so
+  // this report is the exit-0 state: no gap repo, nothing undecided. Pinning
+  // the DECISION: an expected non-delivery is CLEAN — not a gap (exit 1) and
+  // not undecided (exit 3, which is for records the audit could not decide; a
+  // bot PR is fully decided — no payload was ever owed).
+  const report = buildReport(
+    [
+      repoResult('guard', {
+        merged: 3,
+        delivered: [rec(1)],
+        payload_missing: [
+          { ...rec(2), author_kind: AUTHOR_KIND.bot, author_login: 'dependabot[bot]' },
+          { ...rec(3), author_kind: AUTHOR_KIND.external, author_login: 'hugo-syn' },
+        ],
+      }),
+    ],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  assert.equal(report.repos_with_gaps.length, 0, 'no gap repo -> exit 0, not 1');
+  assert.equal(report.totals.in_flight + report.totals.unverifiable, 0, 'nothing undecided -> not 3');
+  // The class total stays the whole class (the partition consumers sum)...
+  assert.equal(report.totals.payload_missing, 2);
+  // ...and the split is self-describing beside it, plus the by-design rows
+  // that give these PRs their own non-gap section (they appear NOWHERE else —
+  // the repo never enters repos_with_gaps).
+  assert.deepEqual(report.payload_missing_subclasses, {
+    bot: 1,
+    external_or_invisible: 1,
+    unmapped_engineer: 0,
+  });
+  assert.deepEqual(report.payload_missing_by_design, [
+    {
+      repo: 'guard',
+      bots: [{ number: 2, login: 'dependabot[bot]' }],
+      externals: [{ number: 3, login: 'hugo-syn' }],
+    },
+  ]);
+});
+
+test('exit-code semantics (ENG-5991): an unmapped ENGINEER still makes a gap repo — the exit-1 arm', () => {
+  const report = buildReport(
+    [
+      repoResult('guard', {
+        merged: 2,
+        payload_missing: [
+          { ...rec(4), author_kind: AUTHOR_KIND.engineer, author_login: 'new-hire' },
+          { ...rec(5), author_kind: AUTHOR_KIND.bot, author_login: 'dependabot[bot]' },
+        ],
+      }),
+    ],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  assert.equal(report.repos_with_gaps.length, 1, 'an org member missing score is still exit 1');
+  const g = report.repos_with_gaps[0];
+  assert.equal(g.payload_missing, 2, 'class total stays the whole class');
+  assert.equal(g.payload_missing_unmapped_engineer, 1);
+  assert.equal(g.payload_missing_bot, 1);
+  assert.equal(g.payload_missing_external, 0);
+  // The map-edit list carries the ENGINEER PRs only: listing #5 would put the
+  // bot right back into the remediation the split removed it from.
+  assert.deepEqual(g.payload_missing_prs, [4]);
+  assert.deepEqual(g.payload_missing_unmapped_logins, ['new-hire']);
+});
+
+test('renderMarkdown: the ENGINEER_EMAIL_MAP remediation renders ONLY for the engineer subclass', () => {
+  // A mixed gap repo: one engineer record (remediation owed) and one bot
+  // record (must be labelled not-a-gap, and must NOT swell the remediation
+  // count or the map-edit list).
+  const report = buildReport(
+    [
+      repoResult('guard', {
+        merged: 2,
+        payload_missing: [
+          { ...rec(4), author_kind: AUTHOR_KIND.engineer, author_login: 'new-hire' },
+          { ...rec(5), author_kind: AUTHOR_KIND.bot, author_login: 'dependabot[bot]' },
+        ],
+      }),
+    ],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  const md = renderMarkdown(report, { owner: 'praetorian-inc' });
+  assert.match(md, /\| ran but sent no payload \(unmapped engineer\) \| 1 \|/);
+  assert.match(md, /\| ran but sent no payload \(bot author — not a gap\) \| 1 \|/);
+  assert.match(md, /Unmapped-engineer PRs \(1\): #4/);
+  assert.match(md, /Logins to add: `new-hire`/);
+  // The bot PR appears in the by-design section, never in the remediation.
+  assert.match(md, /#5 \(@dependabot\[bot\]\)/);
+  assert.doesNotMatch(md, /Unmapped-engineer PRs \(2\)/);
+});
+
+test('renderMarkdown: bot/external exclusions get their own non-gap section on the CLEAN branch', () => {
+  // A fleet whose ONLY payload_missing records are bot/external is CLEAN and
+  // takes renderMarkdown's early return — which is exactly the report that
+  // must still say where those PRs went. And the remediation literal must be
+  // absent: telling anyone to edit the map here would re-prescribe the fix the
+  // split just removed.
+  const report = buildReport(
+    [
+      repoResult('guard', {
+        merged: 2,
+        delivered: [rec(1)],
+        payload_missing: [
+          { ...rec(2), author_kind: AUTHOR_KIND.bot, author_login: 'dependabot[bot]' },
+        ],
+      }),
+    ],
+    { since: '2026-07-01', selfAudit: true },
+    5,
+  );
+  assert.equal(report.repos_with_gaps.length, 0);
+  const md = renderMarkdown(report, { owner: 'praetorian-inc' });
+  assert.match(md, /No gaps/);
+  assert.match(md, /excluded by design \(not gaps\)/);
+  assert.match(md, /`guard` — bot authors \(1\): #2 \(@dependabot\[bot\]\)/);
+  assert.doesNotMatch(md, /ENGINEER_EMAIL_MAP/);
+  // The external wording ships GitHub's 404 ambiguity whenever the section
+  // renders — an employee invisible to a weak token must not read as proven
+  // external.
+  assert.match(md, /not an org member, OR membership not visible to this token/);
+});
+
+test('auditRepo: the author triage is WIRED in — bots decided locally, humans probed once via ghStatus', async () => {
+  // End-to-end through the real pipeline: two merged PRs whose successful runs
+  // skipped the SQS step (the payload_missing route via applyPayloadVerdicts),
+  // one bot-authored, one human-authored. The wiring under test: auditRepo
+  // joins the author from `prs` (classify's records carry none), creates the
+  // membership cache on client.state, and calls ghStatus for the human only.
+  const probes = [];
+  const client = {
+    ghPaged: async (path) => {
+      if (path.includes('/pulls?'))
+        return [
+          {
+            ...pr(21, '2026-06-01T00:00:00Z', 'bothead0000001'),
+            user: { login: 'dependabot[bot]', type: 'Bot' },
+          },
+          {
+            ...pr(22, '2026-06-02T00:00:00Z', 'humanhead00001'),
+            user: { login: 'hugo-syn', type: 'User' },
+          },
+        ];
+      if (path.includes('/commits?')) return [];
+      if (path.includes('/runs?'))
+        return [
+          run(800, 'bothead0000001', 'success', '2026-06-01T00:01:00Z'),
+          run(801, 'humanhead00001', 'success', '2026-06-02T00:01:00Z'),
+        ];
+      throw new Error(`unexpected ghPaged ${path}`);
+    },
+    gh: async (path) => {
+      if (path.includes('per_page=1&created=')) return { total_count: 2 };
+      if (path.endsWith('/runs/800/jobs?per_page=100')) return jobsWithStep('skipped');
+      if (path.endsWith('/runs/801/jobs?per_page=100')) return jobsWithStep('skipped');
+      if (path.includes('/contents/')) return { type: 'file' };
+      throw new Error(`unexpected gh ${path}`);
+    },
+    ghStatus: async (path) => {
+      probes.push(path);
+      if (path === '/orgs/praetorian-inc/members/hugo-syn') return 404;
+      throw new Error(`unexpected ghStatus ${path}`);
+    },
+    ghCount: async () => 2,
+  };
+
+  const res = await auditRepo(
+    client,
+    {
+      owner: 'praetorian-inc',
+      callerFile: 'c.yml',
+      callerPath: '.github/workflows/c.yml',
+      since: '2026-05-01',
+    },
+    'guard',
+  );
+
+  assert.deepEqual(res.classes.payload_missing.map((r) => r.number), [21, 22]);
+  const [botRec, extRec] = res.classes.payload_missing;
+  assert.equal(botRec.author_kind, AUTHOR_KIND.bot);
+  assert.equal(botRec.author_login, 'dependabot[bot]');
+  assert.equal(extRec.author_kind, AUTHOR_KIND.external);
+  assert.deepEqual(probes, ['/orgs/praetorian-inc/members/hugo-syn'], 'one probe: the human');
+  // And downstream, this repo is no longer a gap repo at all.
+  const report = buildReport([res], { since: '2026-05-01', selfAudit: true }, 1);
+  assert.equal(report.repos_with_gaps.length, 0);
 });
 
 test('renderMarkdown: the header does not claim a delivery it only inferred from a conclusion', () => {
@@ -4607,6 +4960,21 @@ test('action.yml gap counter: payload_missing is counted even with an EMPTY repl
   // they are deliberately off the replay list. replay.length alone would print 0
   // for a repo that has a real, live gap.
   assert.equal(runGapCounter({ repos_with_gaps: [{ repo: 'guard', replay: [], payload_missing: 3 }] }), '3');
+});
+
+test('action.yml gap counter: only the ENGINEER subclass counts when the split is present', () => {
+  // ENG-5991: a mixed repo carries payload_missing=5 (class total, bots
+  // included) beside payload_missing_unmapped_engineer=1. Counting the total
+  // would page a caller over 4 PRs nobody should act on; the reducer must
+  // prefer the subclass key. 2 replay + 1 engineer = 3.
+  assert.equal(
+    runGapCounter({
+      repos_with_gaps: [
+        { repo: 'guard', replay: [1, 2], payload_missing: 5, payload_missing_unmapped_engineer: 1 },
+      ],
+    }),
+    '3',
+  );
 });
 
 test('action.yml gap counter: a missing payload_missing key does not poison the sum', () => {
