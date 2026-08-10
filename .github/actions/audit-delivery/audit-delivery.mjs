@@ -597,6 +597,30 @@ export const UNVERIFIABLE_RUN_IN_FLIGHT =
   'not being there yet is a snapshot of a run still in progress rather than evidence ' +
   'it never sent. Re-run the audit once that run completes.';
 
+// The FIFTH cause: the caller-path file does not CALL the reusable, so the run
+// being probed never executed the reusable at all.
+//
+// probeSqsStep's rename arm infers "the reusable's step names have changed" from
+// a success run with no step named SQS_STEP — an inference that PRESUMES the run
+// executed the reusable. When the caller-path file is a stub, or the reusable's
+// own definition, or an unrelated workflow, that premise is false: the step is
+// absent because this workflow never ran it, and no edit to SQS_STEP can make it
+// appear. Measured (ENG-5989, 2026-08-09): leaderboard-alarm-ac3-sandbox run
+// 31288388000 concluded success with a single echo step, and the rename throw
+// aborted the ENTIRE fleet audit at exit 2 — no report for any repo — with a
+// remedy ("update SQS_STEP") wrong in every clause.
+//
+// A repo whose caller genuinely calls the reusable keeps the global halt: there
+// the rename inference is sound and a stale SQS_STEP really does blind the
+// probe fleet-wide. Only when caller-hood at HEAD is already disproven does the
+// non-decision scope to the record, so the audit still publishes what it
+// decided everywhere else.
+export const UNVERIFIABLE_NONCALLER_NO_STEP =
+  'its run concluded success with no delivery step, and this repo\'s caller-path ' +
+  'file does not call the reusable — the step is absent because this workflow never ' +
+  'runs it, not because the step was renamed, so do NOT update SQS_STEP. Check what ' +
+  'the caller-path file actually calls.';
+
 // Every probeSqsStep verdict that is NOT a decision, mapped to the reason it puts
 // on the record. The mapping is the single decision point ON PURPOSE: the two
 // undecided verdicts behave identically downstream, so a call site that compared
@@ -607,6 +631,7 @@ export const UNVERIFIABLE_RUN_IN_FLIGHT =
 export const UNDECIDED_VERDICTS = new Map([
   ['unknown', UNVERIFIABLE_JOBS_UNREADABLE],
   ['unknown_no_steps', UNVERIFIABLE_STEPS_REAPED],
+  ['unknown_noncaller', UNVERIFIABLE_NONCALLER_NO_STEP],
 ]);
 
 // Classification is pure so it can be unit-tested without touching the network.
@@ -1059,7 +1084,7 @@ export const SQS_STEP = 'Send metrics to SQS';
 // A rename and a truncated page still throw. Those are facts about the probe
 // itself being wrong — the step name it looks for is stale, or the list it read is
 // short — not about one record's history being unreadable.
-export async function probeSqsStep(client, cfg, repo, jobsPath, label, { requireStep = true } = {}) {
+export async function probeSqsStep(client, cfg, repo, jobsPath, label, { requireStep = true, callerVerified = true } = {}) {
   // per_page is explicit: this endpoint defaults to 30 jobs, and a truncated
   // list would hide a PRESENT delivery step, which then reads as a rename and
   // stops the whole audit at exit 2 for a cause that is not the real one.
@@ -1172,6 +1197,15 @@ export async function probeSqsStep(client, cfg, repo, jobsPath, label, { require
     return 'not_sent';
   }
   if (!step) {
+    // The rename inference below presumes the run EXECUTED the reusable. When
+    // the caller has already been disproven — the caller-path file does not
+    // call the reusable (a stub, the reusable's own definition, an unrelated
+    // workflow) — the step is absent because this workflow never runs it, and
+    // "update SQS_STEP" is the wrong remedy for a condition no edit to
+    // SQS_STEP can repair. Per-repo undecided, not a fleet-wide halt: see
+    // UNVERIFIABLE_NONCALLER_NO_STEP for the measured run (31288388000) that
+    // took the whole audit to exit 2 with no report.
+    if (!callerVerified) return 'unknown_noncaller';
     // Absence is NOT treated as delivered. A name probe that silently answers
     // "fine" when it finds nothing is the same fail-open shape as the bug it
     // is fixing, so this stops the audit at exit 2 UNKNOWN instead. The name
@@ -1270,7 +1304,7 @@ export function headRunsByPr(prs, runs) {
 //                      run, then siblings, then attempts), so the earliest
 //                      unreadable thing is the one closest to what the operator
 //                      asked about.
-async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
+async function walkHeadForSend(client, cfg, repo, runs, ownRunId, callerVerified = true) {
   let ownLatestSuccess = null;
   let unreadable = false;
   let unreadableReason = null;
@@ -1297,6 +1331,7 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
       : `run ${run.id} (sibling on the same head, conclusion ${run.conclusion})`;
     const verdict = await probeSqsStep(client, cfg, repo, `${base}/jobs`, label, {
       requireStep: run.conclusion === 'success',
+      callerVerified,
     });
     if (verdict === 'sent') {
       return { sent: { run_id: run.id, attempt: null }, ownLatestSuccess, unreadable, unreadableReason };
@@ -1337,6 +1372,7 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
       const ok = att.conclusion === 'success';
       const av = await probeSqsStep(client, cfg, repo, `${path}/jobs`, `${label} attempt ${n}`, {
         requireStep: ok,
+        callerVerified,
       });
       if (av === 'sent') {
         return { sent: { run_id: run.id, attempt: n }, ownLatestSuccess, unreadable, unreadableReason };
@@ -1355,7 +1391,10 @@ async function walkHeadForSend(client, cfg, repo, runs, ownRunId) {
   return { sent: null, ownLatestSuccess, unreadable, unreadableReason };
 }
 
-export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null) {
+// `callerVerified` rides through to probeSqsStep's rename arm and defaults to
+// true — the conservative direction (throw rather than shrug) — so every
+// caller that has not proven caller-hood false keeps the fleet-wide halt.
+export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null, callerVerified = true) {
   const verdicts = new Map();
   for (const rec of recs) {
     // The own run is probed FIRST and the walk returns on the first send, so the
@@ -1385,6 +1424,7 @@ export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null)
       repo,
       [own, ...siblings],
       rec.run_id,
+      callerVerified,
     );
     let verdict = 'not_sent';
     if (sent) {
@@ -1445,7 +1485,7 @@ export async function verifyPayloads(client, cfg, repo, recs, headRunIds = null)
 // Cost is bounded by what would be REPLAYED, never by population: one jobs call
 // per record here, plus one per sibling on a shared head, plus attempt probes only
 // for runs past attempt 1 (guard: 5 of 1537 runs, 2 of them non-success).
-export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds = null) {
+export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds = null, callerVerified = true) {
   for (const key of ['failed', 'skipped_anomaly']) {
     const kept = [];
     for (const rec of classes[key]) {
@@ -1463,6 +1503,7 @@ export async function recoverHiddenDeliveries(client, cfg, repo, classes, headRu
         repo,
         [own, ...siblings],
         rec.run_id,
+        callerVerified,
       );
       if (sent) {
         // Which hiding place it came out of, because that is what an operator has
@@ -2469,9 +2510,71 @@ export async function hasCaller(client, cfg, repo) {
   // member ends in a fabricated prod replay list. The anchored compare lives
   // in matchesReusable since round 24, which folds owner/repo case without
   // touching the path — see its note above.
-  return yamlStructureLines(b64(f.content)).some((l) =>
-    usesValues(stripComment(l)).some((v) => matchesReusable(v, cfg.reusable)),
+  return callsReusable(b64(f.content), cfg.reusable);
+}
+
+// The caller-hood predicate over one revision's text — ONE pipeline for every
+// probe that must answer "does this file CALL the reusable", shared by
+// hasCaller (HEAD) and historicalCaller (past revisions). Shared on purpose
+// (ENG-5989): the history probe used bare commit existence instead of this
+// pipeline and admitted three non-callers, so the two probes must not be able
+// to drift apart again.
+export const callsReusable = (text, reusable) =>
+  yamlStructureLines(text).some((l) =>
+    usesValues(stripComment(l)).some((v) => matchesReusable(v, reusable)),
   );
+
+// Did a PAST revision of the caller-path file actually call the reusable?
+// Answers the deleted-caller half of fleet membership, where hasCaller at HEAD
+// has already said no.
+//
+// Historical CONTENT, never bare commit existence. Presence at the caller path
+// is not caller-hood, and "some commit touched the path" admitted three
+// non-callers in one org enumeration (measured 2026-08-09, ENG-5989):
+//
+//   - leaderboard-alarm-ac3-sandbox — the file is an echo stub at EVERY
+//     revision; it never called anything.
+//   - public-workflows — the path IS the reusable's own definition. Admitted,
+//     every merged PR classified never_fired (a reusable accrues no runs of
+//     its own) and the report printed replay commands against the PROD queue
+//     for deliveries that had in fact succeeded — the worst output this tool
+//     can produce.
+//   - .github — hosted the OLD reusable before the 2026-07-07 migration;
+//     a definition, never a caller.
+//
+// The walk is newest-first and continues PAST non-calling surviving revisions:
+// one revision that called the reusable, anywhere in the probed window, is
+// caller-hood. Stopping at the first surviving revision read a genuine caller
+// overwritten with a non-calling stub before its deletion as never-onboarded —
+// the repo struck from the fleet and every one of its delivery gaps vanished
+// with it, the false-clean direction. per_page=10 bounds the cost — the
+// listing usually leads with the deletion commit (the path appears in it, the
+// file does not), and one contents read per surviving revision is ~1 extra
+// call per history-probe hit. Residual under-admission, accepted and stated: a
+// genuine caller older than the 10 newest path-touching commits reads
+// never-onboarded. That errs toward a smaller fleet, the same direction as
+// "never onboarded", and the repo surfaces the moment anyone audits it
+// explicitly (self-audit mode bypasses fleet resolution entirely).
+export async function historicalCaller(client, cfg, repo) {
+  const hist = await client.gh(
+    `/repos/${cfg.owner}/${repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=10`,
+  );
+  if (!Array.isArray(hist) || !hist.length) return false;
+  // Per-segment encoding for the same reason as hasCaller; the sha is encoded
+  // whole because it is a single query value, not a path.
+  const path = cfg.callerPath.split('/').map(encodeURIComponent).join('/');
+  for (const c of hist) {
+    const f = await client.gh(
+      `/repos/${cfg.owner}/${repo}/contents/${path}?ref=${encodeURIComponent(c.sha)}`,
+    );
+    // The deletion commit lists the path but carries no file at it, and a
+    // surviving revision that does not CALL proves nothing about the ones
+    // below it — both keep the walk moving; only the exhausted listing
+    // answers false.
+    if (!f || f.__missing || !f.content) continue;
+    if (callsReusable(b64(f.content), cfg.reusable)) return true;
+  }
+  return false;
 }
 
 // A 404 on a SPECIFIC ENDPOINT is meaningful data — no caller file, no runs for
@@ -2655,14 +2758,16 @@ export async function resolveFleet(client, cfg, meta = {}) {
     // gap signal this tool can see: every merged PR after the deletion is a
     // real never_fired, and gating membership on the caller's PRESENT content
     // would remove exactly the repo most likely to be bleeding deliveries. The
-    // content probe cannot tell the two apart, so the caller path's commit
-    // HISTORY breaks the tie: any commit ever touching the path proves the
-    // repo was onboarded, and it stays a subject, flagged `caller_deleted`.
+    // HEAD probe cannot tell the two apart, so the caller path's HISTORY
+    // breaks the tie — but historical CONTENT, never bare commit existence:
+    // presence at the caller path is not caller-hood, and any-commit-touched
+    // admitted three non-callers in one org enumeration (the sandbox stub,
+    // public-workflows' own reusable definition — whose admission fabricated
+    // prod replay commands — and .github's pre-migration copy; the measured
+    // shapes live on historicalCaller). Only a past revision that actually
+    // CALLED the reusable keeps the repo a subject, flagged `caller_deleted`.
     if (sizeByName.get(name) === 0) continue; // empty repo: /commits is a 409, and there is no history to find
-    const hist = await client.gh(
-      `/repos/${cfg.owner}/${name}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=1`,
-    );
-    if (Array.isArray(hist) && hist.length) {
+    if (await historicalCaller(client, cfg, name)) {
       fleet.push(name);
       meta.callerDeleted.push(name);
     }
@@ -3051,13 +3156,40 @@ export async function auditRepo(client, cfg, repo) {
   // for both probe paths: they ask the same question from opposite sides, and the
   // round-8 finding was one of them being fixed while the other was not.
   const headRunIds = headRunsByPr(prs, runs);
+  // Probed BEFORE the delivery walks because they consume it: probeSqsStep's
+  // rename halt presumes the run executed the reusable, and a repo whose
+  // caller-path file NEVER called it (self-audit stub, the reusable's own
+  // definition) must get a per-repo `unverifiable` there instead of aborting
+  // the whole fleet — see UNVERIFIABLE_NONCALLER_NO_STEP.
+  const caller = await hasCaller(client, cfg, repo);
+  // The walks need caller-HOOD, not HEAD state: a DELETED caller's
+  // pre-deletion success run executed the reusable, so its missing SQS_STEP
+  // is the rename signal — `caller` alone downgraded it to
+  // UNVERIFIABLE_NONCALLER_NO_STEP, whose "this workflow never runs it" text
+  // is false for a former caller, and silenced the fleet-wide rename detector
+  // (in self-audit of that repo, the only rename warning). `has_caller` in
+  // the report stays HEAD state. The history probe runs ONLY when a record
+  // will actually reach a walk — the same populations the walks consume —
+  // which bounds its cost to caller-less repos with probe-able records and
+  // keeps `/commits` off empty repos (409 there, and an empty repo has no
+  // records — the same safety resolveFleet takes from sizeByName and
+  // annotateSelfProvenance from `meta?.size !== 0`).
+  let callerVerified = caller;
+  if (
+    !caller &&
+    (classes.failed.length ||
+      classes.skipped_anomaly.length ||
+      classes.delivered.some(needsPayloadProbe))
+  ) {
+    callerVerified = await historicalCaller(client, cfg, repo);
+  }
   // Recover BEFORE the payload probe, not after: a record rescued from a prior
   // attempt or a sibling run joins `delivered` or `payload_missing` with its
   // verdict already determined by the run it was rescued from, so running it
   // through verifyPayloads again would re-probe the CURRENT (failed) run and
   // demote it straight back. Ordering is the whole correctness of this pair, and
   // `needsPayloadProbe` is the other half of it.
-  await recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds);
+  await recoverHiddenDeliveries(client, cfg, repo, classes, headRunIds, callerVerified);
   // Only the successful runs need the payload probe: every other class already
   // knows it did not deliver, so there is nothing to demote.
   applyPayloadVerdicts(
@@ -3068,9 +3200,9 @@ export async function auditRepo(client, cfg, repo) {
       repo,
       classes.delivered.filter(needsPayloadProbe),
       headRunIds,
+      callerVerified,
     ),
   );
-  const caller = await hasCaller(client, cfg, repo);
 
   return { repo, onboarded, has_caller: caller, merged_prs: prs.length, classes };
 }
@@ -3717,10 +3849,12 @@ export async function annotateSelfProvenance(client, cfg, results, repoMetaByNam
     const meta = repoMetaByName.get(r.repo);
     if (meta?.archived) r.repo_archived = true;
     if (!r.has_caller && meta?.size !== 0) {
-      const hist = await client.gh(
-        `/repos/${cfg.owner}/${r.repo}/commits?path=${encodeURIComponent(cfg.callerPath)}&per_page=1`,
-      );
-      if (Array.isArray(hist) && hist.length) r.caller_deleted = true;
+      // Same content-not-presence rule as resolveFleet's deleted-caller arm,
+      // through the same helper: a bare commits probe here rendered the
+      // DELETED callout for a sandbox whose caller-path file was a stub at
+      // every revision (ENG-5989) — the opposite-of-truth direction this
+      // function exists to prevent.
+      if (await historicalCaller(client, cfg, r.repo)) r.caller_deleted = true;
     }
   }
   return results;
