@@ -3585,6 +3585,71 @@ test('re-triage: 249 rows is BELOW the cap — the guard is not blanket, exclusi
   assert.deepEqual(client.fetches, [], 'below the cap there is nothing to disambiguate — zero PR fetches');
 });
 
+test('re-triage: a page-shift DUPLICATE cannot hide the cap — raw rows trip the guard, not the deduped length', async () => {
+  // ghPaged dedupes this walk by sha and returns only the surviving rows, so a
+  // truncated 250-raw listing that re-served one SHA across a page boundary (a
+  // merge into the head branch mid-walk inserts rows before the cursor)
+  // measured 249, slipped under the cap, and the bot opener kept its exclusion
+  // with 33 authors unread behind the cap — the silent false-clean
+  // (CodeRabbit, round 4b; reproduced with the real client). The guard now
+  // compares the RAW count recovered from the state.dupes delta, which only
+  // the real makeClient carries — hence the withFetch harness here, not
+  // membershipClient: the fake has no state and cannot exercise the delta.
+  const sha = (i) => `c${String(i).padStart(4, '0')}`;
+  const row = (i) => ({
+    sha: sha(i),
+    parents: [{ sha: 'p' }],
+    author: { login: 'dependabot[bot]', type: 'Bot' },
+    commit: { author: { email: 'bot@users.noreply.github.com' } },
+  });
+  // 100 + 100 + 50 = 250 raw rows; page 2 re-serves page 1's last sha, so the
+  // deduped walk sees 249 distinct commits of a PR whose true count is 283.
+  const pages = [
+    { rows: Array.from({ length: 100 }, (_, i) => row(i)), next: 2 },
+    { rows: [row(99), ...Array.from({ length: 99 }, (_, i) => row(100 + i))], next: 3 },
+    { rows: Array.from({ length: 50 }, (_, i) => row(199 + i)), next: null },
+  ];
+  const linked = (p) =>
+    p.next === null
+      ? new Headers()
+      : new Headers({
+          link: `<https://api.github.com/repos/praetorian-inc/guard/pulls/77/commits?per_page=100&page=${p.next}>; rel="next"`,
+        });
+  const prFetches = [];
+  const client = makeClient('t');
+  const classes = { payload_missing: [rec(77)] };
+  await withFetch(
+    async (url) => {
+      const u = String(url);
+      const m = /\/pulls\/77\/commits\?per_page=100(?:&page=(\d+))?$/.exec(u);
+      if (m) {
+        const p = pages[(Number(m[1]) || 1) - 1];
+        return { status: 200, ok: true, headers: linked(p), json: async () => p.rows };
+      }
+      if (u.endsWith('/pulls/77')) {
+        prFetches.push(u);
+        return okRes({ commits: 283 });
+      }
+      throw new Error(`unexpected fetch ${u}`);
+    },
+    () =>
+      triagePayloadMissingAuthors(
+        client,
+        TCFG,
+        'guard',
+        classes,
+        new Map([userPr(77, { login: 'dependabot[bot]', type: 'Bot' })]),
+        new Map(),
+      ),
+  );
+  const r = classes.payload_missing[0];
+  assert.equal(client.state.dupes, 1, 'the re-served row was deduped, not double-walked');
+  assert.equal(prFetches.length, 1, 'raw 250 reached the cap: exactly one disambiguation fetch');
+  assert.equal(r.author_kind, AUTHOR_KIND.engineer, 'truncation fails closed to a loud gap');
+  assert.equal(r.commit_list_truncated, true);
+  assert.deepEqual(r.commit_author_logins, []);
+});
+
 // ── merge-time email evidence (round 4: departed-member false-clean) ─────────
 
 test('re-triage: an org-domain commit email classifies a DEPARTED member as the subject — zero probes, no membership claim', async () => {

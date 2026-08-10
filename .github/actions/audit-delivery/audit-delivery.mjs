@@ -1846,6 +1846,18 @@ async function resolveMembership(client, cfg, login, memberCache) {
 // single-page); membership probes only for NEW distinct logins, through the
 // same run-scoped cache as the opener path.
 async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
+  // The cap check below needs the RAW row count, and ghPaged returns only the
+  // deduped rows: a page-shift duplicate (a merge into the head branch or a
+  // force-push mid-walk inserts rows before the cursor, re-serving one) makes
+  // a 250-raw truncated listing measure 249 and slip past the guard — the
+  // record keeps its bot/external verdict with unread authors behind the cap,
+  // the silent false-clean this whole arm exists to refuse. ghPaged has no
+  // per-call raw channel, so the count is recovered from the run-global
+  // `state.dupes` delta — sound because the client is driven strictly
+  // sequentially (no Promise.all anywhere in this module; the caller loop
+  // awaits per record). Optional chaining is load-bearing: test fakes are
+  // plain {gh, ghPaged, ghStatus} objects with no state.
+  const dupesBefore = client.state?.dupes ?? 0;
   const commits = await client.ghPaged(
     `/repos/${cfg.owner}/${repo}/pulls/${rec.number}/commits?per_page=100`,
     undefined,
@@ -1853,6 +1865,7 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
     // the shape coincidence ghPaged's identity contract exists to prevent.
     { identity: (c) => c.sha },
   );
+  const rawRows = commits.length + ((client.state?.dupes ?? 0) - dupesBefore);
   const responsible = new Set();
   const probed = new Set();
   const unlinkedEmails = new Set();
@@ -1912,7 +1925,10 @@ async function retriageByCommitAuthors(client, cfg, repo, rec, memberCache) {
   // findings are kept either way. One GET /pulls/{n} only for at-cap records;
   // `.commits` carries the true count there. gh()'s 404 sentinel has no
   // `.commits`, so an unreadable PR reads as truncated — the closed direction.
-  if (commits.length >= PR_COMMITS_CAP) {
+  // RAW rows trip the guard (see rawRows above); the truth comparison inside
+  // stays on the DEDUPED length, because those are the rows actually read — a
+  // 250-commit PR whose duplicate hid one real row must flag truncated.
+  if (rawRows >= PR_COMMITS_CAP) {
     const pr = await client.gh(`/repos/${cfg.owner}/${repo}/pulls/${rec.number}`);
     if (!(Number.isFinite(pr?.commits) && pr.commits <= commits.length)) {
       rec.author_kind = AUTHOR_KIND.engineer;
