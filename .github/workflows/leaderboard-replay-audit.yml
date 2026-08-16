@@ -147,11 +147,17 @@ jobs:
         with:
           # LEADERBOARD_AUDIT_TOKEN is an org-read PAT (contents:read,
           # actions:read, pull-requests:read on every fleet repo; 5,000
-          # req/hr). The github.token fallback only suits single-repo audits
-          # of this repo or public repos within budget — fleet mode without
-          # the PAT is refused by the "Refuse fleet mode without the
-          # org-read PAT" guard step above, because discovery omission is
-          # silent, not loud.
+          # req/hr) and needs org Members read too (classic `read:org`, or
+          # the fine-grained "Members" organization permission): that is what
+          # the external-author exclusion (ENG-5991) runs on — GitHub answers
+          # the membership probe truthfully only to a token that can see
+          # private membership, so without it the audit fails CLOSED, keeps
+          # every unmapped author as an unmapped-engineer gap, and flags
+          # `membership_visibility: unproven` in the report. The github.token
+          # fallback only suits single-repo audits of this repo or public
+          # repos within budget — fleet mode without the PAT is refused by
+          # the "Refuse fleet mode without the org-read PAT" guard step
+          # above, because discovery omission is silent, not loud.
           github-token: ${{ secrets.LEADERBOARD_AUDIT_TOKEN || github.token }}
           repo: ${{ inputs.repo }}
           # A `type: boolean` workflow_dispatch input stringifies to the

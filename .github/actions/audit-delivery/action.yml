@@ -28,6 +28,15 @@ inputs:
       Token with contents:read, actions:read AND pull-requests:read on the
       audited repo. All three are required; pull-requests:read is what the
       merged-PR listing needs, and omitting it fails the audit at 403.
+      Org **Members read** (classic `read:org`, or the fine-grained
+      organization "Members" permission) is additionally required for the
+      external-author exclusion (ENG-5991): GitHub answers the org-membership
+      probe truthfully only to a token that can see private membership and
+      redirects every other requester, so without it the audit FAILS CLOSED —
+      no author can be proven external, every unmapped author stays an
+      unmapped-engineer gap, and the report carries
+      `membership_visibility: unproven`. The audit still runs; it just cannot
+      exclude externals.
       Request BUDGET, not just scopes: the audit issues roughly one Jobs API
       request per delivered record on top of the run listings, onboarding
       probes, and two closed-PR walks — guard's 90-day measurement held 1,054
@@ -130,8 +139,11 @@ outputs:
     value: ${{ steps.audit.outputs.has_gaps }}
   gap-count:
     description: >-
-      Number of affected PRs across all audited repos — `replay` plus
-      `payload_missing`, which is why it is not simply the replay list's length.
+      Number of affected PRs across all audited repos — `replay` plus the
+      unmapped-ENGINEER `payload_missing` subclass, which is why it is not simply
+      the replay list's length. Bot and external/invisible `payload_missing`
+      records are excluded (ENG-5991): they are expected non-deliveries with no
+      remediation, so counting them would page a caller over noise.
       `0` on `clean` and on `undecided` (no gap was found in either case; on
       `undecided` the records that were not decided are NOT counted here — read
       `status`). THE EMPTY STRING on every `unknown` path, and — unlike `has-gaps`,
@@ -460,13 +472,22 @@ runs:
             if ! gap_count=$(node -e '
               const fs = require("node:fs");
               const r = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-              // replay.length ALONE under-counts: payload_missing PRs are
-              // affected (their author is missing score) but are deliberately
-              // kept off the replay list, because replaying an unmapped author
-              // re-delivers nothing. A repo whose only defect is that class
-              // would report has_gaps=true with gap_count=0.
+              // replay.length ALONE under-counts: unmapped-ENGINEER
+              // payload_missing PRs are affected (an org member is missing
+              // score) but are deliberately kept off the replay list, because
+              // replaying an unmapped author re-delivers nothing. A repo whose
+              // only defect is that class would report has_gaps=true with
+              // gap_count=0. The WHOLE class over-counts since ENG-5991: bot
+              // and external/invisible records are expected non-deliveries
+              // that never make a repo a gap repo, so in a mixed repo they
+              // would inflate this count with PRs nobody should act on.
+              // Pre-split reports carry no subclass key; fall back to the
+              // class total, which is exactly what that key meant then.
               const n = r.repos_with_gaps.reduce(
-                (a, g) => a + g.replay.length + (g.payload_missing || 0),
+                (a, g) =>
+                  a +
+                  g.replay.length +
+                  (g.payload_missing_unmapped_engineer ?? g.payload_missing ?? 0),
                 0,
               );
               if (!Number.isInteger(n)) throw new Error("non-integer gap count");
