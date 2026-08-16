@@ -1,9 +1,8 @@
-# Operator-dispatched REPLAY path for leaderboard metrics. The live caller
-# (leaderboard-metrics.yml) fires only on a real `pull_request_target: closed`
-# event and never retries, so PRs that merged before this repo was onboarded
-# have no metrics at all. public-workflows hosts the reusables, so
-# its own caller lives at leaderboard-metrics-caller.yml; onboarded 2026-08-16
-# (ENG-6504), PRs merged before onboarding produced no metrics.
+# Operator-dispatched REPLAY path for leaderboard metrics. The live caller —
+# named leaderboard-metrics-caller.yml in this repo, because
+# leaderboard-metrics.yml here is the reusable itself — fires only on a real
+# `pull_request_target: closed` event and never retries, so PRs that merged
+# before this repo was onboarded 2026-08-16 (ENG-6504) have no metrics at all.
 #
 # ⚠ The `uses:` pin is COUPLED TO PROD IAM: the LeaderboardMetricsRole trust
 # list names the CALLED reusable at this exact SHA, so bumping it alone fails
