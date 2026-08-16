@@ -16,10 +16,14 @@
 # carry ignore entries for BOTH leaderboard reusables, or this pin gets bumped
 # and delivery fails closed and silently — the ENG-5687 incident exactly.
 #
-# `capability_map` is omitted DELIBERATELY — unset means "derive it from this
-# repo's own live leaderboard-metrics.yml on the default branch", so a replay
-# attributes capabilities exactly as live runs do; passing a value is what
-# would drift.
+# `capability_map` is passed EXPLICITLY as '[]' because this repo's live
+# caller is named leaderboard-metrics-caller.yml — the derivation's fixed path
+# (.github/workflows/leaderboard-metrics.yml) resolves to the reusable itself
+# and cannot see the live caller, and the reusable's contract requires a
+# differently-named caller to pass a value. '[]' matches the live caller,
+# which passes no capability_map; if the live caller ever gains a
+# capability_map, this value MUST be updated in the same PR — manual
+# synchronization, because the derivation cannot do it for this repo.
 #
 # Replay is idempotent ONLY while author resolution is unchanged: the consumer
 # upserts CodeCommit on `#code_commit#<repo>#<pr_number>#<author>`, so
@@ -48,3 +52,4 @@ jobs:
     uses: praetorian-inc/public-workflows/.github/workflows/leaderboard-backfill.yml@6c715ccf351a09bfcb916aede4c542e437e5f31d # v2.17.0
     with:
       pr_numbers: ${{ inputs.pr_numbers }}
+      capability_map: '[]'
