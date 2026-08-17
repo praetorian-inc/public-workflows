@@ -2,7 +2,7 @@
 
 Validate Agent Skill `SKILL.md` frontmatter against the
 [agentskills.io specification](https://agentskills.io/specification) plus the
-Praetorian extensions (`tags`, `related`).
+Praetorian grouped-skill-tag extension (`skill_tag_groups`) and related-link metadata.
 
 ## Why
 
@@ -25,8 +25,19 @@ agentskills.io core:
 
 Praetorian extensions:
 
-- `tags`: list from a controlled vocabulary (default `web,cloud,cicd,llm,cred`).
-- `related`: list of skill links.
+- `skill_tag_groups`: non-empty YAML groups containing nonblank values from a
+  controlled vocabulary (default `web,cloud,cicd,llm,cred`). Omit the field for
+  untagged skills. Example:
+
+  ```yaml
+  skill_tag_groups:
+    - [web, cloud]
+  ```
+
+- `metadata.related`: comma-separated string of skill links.
+
+The removed top-level `tags` and `metadata.tags` formats are rejected; there is
+no compatibility fallback.
 
 Unknown top-level keys are rejected (catches typos like `descriptoin:` / `tag:`).
 Directories starting with `_` or `.` (templates, dev-time `.local`/`.history`)
@@ -60,7 +71,7 @@ pip install jsonschema PyYAML
 VALIDATOR=path/to/public-workflows/templates/skills/validate-skills.py
 python3 "$VALIDATOR"                       # validate */SKILL.md in cwd
 python3 "$VALIDATOR" --dir path/to/skills
-python3 "$VALIDATOR" --tags web,cloud,cicd,llm,cred
+python3 "$VALIDATOR" --tags web,cloud,cicd,llm,cred # allowed group values
 ```
 
 `validate-skills.py` is the canonical implementation; the CI workflow inlines an

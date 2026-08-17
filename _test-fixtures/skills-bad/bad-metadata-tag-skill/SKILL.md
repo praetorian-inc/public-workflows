@@ -1,12 +1,12 @@
 ---
 name: bad-metadata-tag-skill
-description: Negative fixture — valid except that metadata.tags contains a value outside the controlled vocabulary (web,cloud,cicd,llm,cred). The validator MUST reject this (exit 1). Do not "fix" this fixture.
+description: Negative fixture using the removed metadata.tags format. The validator MUST reject this with no compatibility fallback. Do not "fix" this fixture.
 allowed-tools: Read Bash Grep
 metadata:
   tags: "web,notavalidtag"
 ---
 
-# Bad Skill (out-of-vocabulary metadata.tag)
+# Bad Skill (removed metadata.tags)
 
-Deliberately invalid: `notavalidtag` is not in the controlled vocabulary. Do not
+Deliberately invalid because `metadata.tags` is no longer accepted. Do not
 "fix" this fixture.

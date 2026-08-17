@@ -2,10 +2,10 @@
 """Validate Agent Skill `SKILL.md` frontmatter.
 
 Checks each skill's YAML frontmatter against the agentskills.io specification
-(https://agentskills.io/specification). Tags and related links live under the
-standard `metadata` block as comma-separated string values; `metadata.tags` is
-additionally checked against a controlled vocabulary. Top-level `tags`/`related`
-are rejected — guard-core's loader reads them from `metadata`.
+(https://agentskills.io/specification). Praetorian's `skill_tag_groups`
+extension is validated as grouped YAML and checked against a controlled
+vocabulary. The removed top-level `tags` and `metadata.tags` formats are
+rejected. Related links remain under the standard `metadata` block.
 
 This is the canonical, locally-runnable copy of the validator that the
 `skill-quality.yml` reusable workflow inlines for CI. Keep the two in sync.
@@ -32,8 +32,7 @@ DEFAULT_TAGS = ["web", "cloud", "cicd", "llm", "cred"]
 def build_validator():
     # Strict agentskills.io core (https://agentskills.io/specification).
     # additionalProperties:false catches frontmatter key typos (e.g.
-    # `descriptoin:`) AND now rejects the legacy top-level `tags`/`related`
-    # keys — those belong under `metadata` (validated procedurally below).
+    # `descriptoin:`) and rejects removed top-level tag/related keys.
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -46,21 +45,32 @@ def build_validator():
             "license": {"type": "string"},
             "compatibility": {"type": "string", "maxLength": 500},
             "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
+            "skill_tag_groups": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "pattern": r".*\S.*"},
+                },
+            },
             "allowed-tools": {"type": "string"},
         },
     }
     return Draft202012Validator(schema)
 
 
-def metadata_tags(fm):
-    """Parse metadata.tags (comma-separated string) into a list of tags."""
-    meta = fm.get("metadata")
-    if not isinstance(meta, dict):
-        return []
-    raw = meta.get("tags")
-    if not isinstance(raw, str):
-        return []
-    return [t.strip() for t in raw.split(",") if t.strip()]
+def grouped_skill_tags(fm):
+    """Yield valid string values from skill_tag_groups for vocabulary checks."""
+    groups = fm.get("skill_tag_groups")
+    if not isinstance(groups, list):
+        return
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for tag in group:
+            if isinstance(tag, str) and tag.strip():
+                yield tag
 
 
 def frontmatter(path):
@@ -116,10 +126,14 @@ def validate(directory, skills_glob, tag_vocab):
         if isinstance(at, str) and "," in at:
             errors.append(
                 f"{f}: allowed-tools must be space-separated, not comma — got '{at}'")
-        for tag in metadata_tags(fm):
+        meta = fm.get("metadata")
+        if isinstance(meta, dict) and "tags" in meta:
+            errors.append(
+                f"{f}: [metadata.tags] removed; use top-level skill_tag_groups")
+        for tag in grouped_skill_tags(fm):
             if tag not in tag_vocab:
                 errors.append(
-                    f"{f}: [metadata.tags] '{tag}' not in controlled vocabulary {tag_vocab}")
+                    f"{f}: [skill_tag_groups] '{tag}' not in controlled vocabulary {tag_vocab}")
     return files, errors
 
 
@@ -129,7 +143,7 @@ def main():
     ap.add_argument("--dir", default=".", help="directory containing skill subdirectories")
     ap.add_argument("--glob", default="*/SKILL.md", help="glob for each skill's SKILL.md")
     ap.add_argument("--tags", default=",".join(DEFAULT_TAGS),
-                    help="comma-separated controlled vocabulary for `tags`")
+                    help="comma-separated controlled vocabulary for `skill_tag_groups` values")
     args = ap.parse_args()
     tag_vocab = [t.strip() for t in args.tags.split(",") if t.strip()]
 

@@ -1,9 +1,8 @@
 name: Skill Quality (Callable)
 # Reusable workflow that validates Agent Skill `SKILL.md` frontmatter against the
-# agentskills.io specification (https://agentskills.io/specification). Tags and
-# related links live under the standard `metadata` block (string values);
-# `metadata.tags` is checked against a controlled vocabulary. guard-core's loader
-# reads tags/related from `metadata`.
+# agentskills.io specification (https://agentskills.io/specification), plus
+# Praetorian's top-level `skill_tag_groups` extension. Group values are checked
+# against a controlled vocabulary. Related links remain in `metadata`.
 #
 # Why this exists: a malformed frontmatter block does NOT produce an error in
 # guard-core's loader — it is silently skipped (LoadSkillMetadata returns nil on
@@ -67,7 +66,7 @@ on:
         default: "6.0.2"
 
       tag-vocabulary:
-        description: "Comma-separated controlled vocabulary for `metadata.tags` values."
+        description: "Comma-separated controlled vocabulary for `skill_tag_groups` values."
         required: false
         type: string
         default: "web,cloud,cicd,llm,cred"
@@ -206,8 +205,7 @@ jobs:
 
           # Strict agentskills.io core (https://agentskills.io/specification).
           # additionalProperties:false catches frontmatter key typos (e.g.
-          # `descriptoin:`) AND rejects the legacy top-level `tags`/`related`
-          # keys — those belong under `metadata` (validated procedurally below).
+          # `descriptoin:`) and rejects removed top-level tag/related keys.
           schema = {
               "$schema": "https://json-schema.org/draft/2020-12/schema",
               "type": "object",
@@ -220,21 +218,31 @@ jobs:
                   "license": {"type": "string"},
                   "compatibility": {"type": "string", "maxLength": 500},
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
+                  "skill_tag_groups": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                          "type": "array",
+                          "minItems": 1,
+                          "items": {"type": "string", "pattern": r".*\S.*"},
+                      },
+                  },
                   "allowed-tools": {"type": "string"},
               },
           }
           validator = Draft202012Validator(schema)
 
-          def metadata_tags(fm):
-              # metadata.tags is a comma-separated string per the agentskills.io
-              # metadata convention (values must be strings).
-              meta = fm.get("metadata")
-              if not isinstance(meta, dict):
-                  return []
-              raw = meta.get("tags")
-              if not isinstance(raw, str):
-                  return []
-              return [t.strip() for t in raw.split(",") if t.strip()]
+          def grouped_skill_tags(fm):
+              # Schema checks shape; this iterator feeds the vocabulary check.
+              groups = fm.get("skill_tag_groups")
+              if not isinstance(groups, list):
+                  return
+              for group in groups:
+                  if not isinstance(group, list):
+                      continue
+                  for tag in group:
+                      if isinstance(tag, str) and tag.strip():
+                          yield tag
 
           def frontmatter(path):
               # utf-8-sig strips a leading BOM; text mode normalizes CRLF/CR.
@@ -279,9 +287,12 @@ jobs:
               at = fm.get("allowed-tools")
               if isinstance(at, str) and "," in at:
                   errors.append(f"{f}: allowed-tools must be space-separated, not comma — got '{at}'")
-              for tag in metadata_tags(fm):
+              meta = fm.get("metadata")
+              if isinstance(meta, dict) and "tags" in meta:
+                  errors.append(f"{f}: [metadata.tags] removed; use top-level skill_tag_groups")
+              for tag in grouped_skill_tags(fm):
                   if tag not in tag_vocab:
-                      errors.append(f"{f}: [metadata.tags] '{tag}' not in controlled vocabulary {tag_vocab}")
+                      errors.append(f"{f}: [skill_tag_groups] '{tag}' not in controlled vocabulary {tag_vocab}")
 
           summary = os.environ.get("GITHUB_STEP_SUMMARY")
           lines = [f"## Skill Quality\n\nValidated **{len(files)}** skill(s) matching `{skills_glob}` "

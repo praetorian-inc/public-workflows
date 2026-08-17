@@ -2,7 +2,8 @@
 name: <gerund-kebab-name>
 description: Scaffold template — intentionally has a placeholder name that does NOT match its directory. The validator MUST skip `_`-prefixed dirs, so this file must not produce an error.
 allowed-tools: Read, Bash
-tags: [web]
+skill_tag_groups:
+  - [web]
 ---
 
 # Template
