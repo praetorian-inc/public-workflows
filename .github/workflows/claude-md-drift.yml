@@ -82,7 +82,6 @@ jobs:
   #   - No CLAUDE.md files exist in the repo
   #   - No code files changed (docs/config-only PR)
   #   - Changed files have no CLAUDE.md ancestor in the directory tree
-  #   - PR already modifies every relevant CLAUDE.md (developer is aware)
   #   - PR author is a bot
   pre-filter:
     if: |
@@ -300,25 +299,23 @@ jobs:
             exit 0
           fi
 
-          # ── Step 5: Skip if PR already modifies ALL relevant instruction files ──
-          all_updated=true
+          # ── Step 5: Note whether the PR also edits an applicable instruction file ──
+          relevant_updated=false
           while IFS= read -r md; do
             [ -z "$md" ] && continue
-            if ! echo "$FILES" | grep -qxF "$md"; then
-              all_updated=false
+            if echo "$FILES" | grep -qxF "$md"; then
+              relevant_updated=true
               break
             fi
           done <<< "$(echo "$relevant" | tr ',' '\n')"
 
-          if [ "$all_updated" = "true" ]; then
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            echo "✓ All relevant instruction files already modified in this PR — skipping."
-            exit 0
-          fi
-
           echo "should_run=true" >> "$GITHUB_OUTPUT"
           echo "relevant_mds=$relevant" >> "$GITHUB_OUTPUT"
-          echo "✓ Relevant instruction files for drift check: $relevant"
+          if [ "$relevant_updated" = "true" ]; then
+            echo "✓ Applicable instruction files changed in this PR — continuing with semantic adequacy analysis: $relevant"
+          else
+            echo "✓ Relevant instruction files for drift check: $relevant"
+          fi
 
   # ── Phase 2: Drift check (LLM) ──────────────────────────────────────
   # Runs only when pre-filter finds relevant instruction files. Uses Haiku

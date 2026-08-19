@@ -273,8 +273,26 @@ assert_eq "case6 should_run"   "false" "$(outv should_run)"
 assert_eq "case6 relevant_mds" ""      "$(outv relevant_mds)"
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 7 — Step 5 regression: resolved instruction file already modified"
-r="$(newrepo already-modified)"
+section "Case 7a — Step 5 contrast: code-only change reaches analysis"
+r="$(newrepo step5-code-only)"
+put "$r" pkg/CLAUDE.md "$STUB"
+put "$r" pkg/AGENTS.md $'# pkg\npkg instructions\n'
+put "$r" pkg/x.go $'package pkg\n'
+base="$(snap "$r" base)"
+put "$r" pkg/x.go $'package pkg\n\nvar X = 1\n'
+head="$(snap "$r" head)"
+run_prefilter "$r" "$base" "$head"
+assert_eq "case7a should_run"   "true"          "$(outv should_run)"
+assert_eq "case7a relevant_mds" "pkg/AGENTS.md" "$(outv relevant_mds)"
+if grep -qF "Relevant instruction files for drift check: pkg/AGENTS.md" "$LOG"; then
+  ok "case7a emitted the code-only analysis log"
+else
+  bad "case7a emitted the code-only analysis log" "the ordinary analysis log for pkg/AGENTS.md" "$(cat "$LOG")"
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 7b — Step 5 regression: code plus its nearest instruction file still reaches semantic analysis"
+r="$(newrepo step5-code-and-instruction)"
 put "$r" pkg/CLAUDE.md "$STUB"
 put "$r" pkg/AGENTS.md $'# pkg\npkg instructions\n'
 put "$r" pkg/x.go $'package pkg\n'
@@ -283,8 +301,13 @@ put "$r" pkg/x.go $'package pkg\n\nvar X = 1\n'
 put "$r" pkg/AGENTS.md $'# pkg\npkg instructions\n\nX is now exported.\n'
 head="$(snap "$r" head)"
 run_prefilter "$r" "$base" "$head"
-assert_eq "case7 should_run"   "false" "$(outv should_run)"
-assert_eq "case7 relevant_mds" ""      "$(outv relevant_mds)"
+assert_eq "case7b should_run"   "true"          "$(outv should_run)"
+assert_eq "case7b relevant_mds" "pkg/AGENTS.md" "$(outv relevant_mds)"
+if grep -qF "semantic adequacy analysis" "$LOG"; then
+  ok "case7b emitted the edited-instruction semantic-analysis log"
+else
+  bad "case7b emitted the edited-instruction semantic-analysis log" "a log containing 'semantic adequacy analysis'" "$(cat "$LOG")"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 8 — pre-filter fail-open: unresolvable base SHA => full inventory"
