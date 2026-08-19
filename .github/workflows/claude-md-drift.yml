@@ -312,7 +312,7 @@ jobs:
           echo "should_run=true" >> "$GITHUB_OUTPUT"
           echo "relevant_mds=$relevant" >> "$GITHUB_OUTPUT"
           if [ "$relevant_updated" = "true" ]; then
-            echo "✓ Applicable instruction files changed in this PR — continuing with semantic adequacy analysis: $relevant"
+            echo "✓ At least one applicable instruction file changed in this PR — continuing semantic adequacy analysis for: $relevant"
           else
             echo "✓ Relevant instruction files for drift check: $relevant"
           fi
