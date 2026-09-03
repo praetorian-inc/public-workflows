@@ -48,5 +48,12 @@ jobs:
       - name: Install PyYAML
         run: pip install "PyYAML==6.0.2"
 
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "v1.7.7"
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - name: Run extract-and-run fixture suite
         run: bash test/agents-md-audit-prefilter.test.sh

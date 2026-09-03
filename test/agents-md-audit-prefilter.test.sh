@@ -124,12 +124,10 @@ for s in prefilter.sh scope.sh; do
 done
 
 if command -v actionlint >/dev/null 2>&1; then
-  al_out="$(actionlint "$WORKFLOW" 2>&1)" || true
-  n_err="$(printf '%s\n' "$al_out" | grep -c 'error' || true)"
-  if [ -z "$al_out" ] || [ "$n_err" -eq 0 ]; then
+  if al_out="$(actionlint "$WORKFLOW" 2>&1)"; then
     ok "actionlint: clean"
   else
-    bad "actionlint: clean" "no findings" "$al_out"
+    bad "actionlint: clean" "exit 0" "$al_out"
   fi
 else
   printf '  \033[33mSKIP\033[0m  actionlint not installed\n'
@@ -143,6 +141,7 @@ assert_contains "disallowedTools includes Bash(gh api:*)" "$CLAUDE_ARGS" 'Bash(g
 # The allowed list must not grant gh api. Match the --allowedTools "..." blob only.
 allowed="$(printf '%s' "$CLAUDE_ARGS" | sed -n 's/.*--allowedTools "\([^"]*\)".*/\1/p')"
 assert_absent "allowedTools does not include Bash(gh api:*)" "$allowed" 'Bash(gh api:*)'
+assert_absent "allowedTools does not include Bash(find:*)" "$allowed" 'Bash(find:*)'
 assert_contains "claude_args appends the untrusted-input system prompt" "$CLAUDE_ARGS" '--append-system-prompt'
 assert_absent "prompt does not instruct gh api" "$PROMPT" 'gh api'
 assert_contains "prompt names MISLEADS" "$PROMPT" "MISLEADS"
@@ -377,6 +376,32 @@ head="$(snap "$r" head)"
 run_prefilter "$r" "$base" "$head"
 assert_eq "case11 should_run"   "false" "$(outv should_run)"
 assert_eq "case11 relevant_mds" ""      "$(outv relevant_mds)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 12 — a git branch named CLAUDE.md is not an instruction file"
+r="$(newrepo git-branch-named-claude)"
+put "$r" AGENTS.md $'# root\n'
+put "$r" main.go $'package main\n'
+base="$(snap "$r" base)"
+git -C "$r" branch CLAUDE.md
+put "$r" AGENTS.md $'# root\nedited\n'
+head="$(snap "$r" head)"
+run_prefilter "$r" "$base" "$head"
+assert_eq "case12 should_run"   "true"      "$(outv should_run)"
+assert_eq "case12 relevant_mds" "AGENTS.md" "$(outv relevant_mds)"
+run_prefilter "$r" "0000000000000000000000000000000000000000" "$head"
+assert_eq "case12 fail-open relevant_mds" "AGENTS.md" "$(outv relevant_mds)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 13 — AGENTS.md under a directory whose name has spaces"
+r="$(newrepo path-with-spaces)"
+put "$r" "dir with spaces/AGENTS.md" $'# nested\n'
+base="$(snap "$r" base)"
+put "$r" "dir with spaces/AGENTS.md" $'# nested\nedited\n'
+head="$(snap "$r" head)"
+run_prefilter "$r" "$base" "$head"
+assert_eq "case13 should_run"   "true"                      "$(outv should_run)"
+assert_eq "case13 relevant_mds" "dir with spaces/AGENTS.md" "$(outv relevant_mds)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n──────────────────────────────────────────────\n'

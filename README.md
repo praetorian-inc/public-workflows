@@ -534,7 +534,7 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
-The caller repo's `GITHUB_TOKEN` must be able to read `praetorian-inc/palatine` (same-org private access), or pass `RUBRIC_TOKEN`. Public callers that cannot read palatine should not add this caller.
+`RUBRIC_TOKEN` is required to load the rubric: palatine is a private repository, and the caller's `GITHUB_TOKEN` cannot read a different private repo (same-org does not change that). Without `RUBRIC_TOKEN` the LLM audit is skipped and the job stays green (comment-only). Public callers that cannot mint a palatine-read token should not add this caller.
 
 **Inputs** (all optional):
 
@@ -551,7 +551,7 @@ The caller repo's `GITHUB_TOKEN` must be able to read `praetorian-inc/palatine` 
 **Secrets:**
 
 - `ANTHROPIC_API_KEY` — required.
-- `RUBRIC_TOKEN` — optional; token that can read `rubric_repository`. Defaults to `GITHUB_TOKEN`.
+- `RUBRIC_TOKEN` — required to run the audit; token that can read `rubric_repository` (private palatine). Omit it and the job skips the LLM step without failing.
 
 ### `ts-ci.yml` — TypeScript/Node.js CI (install + typecheck + lint + test)
 
