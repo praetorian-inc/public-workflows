@@ -510,6 +510,50 @@ jobs:
 
 - `ANTHROPIC_API_KEY` — required.
 
+### `agents-md-audit.yml` — instruction-file audit against the authoring standard (ENG-7538)
+
+Grades **content-carrying** instruction files a PR *edited* (`AGENTS.md`, or a `CLAUDE.md` that is not an `@AGENTS.md` pointer stub) against `auditing-agent-instruction-files`. Findings use that skill's classes (`MISLEADS` / `OMITS` / `UNENFORCED` / `COSTS` / `ADVISORY`). Complementary to `claude-md-drift.yml`: drift is PR-diff staleness of cited facts; this job grades the file as it stands at HEAD. It does **not** replace drift.yml. The rubric is the skill files themselves, loaded from `praetorian-inc/palatine` at a pinned SHA — not a second copy inlined into the workflow YAML. Comment-only: findings do not fail the job; merging stays a human decision.
+
+**Minimal caller** (drop this in `.github/workflows/agents-md-audit.yml` of a consumer repo):
+
+```yaml
+name: Instruction-File Audit
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+concurrency:
+  group: agents-md-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  audit:
+    uses: praetorian-inc/public-workflows/.github/workflows/agents-md-audit.yml@<SHA>
+    permissions:
+      contents: read
+      pull-requests: write
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RUBRIC_TOKEN: ${{ secrets.RUBRIC_TOKEN }}
+```
+
+`RUBRIC_TOKEN` is required to load the rubric: palatine is a private repository, and the caller's `GITHUB_TOKEN` cannot read a different private repo (same-org does not change that). Without `RUBRIC_TOKEN` the LLM audit is skipped and the job stays green (comment-only). Public callers that cannot mint a palatine-read token should not add this caller.
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `model` | `claude-haiku-4-5-20251001` | Claude model for the audit |
+| `max_turns` | `45` | Max Claude conversation turns |
+| `rubric_repository` | `praetorian-inc/palatine` | Repo that carries the skill files |
+| `rubric_ref` | palatine SHA pin | Commit of `rubric_repository` to load |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+
+**Secrets:**
+
+- `ANTHROPIC_API_KEY` — required.
+- `RUBRIC_TOKEN` — required to run the audit; token that can read `rubric_repository` (private palatine). Omit it and the job skips the LLM step without failing.
+
 ### `ts-ci.yml` — TypeScript/Node.js CI (install + typecheck + lint + test)
 
 Reusable workflow for TypeScript/Node.js repositories (Claude plugin repos and other TS projects). Provides consistent `npm ci` + `tsc --noEmit` + `npm run lint` + `npm test` + Harden-Runner. Typecheck, lint, and test each auto-skip when the corresponding `tsconfig.json` / `lint` script / test script is absent. Private dependencies (e.g. `@praetorian/claude-tool-sdk`) are **optional** — opt in with `enable-private-deps: true` to mint a short-lived GitHub App token before `npm ci`. A preflight job skips CI on PRs with no TypeScript/JS changes.

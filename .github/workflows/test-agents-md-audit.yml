@@ -1,0 +1,59 @@
+name: "Test: agents-md-audit.yml"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/agents-md-audit.yml"
+      - ".github/workflows/test-agents-md-audit.yml"
+      - "test/agents-md-audit-prefilter.test.sh"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/agents-md-audit.yml"
+      - ".github/workflows/test-agents-md-audit.yml"
+      - "test/agents-md-audit-prefilter.test.sh"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  prefilter:
+    name: Pre-filter + prompt-contract fixtures
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install "PyYAML==6.0.2"
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "v1.7.7"
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run extract-and-run fixture suite
+        run: bash test/agents-md-audit-prefilter.test.sh
