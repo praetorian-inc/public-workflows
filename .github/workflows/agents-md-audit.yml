@@ -30,6 +30,7 @@ name: "Instruction-File Audit (Callable)"
 #         pull-requests: write
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         RUBRIC_TOKEN: ${{ secrets.RUBRIC_TOKEN }}
 
 on:
   workflow_call:
@@ -246,6 +247,9 @@ jobs:
           persist-credentials: false
         timeout-minutes: 4
 
+      - name: Drop any PR-supplied rubric path
+        run: rm -rf .instruction-audit-rubric
+
       - name: Checkout audit rubric from palatine
         id: rubric-checkout
         continue-on-error: true
@@ -264,10 +268,12 @@ jobs:
 
       - name: Require loaded rubric
         id: rubric
+        env:
+          RUBRIC_CHECKOUT_OUTCOME: ${{ steps.rubric-checkout.outcome }}
         run: |
           set -eu
           skill='.instruction-audit-rubric/.agentsmesh/skills/_auditing-agent-instruction-files/SKILL.md'
-          if [ -f "$skill" ]; then
+          if [ "$RUBRIC_CHECKOUT_OUTCOME" = "success" ] && [ -f "$skill" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"

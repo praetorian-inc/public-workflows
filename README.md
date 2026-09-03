@@ -532,6 +532,7 @@ jobs:
       pull-requests: write
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      RUBRIC_TOKEN: ${{ secrets.RUBRIC_TOKEN }}
 ```
 
 `RUBRIC_TOKEN` is required to load the rubric: palatine is a private repository, and the caller's `GITHUB_TOKEN` cannot read a different private repo (same-org does not change that). Without `RUBRIC_TOKEN` the LLM audit is skipped and the job stays green (comment-only). Public callers that cannot mint a palatine-read token should not add this caller.
