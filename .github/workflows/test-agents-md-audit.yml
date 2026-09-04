@@ -7,12 +7,14 @@ on:
       - ".github/workflows/agents-md-audit.yml"
       - ".github/workflows/test-agents-md-audit.yml"
       - "test/agents-md-audit-prefilter.test.sh"
+      - "README.md"
   push:
     branches: [main]
     paths:
       - ".github/workflows/agents-md-audit.yml"
       - ".github/workflows/test-agents-md-audit.yml"
       - "test/agents-md-audit-prefilter.test.sh"
+      - "README.md"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
