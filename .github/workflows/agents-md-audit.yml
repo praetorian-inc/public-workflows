@@ -30,7 +30,8 @@ name: "Instruction-File Audit (Callable)"
 #         pull-requests: write
 #       secrets:
 #         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-#         RUBRIC_TOKEN: ${{ secrets.RUBRIC_TOKEN }}
+#         PALATINE_SKILLS_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+#         PALATINE_SKILLS_PRIVATE_KEY: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
 
 on:
   workflow_call:
@@ -74,8 +75,14 @@ on:
       ANTHROPIC_API_KEY:
         description: "Anthropic API key for Claude"
         required: true
+      PALATINE_SKILLS_APP_ID:
+        description: "GitHub App ID for an installation with contents:read on praetorian-inc/palatine. Required operationally with PALATINE_SKILLS_PRIVATE_KEY to load the default private rubric."
+        required: false
+      PALATINE_SKILLS_PRIVATE_KEY:
+        description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required operationally only with the App ID."
+        required: false
       RUBRIC_TOKEN:
-        description: "Token that can read rubric_repository (private palatine). Without it the LLM audit is skipped and the job stays green."
+        description: "Deprecated temporary legacy fallback for reading rubric_repository. Do not provision a new PAT; without a usable App token or fallback, the LLM audit is skipped and the job stays green."
         required: false
 
 permissions:
@@ -230,6 +237,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    # A step `if:` cannot read `secrets.*` directly. Expose the App ID and only
+    # a presence boolean for the private key; never place the PEM in job env.
+    env:
+      PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+      PALATINE_KEY_SET: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -250,6 +262,18 @@ jobs:
       - name: Drop any PR-supplied rubric path
         run: rm -rf .instruction-audit-rubric
 
+      - name: Mint palatine rubric token
+        id: rubric-token
+        if: ${{ inputs.rubric_repository == 'praetorian-inc/palatine' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
+          owner: praetorian-inc
+          repositories: palatine
+          permission-contents: read
+
       - name: Checkout audit rubric from palatine
         id: rubric-checkout
         continue-on-error: true
@@ -263,7 +287,7 @@ jobs:
             .agentsmesh/skills/_auditing-agent-instruction-files
             .agentsmesh/skills/_creating-agent-instruction-files
           sparse-checkout-cone-mode: true
-          token: ${{ secrets.RUBRIC_TOKEN }}
+          token: ${{ steps.rubric-token.outputs.token || secrets.RUBRIC_TOKEN }}
         timeout-minutes: 4
 
       - name: Require loaded rubric
@@ -277,7 +301,7 @@ jobs:
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Instruction-file audit skipped::Could not load the audit rubric from palatine. Pass secrets.RUBRIC_TOKEN (a token that can read the private rubric_repository). The job stays green — this audit is comment-only."
+            echo "::notice title=Instruction-file audit skipped::Could not load the audit rubric from palatine. Pass both secrets.PALATINE_SKILLS_APP_ID and secrets.PALATINE_SKILLS_PRIVATE_KEY for a short-lived read-only token. secrets.RUBRIC_TOKEN is a temporary legacy fallback. The job stays green — this audit is comment-only."
           fi
 
       - name: Resolve scope and fetch diff history

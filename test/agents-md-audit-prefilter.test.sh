@@ -8,9 +8,10 @@
 # re-implements or mirrors the workflow's logic: a mirror cannot discriminate
 # between a working implementation and a broken one.
 #
-# Two `run:` blocks are exercised:
+# Three `run:` blocks are exercised:
 #   * jobs['pre-filter'].steps[id=check]  — which instruction files the PR edited
 #   * jobs['audit-check'].steps[id=scope] — its fail-open inventory branch
+#   * jobs['audit-check'].steps[id=rubric] — its fail-open rubric-load gate
 #
 # The Claude prompt is asserted as a contract (classes, no drift.yml class,
 # skill path not an inlined rubric, inventory vs command-correction guidance).
@@ -28,7 +29,9 @@ set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WORKFLOW="$REPO_ROOT/.github/workflows/agents-md-audit.yml"
+TEST_WORKFLOW="$REPO_ROOT/.github/workflows/test-agents-md-audit.yml"
 DRIFT_WORKFLOW="$REPO_ROOT/.github/workflows/claude-md-drift.yml"
+README="$REPO_ROOT/README.md"
 
 WORKDIR="$(mktemp -d)" || { echo "ERROR: mktemp failed" >&2; exit 1; }
 trap 'rm -rf -- "$WORKDIR"' EXIT
@@ -59,21 +62,31 @@ section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 # ── Extract the real run: blocks and the prompt out of the workflow YAML ──────
 section "Extracting run: blocks from $(basename "$WORKFLOW")"
 
-python3 - "$WORKFLOW" "$EXTRACT" <<'PY' || { echo "ERROR: extraction failed" >&2; exit 1; }
+python3 - "$WORKFLOW" "$EXTRACT" "$README" "$TEST_WORKFLOW" <<'PY' || { echo "ERROR: extraction failed" >&2; exit 1; }
+import json
 import pathlib
 import sys
 
 import yaml
 
-wf = yaml.safe_load(open(sys.argv[1]))
+workflow_path = pathlib.Path(sys.argv[1])
+wf = yaml.safe_load(workflow_path.read_text())
 out = pathlib.Path(sys.argv[2])
+readme = pathlib.Path(sys.argv[3]).read_text()
+test_wf = yaml.safe_load(pathlib.Path(sys.argv[4]).read_text())
+
+
+def step(job, step_id, required=True):
+    for st in wf["jobs"][job]["steps"]:
+        if st.get("id") == step_id:
+            return st
+    if required:
+        raise SystemExit("step not found: %s / id=%s" % (job, step_id))
+    return {}
 
 
 def step_run(job, step_id):
-    for st in wf["jobs"][job]["steps"]:
-        if st.get("id") == step_id:
-            return st["run"]
-    raise SystemExit("step not found: %s / id=%s" % (job, step_id))
+    return step(job, step_id)["run"]
 
 
 def step_prompt(job):
@@ -95,6 +108,7 @@ def step_claude_args(job):
 for job, step_id, name in (
     ("pre-filter", "check", "prefilter.sh"),
     ("audit-check", "scope", "scope.sh"),
+    ("audit-check", "rubric", "rubric.sh"),
 ):
     body = step_run(job, step_id)
     if "${{" in body:
@@ -106,16 +120,82 @@ for job, step_id, name in (
 
 (out / "prompt.txt").write_text(step_prompt("audit-check"))
 (out / "claude_args.txt").write_text(step_claude_args("audit-check"))
-print("  extracted: prefilter.sh (%d lines), scope.sh (%d lines), prompt (%d chars)" % (
+
+# PyYAML 6 follows YAML 1.1 and parses an unquoted `on` key as boolean True.
+on = wf.get("on", wf.get(True)) or {}
+test_on = test_wf.get("on", test_wf.get(True)) or {}
+workflow_call = on.get("workflow_call") or {}
+secrets = workflow_call.get("secrets") or {}
+audit_job = wf["jobs"]["audit-check"]
+audit_steps = audit_job["steps"]
+mint = step("audit-check", "rubric-token", required=False)
+checkout = step("audit-check", "rubric-checkout")
+
+
+def required(secret_name):
+    return (secrets.get(secret_name) or {}).get("required")
+
+
+def index_by_id(step_id):
+    return next((i for i, st in enumerate(audit_steps) if st.get("id") == step_id), -1)
+
+
+def index_by_name(step_name):
+    return next((i for i, st in enumerate(audit_steps) if st.get("name") == step_name), -1)
+
+
+mint_index = index_by_id("rubric-token")
+drop_index = index_by_name("Drop any PR-supplied rubric path")
+checkout_index = index_by_id("rubric-checkout")
+contract = {
+    "app_id_required": required("PALATINE_SKILLS_APP_ID"),
+    "private_key_required": required("PALATINE_SKILLS_PRIVATE_KEY"),
+    "legacy_token_required": required("RUBRIC_TOKEN"),
+    "legacy_token_description": (secrets.get("RUBRIC_TOKEN") or {}).get("description"),
+    "audit_env": audit_job.get("env") or {},
+    "mint_ordered": (
+        min(drop_index, mint_index, checkout_index) >= 0
+        and drop_index < mint_index < checkout_index
+    ),
+    "mint_uses": mint.get("uses"),
+    "mint_continue_on_error": mint.get("continue-on-error"),
+    "mint_if": mint.get("if"),
+    "mint_with": mint.get("with") or {},
+    "checkout_continue_on_error": checkout.get("continue-on-error"),
+    "checkout_token": (checkout.get("with") or {}).get("token"),
+    "test_pull_request_covers_readme": "README.md" in (
+        (test_on.get("pull_request") or {}).get("paths") or []
+    ),
+    "test_push_covers_readme": "README.md" in (
+        (test_on.get("push") or {}).get("paths") or []
+    ),
+}
+(out / "contract.json").write_text(json.dumps(contract, sort_keys=True))
+
+workflow_text = workflow_path.read_text()
+header_start = workflow_text.index("# Caller template (add to each repo):")
+header_end = workflow_text.index("\non:\n", header_start)
+(out / "header-caller.txt").write_text(workflow_text[header_start:header_end])
+
+section_start = readme.index("### `agents-md-audit.yml`")
+section_end = readme.index("\n### `", section_start + 4)
+readme_section = readme[section_start:section_end]
+caller_start = readme_section.index("```yaml") + len("```yaml")
+caller_end = readme_section.index("```", caller_start)
+(out / "readme-section.txt").write_text(readme_section)
+(out / "readme-caller.txt").write_text(readme_section[caller_start:caller_end])
+
+print("  extracted: prefilter.sh (%d lines), scope.sh (%d lines), rubric.sh (%d lines), prompt (%d chars)" % (
     len(step_run("pre-filter", "check").splitlines()),
     len(step_run("audit-check", "scope").splitlines()),
+    len(step_run("audit-check", "rubric").splitlines()),
     len(step_prompt("audit-check")),
 ))
 PY
 
 # ── Syntax gates ─────────────────────────────────────────────────────────────
 section "Syntax checks"
-for s in prefilter.sh scope.sh; do
+for s in prefilter.sh scope.sh rubric.sh; do
   if bash -n "$EXTRACT/$s" 2>"$WORKDIR/$s.syn"; then
     ok "bash -n $s"
   else
@@ -132,6 +212,103 @@ if command -v actionlint >/dev/null 2>&1; then
 else
   printf '  \033[33mSKIP\033[0m  actionlint not installed\n'
 fi
+
+# ── Rubric authentication contract (ENG-7621) ────────────────────────────────
+section "Rubric authentication contract"
+
+contractv() {
+  python3 - "$EXTRACT/contract.json" "$1" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1]))
+for key in sys.argv[2].split('.'):
+    if not isinstance(value, dict) or key not in value:
+        value = None
+        break
+    value = value[key]
+if isinstance(value, bool):
+    print(str(value).lower())
+elif value is None:
+    print("")
+elif isinstance(value, (dict, list)):
+    print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+else:
+    print(value)
+PY
+}
+
+assert_eq "App ID secret is optional in workflow_call schema" "false" "$(contractv app_id_required)"
+assert_eq "private key secret is optional in workflow_call schema" "false" "$(contractv private_key_required)"
+assert_eq "legacy rubric token remains optional" "false" "$(contractv legacy_token_required)"
+assert_contains "legacy rubric token schema is deprecated" "$(contractv legacy_token_description)" "Deprecated"
+EXPECTED_AUDIT_ENV="$(cat <<'EOF'
+{"PALATINE_APP_ID":"${{ secrets.PALATINE_SKILLS_APP_ID }}","PALATINE_KEY_SET":"${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}"}
+EOF
+)"
+assert_eq "audit job env contains only safe auth bridge values" \
+  "$EXPECTED_AUDIT_ENV" \
+  "$(contractv audit_env)"
+assert_eq "rubric token mint is between path drop and checkout" "true" "$(contractv mint_ordered)"
+assert_eq "rubric token action uses exact v3.2.0 pin" \
+  "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1" \
+  "$(contractv mint_uses)"
+assert_eq "rubric token mint is fail-open" "true" "$(contractv mint_continue_on_error)"
+EXPECTED_MINT_IF="$(cat <<'EOF'
+${{ inputs.rubric_repository == 'praetorian-inc/palatine' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+EOF
+)"
+assert_eq "rubric token mint has default-repo and complete-credential gate" \
+  "$EXPECTED_MINT_IF" \
+  "$(contractv mint_if)"
+assert_eq "rubric token app ID input" '${{ secrets.PALATINE_SKILLS_APP_ID }}' "$(contractv mint_with.app-id)"
+assert_eq "rubric token private key input" '${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}' "$(contractv mint_with.private-key)"
+assert_eq "rubric token owner scope" "praetorian-inc" "$(contractv mint_with.owner)"
+assert_eq "rubric token repository scope" "palatine" "$(contractv mint_with.repositories)"
+assert_eq "rubric token contents permission" "read" "$(contractv mint_with.permission-contents)"
+EXPECTED_MINT_WITH="$(cat <<'EOF'
+{"app-id":"${{ secrets.PALATINE_SKILLS_APP_ID }}","owner":"praetorian-inc","permission-contents":"read","private-key":"${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}","repositories":"palatine"}
+EOF
+)"
+assert_eq "rubric token mint has no additional inputs or permissions" "$EXPECTED_MINT_WITH" "$(contractv mint_with)"
+assert_eq "rubric checkout remains fail-open" "true" "$(contractv checkout_continue_on_error)"
+assert_eq "rubric checkout prefers App token then legacy fallback" \
+  '${{ steps.rubric-token.outputs.token || secrets.RUBRIC_TOKEN }}' \
+  "$(contractv checkout_token)"
+assert_eq "test workflow covers README caller changes on pull requests" \
+  "true" \
+  "$(contractv test_pull_request_covers_readme)"
+assert_eq "test workflow covers README caller changes on pushes" \
+  "true" \
+  "$(contractv test_push_covers_readme)"
+
+RUBRIC_RUN="$(cat "$EXTRACT/rubric.sh")"
+assert_contains "rubric notice requests App ID" "$RUBRIC_RUN" "secrets.PALATINE_SKILLS_APP_ID"
+assert_contains "rubric notice requests private key" "$RUBRIC_RUN" "secrets.PALATINE_SKILLS_PRIVATE_KEY"
+assert_contains "rubric notice marks RUBRIC_TOKEN as temporary legacy fallback" "$RUBRIC_RUN" "temporary legacy fallback"
+assert_contains "rubric notice preserves green comment-only skip" "$RUBRIC_RUN" "job stays green"
+
+HEADER_CALLER="$(cat "$EXTRACT/header-caller.txt")"
+assert_contains "header caller forwards Anthropic key" "$HEADER_CALLER" 'ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}'
+assert_contains "header caller forwards App ID" "$HEADER_CALLER" 'PALATINE_SKILLS_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}'
+assert_contains "header caller forwards private key" "$HEADER_CALLER" 'PALATINE_SKILLS_PRIVATE_KEY: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}'
+assert_absent "header caller does not forward legacy token" "$HEADER_CALLER" 'RUBRIC_TOKEN:'
+
+README_CALLER="$(cat "$EXTRACT/readme-caller.txt")"
+README_SECTION="$(cat "$EXTRACT/readme-section.txt")"
+assert_contains "README caller forwards Anthropic key" "$README_CALLER" 'ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}'
+assert_contains "README caller forwards App ID" "$README_CALLER" 'PALATINE_SKILLS_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}'
+assert_contains "README caller forwards private key" "$README_CALLER" 'PALATINE_SKILLS_PRIVATE_KEY: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}'
+assert_absent "README caller does not forward legacy token" "$README_CALLER" 'RUBRIC_TOKEN:'
+assert_contains "README documents one-hour token lifetime" "$README_SECTION" "expires after one hour"
+assert_contains "README documents token revocation at job end" "$README_SECTION" "revoked by the action at job end"
+assert_contains "README documents single-repository token scope" "$README_SECTION" '`praetorian-inc/palatine` only'
+assert_contains "README documents contents-read token permission" "$README_SECTION" '`contents: read`'
+assert_contains "README documents App-first precedence" "$README_SECTION" "App-first"
+assert_contains "README marks legacy token deprecated" "$README_SECTION" "deprecated compatibility only"
+assert_contains "README prohibits provisioning a new PAT" "$README_SECTION" "Do not create or distribute a new PAT"
+assert_contains "README documents custom-rubric fallback" "$README_SECTION" 'custom `rubric_repository`'
+assert_contains "README documents token-mint egress" "$README_SECTION" '`api.github.com:443`'
 
 # ── Prompt contract (ENG-7538 ACs) ───────────────────────────────────────────
 section "Prompt contract"
@@ -230,9 +407,36 @@ run_scope() { # run_scope <repo> <base_sha> <head_sha> <pre_filter_result> <rele
   RC=$?
 }
 
+run_rubric() { # run_rubric <repo> <checkout_outcome>
+  OUT="$WORKDIR/out.$$.$RANDOM"
+  LOG="$OUT.log"
+  : > "$OUT"
+  (
+    cd "$1" || exit 1
+    RUBRIC_CHECKOUT_OUTCOME="$2" \
+    GITHUB_OUTPUT="$OUT" \
+      bash "$EXTRACT/rubric.sh"
+  ) > "$LOG" 2>&1
+  RC=$?
+}
+
 outv() { # outv <key> — last value written for that GITHUB_OUTPUT key
   grep -E "^$1=" "$OUT" 2>/dev/null | tail -1 | sed "s/^$1=//"
 }
+
+# ── Extracted rubric-load gate ───────────────────────────────────────────────
+section "Rubric-load gate fixtures"
+r="$(newrepo rubric-load)"
+run_rubric "$r" failure
+assert_eq "rubric checkout failure exits zero" "0" "$RC"
+assert_eq "rubric checkout failure emits ok=false" "false" "$(outv ok)"
+assert_contains "rubric checkout failure emits skip notice" "$(cat "$LOG")" "Instruction-file audit skipped"
+assert_contains "rubric checkout failure explains green outcome" "$(cat "$LOG")" "job stays green"
+
+put "$r" ".instruction-audit-rubric/.agentsmesh/skills/_auditing-agent-instruction-files/SKILL.md" $'# Fixture rubric\n'
+run_rubric "$r" success
+assert_eq "loaded rubric exits zero" "0" "$RC"
+assert_eq "loaded rubric emits ok=true" "true" "$(outv ok)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 1 — PR adds a derivable inventory section to AGENTS.md (should run)"

@@ -532,10 +532,15 @@ jobs:
       pull-requests: write
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-      RUBRIC_TOKEN: ${{ secrets.RUBRIC_TOKEN }}
+      PALATINE_SKILLS_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
+      PALATINE_SKILLS_PRIVATE_KEY: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
 ```
 
-`RUBRIC_TOKEN` is required to load the rubric: palatine is a private repository, and the caller's `GITHUB_TOKEN` cannot read a different private repo (same-org does not change that). Without `RUBRIC_TOKEN` the LLM audit is skipped and the job stays green (comment-only). Public callers that cannot mint a palatine-read token should not add this caller.
+The default rubric is private, so callers forward both App credentials. The action mints an installation-scoped token that expires after one hour and is revoked by the action at job end. The workflow restricts that token to `praetorian-inc/palatine` only with `contents: read`; checkout does not persist it, and it is never passed to the Claude step.
+
+Both App credentials are operationally required to load the default private rubric, but each reusable-workflow secret is schema-optional so missing credentials preserve the green, comment-only skip. Authentication is App-first. `RUBRIC_TOKEN` remains a deprecated compatibility only fallback for callers migrating from the legacy token and for a custom `rubric_repository`; do not add it to new callers. Do not create or distribute a new PAT for this workflow.
+
+When `harden-runner-policy` is `block`, the allowlist must include `api.github.com:443` for token minting in addition to the endpoints required by checkout and audit execution.
 
 **Inputs** (all optional):
 
@@ -552,7 +557,9 @@ jobs:
 **Secrets:**
 
 - `ANTHROPIC_API_KEY` — required.
-- `RUBRIC_TOKEN` — required to run the audit; token that can read `rubric_repository` (private palatine). Omit it and the job skips the LLM step without failing.
+- `PALATINE_SKILLS_APP_ID` — optional in the reusable schema; required with the private key to load the default private rubric. The App installation must have `contents: read` on `praetorian-inc/palatine`.
+- `PALATINE_SKILLS_PRIVATE_KEY` — optional in the reusable schema; matching PEM required operationally with the App ID.
+- `RUBRIC_TOKEN` — deprecated compatibility only. The App token takes precedence; this fallback remains temporarily for migrating callers and custom `rubric_repository` overrides. Do not provision a new PAT. Omit all rubric credentials and the workflow skips the LLM step without failing.
 
 ### `ts-ci.yml` — TypeScript/Node.js CI (install + typecheck + lint + test)
 
