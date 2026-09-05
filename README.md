@@ -471,23 +471,26 @@ jobs:
 - `pull_request` with `action == 'opened'` or `'ready_for_review'` on a same-repo PR — reviews once per PR
 - `pull_request_review_comment` with body containing `@codex` — re-review on demand
 
-### `claude-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
+### `agents-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
-Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped. (The workflow filename is kept for caller compatibility.)
+Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped.
 
-**Minimal caller** (drop this in `.github/workflows/claude-md-drift.yml` of a consumer repo):
+**Minimal caller** (drop this in `.github/workflows/agents-md-drift.yml` of a consumer repo):
 
 ```yaml
-name: CLAUDE.md Drift Detection
+name: Instruction-File Drift Detection
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review]  # synchronize: re-check drift on every push
+    types: [opened, synchronize, ready_for_review]
+    # synchronize: intentional — re-check drift on every push since new
+    # code changes may introduce new drift against AGENTS.md (and
+    # content-carrying CLAUDE.md).
 concurrency:
-  group: claude-drift-${{ github.event.pull_request.number }}
+  group: instruction-drift-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 jobs:
   drift-check:
-    uses: praetorian-inc/public-workflows/.github/workflows/claude-md-drift.yml@<SHA>
+    uses: praetorian-inc/public-workflows/.github/workflows/agents-md-drift.yml@<SHA>
     permissions:
       contents: read
       pull-requests: write
@@ -512,7 +515,7 @@ jobs:
 
 ### `agents-md-audit.yml` — instruction-file audit against the authoring standard (ENG-7538)
 
-Grades **content-carrying** instruction files a PR *edited* (`AGENTS.md`, or a `CLAUDE.md` that is not an `@AGENTS.md` pointer stub) against `auditing-agent-instruction-files`. Findings use that skill's classes (`MISLEADS` / `OMITS` / `UNENFORCED` / `COSTS` / `ADVISORY`). Complementary to `claude-md-drift.yml`: drift is PR-diff staleness of cited facts; this job grades the file as it stands at HEAD. It does **not** replace drift.yml. The rubric is the skill files themselves, loaded from `praetorian-inc/palatine` at a pinned SHA — not a second copy inlined into the workflow YAML. Comment-only: findings do not fail the job; merging stays a human decision.
+Grades **content-carrying** instruction files a PR *edited* (`AGENTS.md`, or a `CLAUDE.md` that is not an `@AGENTS.md` pointer stub) against `auditing-agent-instruction-files`. Findings use that skill's classes (`MISLEADS` / `OMITS` / `UNENFORCED` / `COSTS` / `ADVISORY`). Complementary to `agents-md-drift.yml`: drift is PR-diff staleness of cited facts; this job grades the file as it stands at HEAD. It does **not** replace drift.yml. The rubric is the skill files themselves, loaded from `praetorian-inc/palatine` at a pinned SHA — not a second copy inlined into the workflow YAML. Comment-only: findings do not fail the job; merging stays a human decision.
 
 **Minimal caller** (drop this in `.github/workflows/agents-md-audit.yml` of a consumer repo):
 

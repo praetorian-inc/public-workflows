@@ -1,7 +1,7 @@
 name: "Instruction-File Audit (Callable)"
 # Grades content-carrying instruction files a PR *edited* against
 # `auditing-agent-instruction-files` (adherence, omission, staleness).
-# Complementary to claude-md-drift.yml: drift is PR-diff staleness of cited
+# Complementary to agents-md-drift.yml: drift is PR-diff staleness of cited
 # facts; this job grades the file as it stands at HEAD against the authoring
 # standard. It does not replace drift.yml (ENG-7538).
 #
@@ -399,7 +399,7 @@ jobs:
 
             TASK: Read-only audit of content-carrying instruction files this PR
             edited. Do NOT edit any files. This job does not replace
-            claude-md-drift.yml — drift is PR-diff staleness; this job grades
+            agents-md-drift.yml — drift is PR-diff staleness; this job grades
             the file as it stands at HEAD against the authoring standard.
 
             RUBRIC (the only grading standard — do not invent a parallel one):

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Tests for the instruction-file discovery in
-# .github/workflows/claude-md-drift.yml.
+# .github/workflows/agents-md-drift.yml.
 #
 # The scripts under test are EXTRACTED from the workflow YAML at run time and
 # executed against throwaway git fixture repositories. Nothing in this file
@@ -19,12 +19,12 @@
 #     `|| true`-tolerated. On a host without coreutils `timeout` the fetch
 #     helper exits 127 instead, which lands in the same tolerated path.
 #
-# Usage: bash test/claude-md-drift-prefilter.test.sh
+# Usage: bash test/agents-md-drift-prefilter.test.sh
 #
 set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-WORKFLOW="$REPO_ROOT/.github/workflows/claude-md-drift.yml"
+WORKFLOW="$REPO_ROOT/.github/workflows/agents-md-drift.yml"
 
 WORKDIR="$(mktemp -d)" || { echo "ERROR: mktemp failed" >&2; exit 1; }
 trap 'rm -rf -- "$WORKDIR"' EXIT
