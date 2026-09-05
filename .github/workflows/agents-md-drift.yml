@@ -16,18 +16,19 @@ name: "Instruction-File Drift Detection (Callable)"
 #
 # Caller template (add to each repo):
 #
-#   name: CLAUDE.md Drift Detection
+#   name: Instruction-File Drift Detection
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, ready_for_review]
 #       # synchronize: intentional — re-check drift on every push since new
-#       # code changes may introduce new drift against CLAUDE.md.
+#       # code changes may introduce new drift against AGENTS.md (and
+#       # content-carrying CLAUDE.md).
 #   concurrency:
-#     group: claude-drift-${{ github.event.pull_request.number }}
+#     group: instruction-drift-${{ github.event.pull_request.number }}
 #     cancel-in-progress: true
 #   jobs:
 #     drift-check:
-#       uses: praetorian-inc/public-workflows/.github/workflows/claude-md-drift.yml@<SHA>
+#       uses: praetorian-inc/public-workflows/.github/workflows/agents-md-drift.yml@<SHA>
 #       permissions:
 #         contents: read
 #         pull-requests: write

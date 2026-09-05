@@ -30,7 +30,7 @@ set -uo pipefail
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 WORKFLOW="$REPO_ROOT/.github/workflows/agents-md-audit.yml"
 TEST_WORKFLOW="$REPO_ROOT/.github/workflows/test-agents-md-audit.yml"
-DRIFT_WORKFLOW="$REPO_ROOT/.github/workflows/claude-md-drift.yml"
+DRIFT_WORKFLOW="$REPO_ROOT/.github/workflows/agents-md-drift.yml"
 README="$REPO_ROOT/README.md"
 
 WORKDIR="$(mktemp -d)" || { echo "ERROR: mktemp failed" >&2; exit 1; }
@@ -340,9 +340,9 @@ assert_contains "merging stays a human decision" "$PROMPT" "merging stays a huma
 assert_contains "comment header is Instruction-File Audit" "$PROMPT" "## Instruction-File Audit"
 
 if [ -f "$DRIFT_WORKFLOW" ]; then
-  ok "claude-md-drift.yml still present (this job does not replace it)"
+  ok "agents-md-drift.yml still present (this job does not replace it)"
 else
-  bad "claude-md-drift.yml still present" "exists" "missing"
+  bad "agents-md-drift.yml still present" "exists" "missing"
 fi
 
 # ── Fixture helpers ──────────────────────────────────────────────────────────
