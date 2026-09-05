@@ -23,5 +23,6 @@ jobs:
       # it widens the blast radius of a prompt-injection on a same-repo PR.
       contents: read
       pull-requests: write
+      actions: read  # ENG-5658 fetch-graph downloads this repo's graphify artifact
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
