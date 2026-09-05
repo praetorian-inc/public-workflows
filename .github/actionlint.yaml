@@ -1,0 +1,11 @@
+# actionlint's github/job schemas lag GitHub's 2026-09-03 job.workflow_*
+# identity fields (workflow_sha, workflow_repository). Those are the
+# documented way for a reusable workflow to check out its own sources:
+# https://docs.github.com/en/actions/learn-github-actions/contexts#job-context
+paths:
+  .github/workflows/claude-code.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/codex-code.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
