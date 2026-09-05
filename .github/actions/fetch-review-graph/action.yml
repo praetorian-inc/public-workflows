@@ -47,7 +47,7 @@ runs:
         # and a dash-leading dest is how a caller smuggles flags. The script
         # also refuses a symlink dest.
         case "$DEST" in
-          ""|*[!A-Za-z0-9._/-]*|.*|/*)
+          ""|-*|*[!A-Za-z0-9._/-]*|.*|/*)
             echo "present=false" >> "$GITHUB_OUTPUT"
             echo "head_sha=" >> "$GITHUB_OUTPUT"
             echo "skip_reason=bad-dest" >> "$GITHUB_OUTPUT"

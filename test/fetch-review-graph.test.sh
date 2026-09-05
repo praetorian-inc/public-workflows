@@ -48,15 +48,22 @@ if [ "${1:-}" = "run" ] && [ "${2:-}" = "list" ]; then
   if [ -f "$fix/run_list" ]; then cat "$fix/run_list"; exit 0; fi
   exit 0
 fi
-if [ "${1:-}" = "run" ] && [ "${2:-}" = "download" ]; then
+  if [ "${1:-}" = "run" ] && [ "${2:-}" = "download" ]; then
   if [ -f "$fix/download.fail" ]; then exit 1; fi
   dest=""
+  name=""
   prev=""
   for a in "$@"; do
     if [ "$prev" = "-D" ]; then dest=$a; fi
+    if [ "$prev" = "-n" ]; then name=$a; fi
     prev=$a
   done
   [ -n "$dest" ] || exit 1
+  printf '%s\n' "$name" > "$fix/downloaded_name"
+  if [ -n "$name" ] && [ -d "$fix/download/$name" ]; then
+    cp -R "$fix/download/$name/." "$dest/"
+    exit 0
+  fi
   if [ -d "$fix/download" ]; then
     cp -R "$fix/download/." "$dest/"
     exit 0
@@ -74,7 +81,9 @@ run_script() {
   local outdir=$1
   mkdir -p "$outdir"
   (
-    export GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-praetorian-inc/fixture}"
+    # Pin unconditionally: GitHub Actions exports GITHUB_REPOSITORY=this-repo,
+    # which would leak into provenance and fail the happy-path assertion in CI.
+    export GITHUB_REPOSITORY="praetorian-inc/fixture"
     export GH_TOKEN="${GH_TOKEN:-fake-token}"
     export DEST="$outdir/graphify-out"
     export GITHUB_OUTPUT="$outdir/github_output"
@@ -158,13 +167,15 @@ mkdir -p "$T/fix/download"
 echo -n "main" > "$T/fix/default_branch"
 printf '%s' '{"databaseId":7,"headSha":"ddd","headBranch":"main","url":"u","updatedAt":"t"}' > "$T/fix/run_list"
 printf '%s\n' "other" "fixture-graph" > "$T/fix/artifacts"
-valid_graph > "$T/fix/download/graph.json"
+mkdir -p "$T/fix/download/fixture-graph"
+valid_graph > "$T/fix/download/fixture-graph/graph.json"
 export GH_FIXTURE="$T/fix"
 run_script "$T" >"$T/log" 2>"$T/err"
 echo "$?" > "$T/rc"
 [ "$(cat "$T/rc")" = "0" ] && [ "$(read_out "$T/github_output" present)" = "true" ] \
+  && [ "$(cat "$T/fix/downloaded_name")" = "fixture-graph" ] \
   && ok "picks the -graph artifact" \
-  || bad "pick -graph" "present=$(read_out "$T/github_output" present) skip=$(read_out "$T/github_output" skip_reason)"
+  || bad "pick -graph" "present=$(read_out "$T/github_output" present) skip=$(read_out "$T/github_output" skip_reason) name=$(cat "$T/fix/downloaded_name" 2>/dev/null)"
 
 # --- 5. two artifacts, neither -graph ---
 section "5. ambiguous artifacts"
@@ -278,6 +289,50 @@ export GH_FIXTURE="$T/fix"
   && [ ! -f "$T/elsewhere/graph.json" ] \
   && ok "symlink DEST refused, no write-through" \
   || bad "dest-symlink" "skip=$(read_out "$T/github_output" skip_reason) rc=$(cat "$T/rc") log=$(cat "$T/log")"
+
+# --- 12. skip removes a pre-existing graph ---
+section "12. skip clears stale graph.json"
+T="$WORKDIR/t12"
+mkdir -p "$T/graphify-out"
+valid_graph > "$T/graphify-out/graph.json"
+printf '{"headSha":"stale"}\n' > "$T/graphify-out/.graphify-provenance.json"
+(
+  export GITHUB_REPOSITORY="praetorian-inc/fixture"
+  unset GH_TOKEN GITHUB_TOKEN || true
+  export DEST="$T/graphify-out"
+  export GITHUB_OUTPUT="$T/github_output"
+  : > "$GITHUB_OUTPUT"
+  bash "$SCRIPT"
+  echo "$?" > "$T/rc"
+)
+[ "$(cat "$T/rc")" = "0" ] && [ "$(read_out "$T/github_output" present)" = "false" ] \
+  && [ ! -e "$T/graphify-out/graph.json" ] \
+  && [ ! -e "$T/graphify-out/.graphify-provenance.json" ] \
+  && ok "skip removes stale graph + provenance" \
+  || bad "stale-clear" "present=$(read_out "$T/github_output" present) graph=$(ls "$T/graphify-out" 2>/dev/null)"
+
+# --- 13. skip stays exit 0 when DEST is not writable ---
+section "13. skip is fail-open on unwritable DEST"
+T="$WORKDIR/t13"
+mkdir -p "$T/fix" "$T/graphify-out"
+touch "$T/fix/default_branch.fail"
+valid_graph > "$T/graphify-out/graph.json"
+chmod a-w "$T/graphify-out"
+export GH_FIXTURE="$T/fix"
+(
+  export GITHUB_REPOSITORY="praetorian-inc/fixture"
+  export GH_TOKEN="fake-token"
+  export DEST="$T/graphify-out"
+  export GITHUB_OUTPUT="$T/github_output"
+  : > "$GITHUB_OUTPUT"
+  bash "$SCRIPT"
+  echo "$?" > "$T/rc"
+)
+chmod u+w "$T/graphify-out"
+[ "$(cat "$T/rc")" = "0" ] && [ "$(read_out "$T/github_output" present)" = "false" ] \
+  && [ "$(read_out "$T/github_output" skip_reason)" = "no-default-branch" ] \
+  && ok "unwritable DEST skip still exits 0" \
+  || bad "unwritable-skip" "rc=$(cat "$T/rc") present=$(read_out "$T/github_output" present) skip=$(read_out "$T/github_output" skip_reason)"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

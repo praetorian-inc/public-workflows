@@ -73,7 +73,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.openai.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443."
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.openai.com:443, api.github.com:443, github.com:443, objects.githubusercontent.com:443, registry.npmjs.org:443, pypi.org:443, files.pythonhosted.org:443."
         required: false
         type: string
         default: ""

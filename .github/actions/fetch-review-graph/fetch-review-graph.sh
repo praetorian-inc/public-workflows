@@ -51,6 +51,12 @@ finish() {
 skip() {
   skip_reason=$1
   present=false
+  # Honour the header contract: a skip leaves DEST without graph.json.
+  # A previous successful fetch in the same job (or a PR-planted file)
+  # would otherwise stay readable after present=false.
+  if [ -n "$DEST" ] && [ ! -L "$DEST" ] && [ -d "$DEST" ]; then
+    rm -f -- "$DEST/graph.json" "$DEST/.graphify-provenance.json" || true
+  fi
   finish
 }
 
