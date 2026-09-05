@@ -25,6 +25,13 @@ name: Gemini PR Assistant (Callable)
 #     a container runtime, so this is a strictly stronger posture than codex-code.yml
 #     (which must relax sudo for codex-action and then manually re-lock Docker).
 #
+# ENG-5658 graphify: Gemini is SCOPED OUT of executing graph queries. Its tool
+# surface is read-only (no run_shell_command), so it cannot invoke `graphify
+# query` even if graph.json were on disk; fetching a ~100 MB artifact it cannot
+# use would be the inert-surface cost the ticket declined. Claude is the lane
+# that executes queries; Codex gets the graph + CLI because its sandbox can
+# exec. Instruction channel: Gemini loads no AGENTS.md in this headless action.
+#
 # Any change requires a PR with @praetorian-inc/security-engineering review (CODEOWNERS).
 
 on:

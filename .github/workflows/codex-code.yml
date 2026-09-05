@@ -73,7 +73,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.openai.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443."
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: api.openai.com:443, api.github.com:443, github.com:443, objects.githubusercontent.com:443, registry.npmjs.org:443, pypi.org:443, files.pythonhosted.org:443."
         required: false
         type: string
         default: ""
@@ -108,6 +108,66 @@ jobs:
       harden-runner-policy: ${{ inputs.harden-runner-policy }}
       harden-runner-allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
 
+  # ENG-5658: fail-open fetch of the caller's latest graphify-graph.yml artifact.
+  # Own job so the agent never receives actions:read. Missing graph is a skip,
+  # never a review failure. The fetch script lives in this repo; we check it
+  # out at github.workflow_sha (this reusable's commit) because `uses: ./`
+  # composite actions resolve against the CALLER workspace.
+  fetch-graph:
+    needs: preflight
+    if: |
+      needs.preflight.outputs.has_code == 'true' &&
+      github.event.pull_request.draft == false &&
+      !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        (github.event_name == 'pull_request'
+          && (github.event.action == 'opened' || github.event.action == 'ready_for_review'))
+        ||
+        (github.event_name == 'pull_request_review_comment'
+          && contains(github.event.comment.body, '@codex'))
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      present: ${{ steps.fetch.outputs.present }}
+      head-sha: ${{ steps.fetch.outputs.head_sha }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout fetch script (same SHA as this reusable)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: praetorian-inc/public-workflows
+          ref: ${{ github.workflow_sha }}
+          path: _pw
+          persist-credentials: false
+
+      - name: Fetch published graphify graph (fail-open)
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEST: graphify-out
+        run: bash _pw/.github/actions/fetch-review-graph/fetch-review-graph.sh
+
+      - name: Upload graph for the review job
+        if: steps.fetch.outputs.present == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
+        with:
+          name: review-graph
+          path: graphify-out/
+          retention-days: 1
+          if-no-files-found: error
+
   # Codex review: run the Codex CLI in a read-only sandbox via openai/codex-action.
   #
   # The job has `contents: read` only — no write access to the repo or PRs.
@@ -119,8 +179,13 @@ jobs:
   # review comment. This separation ensures that even if the Codex sandbox is
   # compromised, it cannot write to the PR or exfiltrate the GITHUB_TOKEN.
   codex-review:
-    needs: preflight
+    needs: [preflight, fetch-graph]
+    # always() + !cancelled() so a failed fetch-graph cannot skip the review
+    # (ENG-5658 AC: missing graph never fails the review job).
     if: |
+      always() &&
+      !cancelled() &&
+      needs.preflight.result == 'success' &&
       needs.preflight.outputs.has_code == 'true' &&
       github.event.pull_request.draft == false &&
       !contains(github.actor, 'coderabbit') && !contains(github.actor, 'devin') && !contains(github.actor, '[bot]') &&
@@ -205,6 +270,30 @@ jobs:
           # which would hard-fail the checkout fetch instead of reviewing latest.
           fetch-depth: 2
           persist-credentials: false
+
+      - name: Neutralize PR-planted graphify-out
+        run: rm -rf graphify-out
+
+      - name: Restore published graph
+        if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: review-graph
+          path: graphify-out
+
+      - name: Install graphify CLI (pinned, fail-open)
+        if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
+        env:
+          GRAPHIFY_VERSION: "0.8.35"
+        run: |
+          set -euo pipefail
+          if pipx install "graphifyy==${GRAPHIFY_VERSION}"; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          else
+            echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
+          fi
 
       - name: Verify merge-ref parents are present
         run: |
@@ -402,6 +491,13 @@ jobs:
             REVIEW SKILLS: Apply your available review skills — adversarial
             perspective, evidence-based analysis, simplicity, DRY, YAGNI, cyclomatic
             complexity — where relevant, and ground every finding in a specific file and line.
+
+            GRAPH: If graphify-out/graph.json exists, a CI-published code knowledge graph
+            of the default branch is on disk (provenance: graphify-out/.graphify-provenance.json).
+            Prefer `graphify query` / `graphify explain` / `graphify path` for callers and
+            blast radius over grep. Confirm every graph answer at file:line in this PR's
+            tree — the graph is the default branch, not the PR head. Codex project-doc
+            truncation does not apply to this wrapper; do not rely on AGENTS.md for this.
 
             ${{ inputs.prompt }}
 
