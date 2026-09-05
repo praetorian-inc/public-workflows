@@ -10,11 +10,13 @@ on:
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
+      - 'test/fetch-review-graph.test.sh'
   push:
     branches: [main]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
+      - 'test/fetch-review-graph.test.sh'
 
 permissions:
   contents: read
@@ -39,6 +41,9 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           persist-credentials: false
+
+      - name: Unit-test fetch-review-graph (ENG-5658)
+        run: bash test/fetch-review-graph.test.sh
 
       - name: Install zizmor
         env:

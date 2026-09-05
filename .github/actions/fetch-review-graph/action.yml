@@ -1,0 +1,59 @@
+name: Fetch published graphify graph
+description: >-
+  Fail-open download of the calling repo's latest successful
+  graphify-graph.yml artifact into destination/. Always succeeds: missing
+  workflow, run, artifact, or any API/download failure sets present=false
+  and leaves the review to continue without a graph (ENG-5658). The token
+  needs actions:read on github.repository — without it this action skips,
+  it does not fail the job. Destination must not be a symlink.
+
+inputs:
+  github-token:
+    description: Token with actions:read on the calling repository.
+    required: true
+  destination:
+    description: Directory to place graph.json and the provenance sidecar.
+    required: false
+    default: graphify-out
+
+outputs:
+  present:
+    description: '"true" if destination/graph.json was installed; "false" otherwise.'
+    value: ${{ steps.fetch.outputs.present }}
+  head-sha:
+    description: Default-branch commit the graph was built from. Empty when present=false or metadata was unavailable.
+    value: ${{ steps.fetch.outputs.head_sha }}
+  skip-reason:
+    description: Why the graph was not installed. Empty when present=true.
+    value: ${{ steps.fetch.outputs.skip_reason }}
+  run-id:
+    description: Actions run id the artifact was downloaded from. Empty when present=false.
+    value: ${{ steps.fetch.outputs.run_id }}
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch graphify-graph.yml artifact
+      id: fetch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        DEST: ${{ inputs.destination }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        # Destination charset gate before the script runs: a newline in DEST
+        # would be a GITHUB_OUTPUT injection if it ever reached a :: command,
+        # and a dash-leading dest is how a caller smuggles flags. The script
+        # also refuses a symlink dest.
+        case "$DEST" in
+          ""|*[!A-Za-z0-9._/-]*|.*|/*)
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "head_sha=" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=bad-dest" >> "$GITHUB_OUTPUT"
+            echo "run_id=" >> "$GITHUB_OUTPUT"
+            echo "graph skipped: bad-dest"
+            exit 0
+            ;;
+        esac
+        bash "$ACTION_PATH/fetch-review-graph.sh"
