@@ -120,8 +120,11 @@ jobs:
   # ENG-5658: fail-open fetch of the caller's latest graphify-graph.yml artifact.
   # Own job so the agent never receives actions:read. Missing graph is a skip,
   # never a review failure. The fetch script lives in this repo; we check it
-  # out at github.workflow_sha (this reusable's commit) because `uses: ./`
-  # composite actions resolve against the CALLER workspace.
+  # out at job.workflow_sha / job.workflow_repository (THIS reusable).
+  # github.workflow_sha is the CALLER's commit — pinning that against
+  # public-workflows 404s (`not our ref`) and reds the job. `uses: ./`
+  # composite actions resolve against the CALLER workspace, so a same-repo
+  # checkout is required.
   fetch-graph:
     needs: preflight
     if: |
@@ -154,15 +157,18 @@ jobs:
           disable-sudo-and-containers: true
 
       - name: Checkout fetch script (same SHA as this reusable)
+        id: checkout-pw
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          repository: praetorian-inc/public-workflows
-          ref: ${{ github.workflow_sha }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: _pw
           persist-credentials: false
 
       - name: Fetch published graphify graph (fail-open)
         id: fetch
+        if: steps.checkout-pw.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           DEST: graphify-out
