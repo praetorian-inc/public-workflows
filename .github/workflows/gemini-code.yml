@@ -178,6 +178,7 @@ jobs:
     outputs:
       review_output: ${{ steps.sanitize.outputs.review }}
       empty_scope: ${{ steps.context.outputs.empty_scope }}
+      failure_kind: ${{ steps.failclass.outputs.kind }}
 
     # Mapped from the secret so the optional palatine-token step can be gated in `if:`
     # (a step `if:` cannot read `secrets.*` directly).
@@ -313,9 +314,58 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .npmrc .yarnrc .yarnrc.yml
-          find . -name .git -prune -o \
+           find . -name .git -prune -o \
             \( -iname '.gemini' -o -iname '.agents' -o -iname 'GEMINI.md' -o -iname 'AGENTS.md' -o -iname '.geminiignore' \) \
             -prune -exec rm -rf {} +
+
+      # ENG-6428: the purge above deletes AGENTS.md/GEMINI.md that the PR may have
+      # changed. List those paths so the prompt can send the reviewer to pr.diff
+      # hunks instead of wasting turns on read_file of a missing file.
+      - name: Record purged changed paths
+        id: purged
+        if: steps.context.outputs.empty_scope != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p .gemini-review
+          : > .gemini-review/purged-paths.txt
+          if [ -f .gemini-review/changed-files.txt ]; then
+            while IFS= read -r f; do
+              [ -z "${f}" ] && continue
+              if [ ! -e "${f}" ]; then
+                printf '%s\n' "${f}" >> .gemini-review/purged-paths.txt
+              fi
+            done < .gemini-review/changed-files.txt
+          fi
+          if [ -s .gemini-review/purged-paths.txt ]; then
+            {
+              echo "PURGED: These changed paths were removed from disk (PR-supplied agent config). Review them only via .gemini-review/pr.diff hunks. Do not read_file or grep_search them:"
+              cat .gemini-review/purged-paths.txt
+            } > "${RUNNER_TEMP}/purged-note.txt"
+          else
+            : > "${RUNNER_TEMP}/purged-note.txt"
+          fi
+          delim="PURGED_$(openssl rand -hex 8)"
+          {
+            echo "note<<${delim}"
+            cat "${RUNNER_TEMP}/purged-note.txt"
+            echo "${delim}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Compute session turn cap
+        id: turns
+        run: |
+          set -euo pipefail
+          # ENG-6428: size-aware cap. Floor 50, +3 per changed file, cap 80.
+          # 15-minute job timeout remains the wall clock. Empty-scope still
+          # emits 50 so skipped gemini `with:` JSON stays valid.
+          n=0
+          if [ "${{ steps.context.outputs.empty_scope }}" != "true" ] && [ -f .gemini-review/changed-files.txt ]; then
+            n=$(grep -c . .gemini-review/changed-files.txt || true)
+          fi
+          t=$((50 + n * 3))
+          if [ "${t}" -gt 80 ]; then t=80; fi
+          echo "n=${t}" >> "${GITHUB_OUTPUT}"
+          echo "Turn cap ${t} for ${n} changed file(s)"
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
       # praetorian-inc/palatine is the canonical-source-of-truth repo (agentmesh
@@ -421,6 +471,23 @@ jobs:
           fi
           rm -rf "${TMP}"
 
+      # ENG-7656: User-tier Policy Engine deny (workspace .gemini/policies is
+      # disabled in gemini-cli). Global deny (no argsPattern) excludes these
+      # tools from the model's memory so --yolo cannot advertise them.
+      - name: Install CI tool-deny policy
+        if: steps.context.outputs.empty_scope != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.gemini/policies"
+          cat > "${HOME}/.gemini/policies/ci-review-deny.toml" <<'EOF'
+          [[rule]]
+          toolName = ["write_file", "replace", "web_fetch", "google_web_search", "save_memory", "run_shell_command"]
+          decision = "deny"
+          priority = 999
+          modes = ["yolo", "default", "autoEdit", "plan"]
+          denyMessage = "CI Gemini reviewer: tool denied"
+          EOF
+
       # Run Gemini CLI as a read-only review agent. No github_token is passed — the
       # agent holds zero credentials. The hardcoded `settings` clamp the tool surface
       # to read-only built-ins; callers cannot widen it (CODEOWNERS / AppSec gate).
@@ -429,7 +496,7 @@ jobs:
         if: steps.context.outputs.empty_scope != 'true'
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489  # v0.1.22
         env:
-          # gemini-cli 0.45.2 refuses to run tools in an "untrusted" folder in headless
+          # gemini-cli 0.58.0 (and 0.45.2) refuses to run tools in an "untrusted" folder in headless
           # mode (downgrades --yolo to interactive-approval, which then errors in CI).
           # This is the documented headless mechanism to mark the workspace trusted.
           # Safe here because the only Gemini config in the tree is what we stage: the
@@ -444,14 +511,14 @@ jobs:
           # tool-policy semantics (the security posture itself), so callers must not
           # be able to downgrade it. Agent Skills stable since 0.26.0; pinned for
           # reproducible review behavior.
-          gemini_cli_version: "0.45.2"
+          gemini_cli_version: "0.58.0"
           # Hardcoded security configuration. `tools.core` is an ALLOWLIST: only the
           # listed read-only built-ins are available; everything else (shell, write,
           # edit, web) is unavailable. `tools.exclude` is belt-and-suspenders against
           # a future schema change where `core` becomes additive. No MCP servers.
-          # maxSessionTurns: one turn = one model round-trip that batches all its tool
-          # calls (gemini-cli nonInteractiveCli.ts), the same semantic as the Claude
-          # reviewer's --max-turns, so the two share one cap (30).
+          # User-tier Policy Engine deny (HOME/.gemini/policies) is the YOLO fix:
+          # global deny removes those tools from the model. ENG-6428: turn cap is
+          # size-aware (steps.turns), not a constant 30.
           #
           # CRITICAL: the tool names in `core` (and in the prompt below) MUST match the
           # names the pinned gemini_cli_version actually registers. The grep tool was
@@ -464,7 +531,7 @@ jobs:
           # ("Tool not found"), burning the budget until FatalTurnLimitedError (exit 53,
           # "Reached max session turns"). That — not the turn cap — was the v2.7.0/v2.8.x
           # regression. Keep `core` + the prompt in lockstep with the pinned CLI version
-          # whenever you bump gemini_cli_version. 30 turns is headroom; timeout is the
+          # whenever you bump gemini_cli_version. Turn cap is size-aware (ENG-6428); timeout is the
           # backstop. (Under the action's non-interactive `--yolo`, gemini-cli also
           # advertises the excluded tools to the model — google-gemini/gemini-cli#5728,
           # #18807, #20469 — so the prompt explicitly tells it not to attempt them.)
@@ -474,7 +541,7 @@ jobs:
           # Rust engine so those searches succeed instead of looping.
           settings: |
             {
-              "model": { "maxSessionTurns": 30 },
+              "model": { "maxSessionTurns": ${{ steps.turns.outputs.n }} },
               "telemetry": { "enabled": false },
               "mcpServers": {},
               "security": { "folderTrust": { "enabled": false } },
@@ -502,6 +569,8 @@ jobs:
             SCOPE: If `.gemini-review/excluded-paths.txt` exists, the paths listed in it
             are generated artifacts that CI verifies mechanically — they are excluded
             from the diff by the workflow and MUST NOT be read, grepped, or reviewed.
+
+            ${{ steps.purged.outputs.note }}
 
             ${{ inputs.prompt }}
 
@@ -554,6 +623,19 @@ jobs:
             printf '%s\n' "$CLEAN"
             echo "${DELIM}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Classify Gemini failure
+        id: failclass
+        if: ${{ always() && !cancelled() && steps.gemini.outcome == 'failure' }}
+        env:
+          GEMINI_ERR: ${{ steps.gemini.outputs.error }}
+        run: |
+          set -euo pipefail
+          kind=other
+          if [[ "${GEMINI_ERR}" == *FatalTurnLimitedError* ]]; then
+            kind=turn_limit
+          fi
+          echo "kind=${kind}" >> "${GITHUB_OUTPUT}"
 
   # Post-feedback: minimal job that posts the Gemini review as a PR review.
   #
@@ -622,22 +704,27 @@ jobs:
 
       # Failure parity: if the agent job failed (API timeout, model error, or the
       # sanitize step rejecting the CLI's error envelope — LAB-4839), post a fixed
-      # notice instead of failing silently. Hardcoded body — no untrusted input.
+      # notice instead of failing silently. Hardcoded bodies — no untrusted input.
+      # ENG-6428: turn-limit exhaustion is deterministic on PR size; do not advise retry.
       - name: Post failure notice
         if: ${{ needs.gemini-review.result == 'failure' }}
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          FAILURE_KIND: ${{ needs.gemini-review.outputs.failure_kind }}
         with:
           script: |
+            const turnLimit = process.env.FAILURE_KIND === 'turn_limit';
+            const lines = [
+              '## Gemini Review',
+              '',
+              turnLimit
+                ? `⚠️ Gemini review did not complete — session turn limit reached (FatalTurnLimitedError). See the [run logs](${process.env.RUN_URL}). Retrying the same PR will hit the same cap; split the PR or wait for a turn-cap change.`
+                : `⚠️ Gemini review did not complete — the review job failed. See the [run logs](${process.env.RUN_URL}).\nPush a new commit or comment \`@gemini\` on a review comment to re-trigger.`,
+            ];
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: [
-                '## Gemini Review',
-                '',
-                `⚠️ Gemini review did not complete — the review job failed. See the [run logs](${process.env.RUN_URL}).`,
-                'Push a new commit or comment `@gemini` on a review comment to re-trigger.',
-              ].join('\n'),
+              body: lines.join('\n'),
             });

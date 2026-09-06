@@ -11,12 +11,14 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
+      - 'test/gemini-cli-pin.test.sh'
   push:
     branches: [main]
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
+      - 'test/gemini-cli-pin.test.sh'
 
 permissions:
   contents: read
@@ -44,6 +46,9 @@ jobs:
 
       - name: Unit-test fetch-review-graph (ENG-5658)
         run: bash test/fetch-review-graph.test.sh
+
+      - name: Unit-test Gemini CLI pin and turn cap (ENG-7656 / ENG-6428)
+        run: bash test/gemini-cli-pin.test.sh
 
       - name: Install zizmor
         env:
