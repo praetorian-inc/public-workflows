@@ -316,6 +316,7 @@ jobs:
             echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
           else
             echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
+            rm -rf graphify-out
           fi
 
       - name: Build review context (PR diff + changed files)

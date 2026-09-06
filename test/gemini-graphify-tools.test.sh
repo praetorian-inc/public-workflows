@@ -75,6 +75,20 @@ else
   bad "pinned graphifyy install" "no graphifyy== pin"
 fi
 
+# Install-failure path must drop the restored graph so the prompt cannot
+# send the agent at a missing binary (ENG-7654 / CodeRabbit).
+if awk '
+  /Install graphify CLI \(pinned, fail-open\)/ { in_step=1 }
+  in_step && /name: Build review context/ { exit }
+  in_step && /graphify CLI install failed/ { saw_warn=1 }
+  in_step && saw_warn && /rm -rf graphify-out/ { found=1 }
+  END { exit(found ? 0 : 1) }
+' "$WF"; then
+  ok "install-failure removes graphify-out"
+else
+  bad "install-failure removes graphify-out" "else branch has warning but no rm -rf graphify-out"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 if [ "$FAIL" -ne 0 ]; then
