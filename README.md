@@ -357,7 +357,8 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 **Security posture** follows `codex-code.yml`'s two-job defense-in-depth split:
 
 - **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and **no step in it uses a GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The PR diff is computed fully offline (the depth-2 merge-ref checkout brings the diff's parents locally), so the agent runs with zero credentials.
-- **Read-only tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `grep_search`, `list_directory`) plus `activate_skill`; shell/write/edit/web tools are excluded. Names must match the pinned `gemini_cli_version` (`0.58.0`; `grep_search` is still `GREP_TOOL_NAME` at that tag). A User-tier Policy Engine deny (`~/.gemini/policies/ci-review-deny.toml`) hides those tools from the model under `--yolo` (workspace policies are disabled in gemini-cli).
+- **Tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `grep_search`, `list_directory`) plus `activate_skill` and prefix-restricted shell for graphify only (`run_shell_command(graphify query|explain|path)`). Bare `run_shell_command` is a wildcard and is not listed. Write/edit/web stay excluded. `grep_search` stays — a PR reviewer still needs it for hunks. Names must match the pinned `gemini_cli_version` (`0.58.0`; `grep_search` is still `GREP_TOOL_NAME` at that tag). A User-tier Policy Engine deny (`~/.gemini/policies/ci-review-deny.toml`) hides write/web from the model under `--yolo` (workspace policies are disabled in gemini-cli); it does **not** deny `run_shell_command` so the graphify prefixes remain.
+- **Graphify (ENG-7654)**: fail-open fetch of the caller's `graphify-graph.yml` artifact (same `fetch-review-graph` action as Claude/Codex). A missing graph still reviews via read/grep. Callers must grant `actions: read` so the fetch job can download the artifact.
 - **Untrusted-workspace purge**: because the agent runs against the PR's merged tree with workspace trust enabled, the staging step removes every agent-control file a PR could plant before staging the curated set — `.gemini`/`.agents` (skill + settings discovery; `.agents/skills` would otherwise take precedence), all `GEMINI.md` (recursive), `.geminiignore` (review-blinding), and `.npmrc`/`.yarnrc*` (CLI-install supply-chain). Skills + settings come only from the action input and the SHA-pinned `palatine` checkout.
 - **Secret redaction**: the `GEMINI_API_KEY` (the only secret in the read-only job) is stripped from the captured review output before it leaves that job — so a prompt-injection that coerces the agent into reading its own environment can't surface the key in the posted comment.
 - **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
@@ -390,6 +391,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read  # ENG-7654: fetch-graph downloads this repo's graphify artifact
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 ```
@@ -402,7 +404,7 @@ jobs:
 | `model` | `gemini-3.8-flash` | Gemini model ID |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
-| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443, pypi.org:443, files.pythonhosted.org:443` |
 | `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts, e.g. agentsmesh mirrors); generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment. Threat model: on same-repo `pull_request` runs the caller workflow — including this input — executes from the PR merge ref and is therefore PR-author-modifiable, the standing property of all `pull_request`-triggered CI (an author could equally delete or neuter the caller); guard the caller's `.github/workflows/**` with CODEOWNERS if that matters, and note the skip notice leaves an on-PR audit trail. |
 | `force_review_regex` | `""` | Extra force-review pattern passed to preflight. |
 

@@ -56,12 +56,13 @@ else
   bad "policy-engine deny file" "no ci-review-deny.toml"
 fi
 
-if grep -F -q 'decision = "deny"' "$WF" \
-  && grep -F -q 'run_shell_command' "$WF" \
-  && grep -F -q 'write_file' "$WF"; then
-  ok "deny policy lists write/shell"
+DENY="$(awk '/ci-review-deny.toml/,/^[[:space:]]*EOF$/' "$WF")"
+if printf '%s\n' "$DENY" | grep -F -q 'decision = "deny"' \
+  && printf '%s\n' "$DENY" | grep -F -q 'write_file' \
+  && ! printf '%s\n' "$DENY" | grep -F -q 'run_shell_command'; then
+  ok "deny policy lists write/web not shell"
 else
-  bad "deny policy lists write/shell" "deny body incomplete"
+  bad "deny policy lists write/web not shell" "deny=$DENY"
 fi
 
 if grep -F -q 'id: purged' "$WF"; then
