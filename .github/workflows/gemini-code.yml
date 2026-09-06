@@ -338,7 +338,7 @@ jobs:
           fi
           if [ -s .gemini-review/purged-paths.txt ]; then
             {
-              echo "PURGED: These changed paths were removed from disk (PR-supplied agent config). Review them only via .gemini-review/pr.diff hunks. Do not read_file or grep_search them:"
+              echo "PURGED: These changed paths are not on disk (purged agent config or deleted in the PR). Review them only via .gemini-review/pr.diff hunks. Do not read_file or grep_search them:"
               cat .gemini-review/purged-paths.txt
             } > "${RUNNER_TEMP}/purged-note.txt"
           else
@@ -626,13 +626,15 @@ jobs:
 
       - name: Classify Gemini failure
         id: failclass
-        if: ${{ always() && !cancelled() && steps.gemini.outcome == 'failure' }}
+        if: ${{ always() && !cancelled() && (steps.gemini.outcome == 'failure' || steps.sanitize.outcome == 'failure') }}
         env:
           GEMINI_ERR: ${{ steps.gemini.outputs.error }}
+          GEMINI_SUM: ${{ steps.gemini.outputs.summary }}
         run: |
           set -euo pipefail
           kind=other
-          if [[ "${GEMINI_ERR}" == *FatalTurnLimitedError* ]]; then
+          blob="${GEMINI_ERR}${GEMINI_SUM}"
+          if [[ "${blob}" == *FatalTurnLimitedError* ]]; then
             kind=turn_limit
           fi
           echo "kind=${kind}" >> "${GITHUB_OUTPUT}"
@@ -719,7 +721,7 @@ jobs:
               '## Gemini Review',
               '',
               turnLimit
-                ? `⚠️ Gemini review did not complete — session turn limit reached (FatalTurnLimitedError). See the [run logs](${process.env.RUN_URL}). Retrying the same PR will hit the same cap; split the PR or wait for a turn-cap change.`
+                ? `⚠️ Gemini review did not complete — session turn limit reached (FatalTurnLimitedError). See the [run logs](${process.env.RUN_URL}). Retrying the same PR is likely unhelpful; split the PR or wait for a turn-cap change.`
                 : `⚠️ Gemini review did not complete — the review job failed. See the [run logs](${process.env.RUN_URL}).\nPush a new commit or comment \`@gemini\` on a review comment to re-trigger.`,
             ];
             await github.rest.issues.createComment({
