@@ -105,7 +105,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443 (last two: pinned ripgrep download for grep_search)."
+        description: "Newline-separated allowed egress endpoints when harden-runner-policy=block. Ignored in audit mode. Recommended for block mode: generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443, pypi.org:443, files.pythonhosted.org:443 (ripgrep assets + pipx graphifyy)."
         required: false
         type: string
         default: ""
