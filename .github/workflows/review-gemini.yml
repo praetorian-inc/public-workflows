@@ -20,5 +20,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read  # ENG-7654: fetch-graph downloads this repo's graphify artifact
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

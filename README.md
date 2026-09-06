@@ -357,7 +357,8 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 **Security posture** follows `codex-code.yml`'s two-job defense-in-depth split:
 
 - **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and **no step in it uses a GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The PR diff is computed fully offline (the depth-2 merge-ref checkout brings the diff's parents locally), so the agent runs with zero credentials.
-- **Read-only tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `grep_search`, `list_directory`) plus `activate_skill`; shell/write/edit/web tools are excluded. The names must match the pinned `gemini_cli_version` (gemini-cli renamed the grep tool `search_file_content` → `grep_search` at ~v0.44).
+- **Tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `grep_search`, `list_directory`) plus `activate_skill` and prefix-restricted shell for graphify only (`run_shell_command(graphify query|explain|path)`). Bare `run_shell_command` is a wildcard and is not listed. Write/edit/web stay excluded. `grep_search` stays — a PR reviewer still needs it for hunks. Tool names must match the pinned `gemini_cli_version` (gemini-cli renamed the grep tool `search_file_content` → `grep_search` at ~v0.44).
+- **Graphify (ENG-7654)**: fail-open fetch of the caller's `graphify-graph.yml` artifact (same `fetch-review-graph` action as Claude/Codex). A missing graph still reviews via read/grep. Callers must grant `actions: read` so the fetch job can download the artifact.
 - **Untrusted-workspace purge**: because the agent runs against the PR's merged tree with workspace trust enabled, the staging step removes every agent-control file a PR could plant before staging the curated set — `.gemini`/`.agents` (skill + settings discovery; `.agents/skills` would otherwise take precedence), all `GEMINI.md` (recursive), `.geminiignore` (review-blinding), and `.npmrc`/`.yarnrc*` (CLI-install supply-chain). Skills + settings come only from the action input and the SHA-pinned `palatine` checkout.
 - **Secret redaction**: the `GEMINI_API_KEY` (the only secret in the read-only job) is stripped from the captured review output before it leaves that job — so a prompt-injection that coerces the agent into reading its own environment can't surface the key in the posted comment.
 - **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
@@ -390,6 +391,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read  # ENG-7654: fetch-graph downloads this repo's graphify artifact
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 ```
