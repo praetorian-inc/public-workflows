@@ -11,6 +11,7 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
+      - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
   push:
     branches: [main]
@@ -18,6 +19,7 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
+      - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
 
 permissions:
@@ -46,6 +48,9 @@ jobs:
 
       - name: Unit-test fetch-review-graph (ENG-5658)
         run: bash test/fetch-review-graph.test.sh
+
+      - name: Unit-test Gemini CLI pin and turn cap (ENG-7656 / ENG-6428)
+        run: bash test/gemini-cli-pin.test.sh
 
       - name: Unit-test Gemini graphify tool allowlist (ENG-7654)
         run: bash test/gemini-graphify-tools.test.sh
