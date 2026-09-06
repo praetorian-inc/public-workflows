@@ -399,7 +399,7 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `prompt` | Built-in 3-section review template | Custom review prompt (the PR diff is materialized to `.gemini-review/pr.diff` for the agent to read) |
-| `model` | `gemini-3.1-pro-preview` | Gemini model ID |
+| `model` | `gemini-3.8-flash` | Gemini model ID |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443` |
