@@ -317,9 +317,28 @@ jobs:
           cache: false
 
       - name: Install gosec
+        shell: bash
         env:
           GOSEC_VERSION: ${{ inputs.gosec-version }}
-        run: go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"
+        # This workflow sets cache: false on setup-go above, so every run
+        # re-resolves and checksum-verifies the tool's full module graph through
+        # proxy/sum.golang.org. A dropped connection there used to fail this
+        # step, skip the Run step, and report a red security gate for a scan
+        # that never ran. Retries cover INSTALLATION ONLY -- a finding from
+        # the Run step below is never retried and never masked.
+        run: |
+          for attempt in 1 2 3; do
+            if go install "github.com/securego/gosec/v2/cmd/gosec@${GOSEC_VERSION}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::gosec install attempt ${attempt} of 3 failed; retrying in ${delay}s"
+              sleep "${delay}"
+            fi
+          done
+          echo "::error::gosec install failed after 3 attempts; see the go install error above for the version and cause"
+          exit 1
 
       - name: Run gosec
         working-directory: ${{ inputs.working-directory }}
@@ -409,9 +428,28 @@ jobs:
           cache: false
 
       - name: Install govulncheck
+        shell: bash
         env:
           GOVULNCHECK_VERSION: ${{ inputs.govulncheck-version }}
-        run: go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+        # This workflow sets cache: false on setup-go above, so every run
+        # re-resolves and checksum-verifies the tool's full module graph through
+        # proxy/sum.golang.org. A dropped connection there used to fail this
+        # step, skip the Run step, and report a red security gate for a scan
+        # that never ran. Retries cover INSTALLATION ONLY -- a finding from
+        # the Run step below is never retried and never masked.
+        run: |
+          for attempt in 1 2 3; do
+            if go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              delay=$((attempt * 10))
+              echo "::warning::govulncheck install attempt ${attempt} of 3 failed; retrying in ${delay}s"
+              sleep "${delay}"
+            fi
+          done
+          echo "::error::govulncheck install failed after 3 attempts; see the go install error above for the version and cause"
+          exit 1
 
       # SARIF mode runs only when the result will actually be uploaded (public
       # repo, or private repo that opted in via force-upload-private). Otherwise
