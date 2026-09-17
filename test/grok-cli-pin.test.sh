@@ -32,10 +32,28 @@ else
   bad "zst sha256 pin present" "GROK_ZST_SHA256 missing or drifted"
 fi
 
-if grep -F -q 'curl -fsSL https://x.ai/cli/install.sh' "$WF" || grep -F -q 'install.sh | bash' "$WF"; then
-  bad "no curl|bash installer" "unpinned installer present"
+if grep -F -q 'grok-${GROK_VERSION}-linux-x86_64.zst' "$WF"; then
+  ok "download URL interpolates GROK_VERSION"
 else
-  ok "no curl|bash installer"
+  bad "download URL interpolates GROK_VERSION" "URL does not use \${GROK_VERSION}"
+fi
+
+if grep -F -q '${GROK_ZST_SHA256}  ${TMP}/grok.zst' "$WF" && grep -F -q 'sha256sum -c -' "$WF"; then
+  ok "zst hash is checked with sha256sum -c"
+else
+  bad "zst hash is checked with sha256sum -c" "zst checksum invocation missing"
+fi
+
+if grep -F -q '${GROK_SHA256}  ${TMP}/grok' "$WF"; then
+  ok "uncompressed hash is checked with sha256sum -c"
+else
+  bad "uncompressed hash is checked with sha256sum -c" "binary checksum invocation missing"
+fi
+
+if grep -E -q 'curl[[:space:]].*\|[[:space:]]*(bash|sh)|wget[[:space:]].*\|[[:space:]]*(bash|sh)|install\.sh' "$WF"; then
+  bad "no installer piped to a shell" "unpinned installer pipeline present"
+else
+  ok "no installer piped to a shell"
 fi
 
 if grep -F -q 'default: "grok-4.6"' "$WF"; then
@@ -62,6 +80,12 @@ else
   bad "turn cap 80" "cap missing"
 fi
 
+if grep -F -q 'MAX_TURNS: ${{ steps.turns.outputs.n }}' "$WF" && grep -F -q -- '--max-turns "$MAX_TURNS"' "$WF"; then
+  ok "turns output reaches --max-turns"
+else
+  bad "turns output reaches --max-turns" "MAX_TURNS / --max-turns not wired"
+fi
+
 if grep -F -q -- '--no-auto-update' "$WF"; then
   ok "no-auto-update flag"
 else
@@ -74,10 +98,16 @@ else
   bad "permission-mode dontAsk" "missing"
 fi
 
-if grep -F -q -- '--sandbox strict' "$WF"; then
-  ok "sandbox strict"
+if grep -F -q -- '--sandbox off' "$WF"; then
+  ok "sandbox off (GHA+Harden-Runner compatible)"
 else
-  bad "sandbox strict" "missing"
+  bad "sandbox off (GHA+Harden-Runner compatible)" "missing --sandbox off"
+fi
+
+if grep -F -q -- '--sandbox strict' "$WF"; then
+  bad "no sandbox strict" "strict fails on GHA Linux (podman.sock)"
+else
+  ok "no sandbox strict"
 fi
 
 echo

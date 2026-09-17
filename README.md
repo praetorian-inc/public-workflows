@@ -424,7 +424,8 @@ Runs Grok 4.6 as a complementary PR reviewer alongside Claude, Codex, and Gemini
 **Security posture** follows `gemini-code.yml`'s two-job defense-in-depth split:
 
 - **Tokenless read-only agent**: The `grok-review` job is `contents: read` only and holds no GitHub token. A prompt-injected agent has no credential to exfiltrate and no path to write to the PR.
-- **Tool surface**: `--permission-mode dontAsk` (deny-by-default, read-only built-ins preserved) + `--sandbox strict` + `--deny Write` / `Edit` / `WebFetch` / `WebSearch` and credential-path `Read()` rules. Prefix `--allow Bash(graphify query|explain|path:*)` only — there is **no** global `--deny Bash` because deny wins over allow. `--no-auto-update`. `--no-subagents`. `--disable-web-search`.
+- **Tool surface**: `--permission-mode dontAsk` + `--deny Write` / `Edit` / `Bash` / `WebFetch` / `WebSearch` and credential-path `Read()` rules. deny wins over allow, so there is **no** `--allow Bash(...)` — graphify CLI is unavailable; Read/Grep cover the tree. `--no-auto-update`. `--no-subagents`. `--disable-web-search`.
+- **`--sandbox off`**: `--sandbox strict` fails on GitHub-hosted Ubuntu with Harden-Runner (`podman.sock` unreadable). Isolation is Harden-Runner + tool-layer denies.
 - **Pinned binary**: version + sha256 of the decompressed linux-x86_64 artifact from `https://x.ai/cli/grok-<ver>-linux-x86_64.zst`. Never `curl | bash`.
 - **Graphify (ENG-8335 / ENG-5658 / ENG-7654)**: fail-open fetch of the caller's `graphify-graph.yml` artifact (same `fetch-review-graph` script as Claude/Codex/Gemini). A missing graph still reviews via Read/Grep. Callers must grant `actions: read`.
 - **Untrusted-workspace purge**: `.agents` / `.grok` / `AGENTS.md` / `AGENTS.override.md` are removed from the PR tree before staging curated skills.

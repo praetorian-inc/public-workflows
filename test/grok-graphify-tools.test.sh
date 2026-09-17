@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Contract checks for the Grok reviewer graphify allowlist (ENG-8335).
+# Contract checks for the Grok reviewer tool surface (ENG-8335).
 # Greps grok-code.yml — no network, no grok CLI.
 #
 set -uo pipefail
@@ -20,19 +20,17 @@ fi
 
 echo "grok-graphify-tools.test.sh"
 
-for prefix in "graphify query" "graphify explain" "graphify path"; do
-  needle="--allow 'Bash(${prefix}:*)'"
-  if grep -F -q -- "$needle" "$WF"; then
-    ok "allows $needle"
-  else
-    bad "allows $needle" "missing from $WF"
-  fi
-done
+allows="$(grep -E '^[[:space:]]*--allow ' "$WF" || true)"
+if [ -n "$allows" ]; then
+  bad "no --allow rules" "found: $allows"
+else
+  ok "no --allow rules"
+fi
 
 if grep -E -q '^[[:space:]]*--deny Bash([[:space:]]|\\|$)' "$WF"; then
-  bad "no global --deny Bash" "global Bash deny would win over graphify --allow"
+  ok "global --deny Bash"
 else
-  ok "no global --deny Bash"
+  bad "global --deny Bash" "missing command-line --deny Bash"
 fi
 
 if grep -q '^  fetch-graph:' "$WF"; then
@@ -69,6 +67,12 @@ if grep -F -q -- '--deny Write' "$WF" && grep -F -q -- '--deny Edit' "$WF"; then
   ok "denies Write and Edit"
 else
   bad "denies Write and Edit" "missing write-side deny"
+fi
+
+if grep -F -q -- '-iname '\''.claude'\''' "$WF" && grep -F -q 'CLAUDE.md' "$WF" && grep -F -q '.mcp.json' "$WF"; then
+  ok "purge covers Claude compat + mcp.json"
+else
+  bad "purge covers Claude compat + mcp.json" "CLAUDE.md / .claude / .mcp.json missing from purge"
 fi
 
 echo
