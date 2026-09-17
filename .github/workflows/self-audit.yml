@@ -13,6 +13,8 @@ on:
       - 'test/fetch-review-graph.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
+      - 'test/grok-cli-pin.test.sh'
+      - 'test/grok-graphify-tools.test.sh'
   push:
     branches: [main]
     paths:
@@ -21,6 +23,8 @@ on:
       - 'test/fetch-review-graph.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
+      - 'test/grok-cli-pin.test.sh'
+      - 'test/grok-graphify-tools.test.sh'
 
 permissions:
   contents: read
@@ -54,6 +58,12 @@ jobs:
 
       - name: Unit-test Gemini graphify tool allowlist (ENG-7654)
         run: bash test/gemini-graphify-tools.test.sh
+
+      - name: Unit-test Grok CLI pin and turn cap (ENG-8335)
+        run: bash test/grok-cli-pin.test.sh
+
+      - name: Unit-test Grok graphify tool allowlist (ENG-8335)
+        run: bash test/grok-graphify-tools.test.sh
 
       - name: Install zizmor
         env:

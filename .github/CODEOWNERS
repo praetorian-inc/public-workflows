@@ -42,3 +42,8 @@
 # no write capabilities. Any change to the review script, trigger gates, or security
 # posture requires Security Engineering review.
 /.github/workflows/gemini-code.yml          @nsportsman
+
+# Grok-code.yml reviews PR content through the Grok Build CLI with a hardcoded
+# deny/allow tool surface, pinned binary, and two-job split. Same threat model
+# as Claude/Codex/Gemini. Any change requires Security Engineering review.
+/.github/workflows/grok-code.yml            @nsportsman
