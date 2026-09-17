@@ -288,7 +288,7 @@ Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusabl
 - `--append-system-prompt` defensive preamble: Claude is instructed to treat all PR content (title, body, diffs, file contents, CLAUDE.md, comments) as untrusted data, never read secrets/env, and stop + report on injection attempts.
 - **StepSecurity Harden-Runner** installed as the first step of both jobs (preflight + claude-code-action). Parameterized via `enable-harden-runner` / `harden-runner-policy` / `harden-runner-allowed-endpoints` inputs — audit mode by default. Matches the pattern in `go-ci.yml` / `go-sec.yml`.
 - `actions/checkout` pinned by SHA, `persist-credentials: false`, `fetch-depth: 2` against the PR merge ref (`HEAD^1` = immutable base), so the review diff is pre-computed offline with `review_exclude_pathspecs` applied.
-- `anthropics/claude-code-action` pinned by SHA (`@e34df878...` = v1.0.135).
+- `anthropics/claude-code-action` pinned by SHA (`@3b8197d...` = v1.0.227, Claude Code 2.1.274).
 - **Wall-clock ceiling**: `timeout-minutes: 5` on preflight, `15` on the claude-code-action job. `--max-turns` (the `max_turns` input, default 30) caps tool-call turns but not wall time; these ceilings bound a wedged network call, a stuck Opus response, or a prompt-injection-induced loop before it can sit on a runner for GitHub's 6-hour default.
 - **CODEOWNERS** (`.github/CODEOWNERS`) enforces `@praetorian-inc/security-engineering` review on this file.
 

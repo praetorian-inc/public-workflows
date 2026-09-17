@@ -399,7 +399,7 @@ jobs:
         # model, and any other failure is re-raised by the "Fail on unrecovered
         # review failure" step — so this does not soften real errors.
         continue-on-error: true
-        uses: anthropics/claude-code-action@e34df8781c2370c1c9d3b83ae47286a7ae2d1ea6  # v1.0.135
+        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e  # v1.0.227
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -564,7 +564,7 @@ jobs:
       - name: Run Claude PR Action (refusal retry)
         id: claude-review-retry
         if: steps.refusal-check.outputs.refused == 'true'
-        uses: anthropics/claude-code-action@e34df8781c2370c1c9d3b83ae47286a7ae2d1ea6  # v1.0.135
+        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e  # v1.0.227
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
