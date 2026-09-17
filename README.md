@@ -417,6 +417,72 @@ jobs:
 - `pull_request` with `action == 'opened'` or `'ready_for_review'` — auto-reviews once on PR open
 - `pull_request_review_comment` with body containing `@gemini` — re-review on demand
 
+### `grok-code.yml` — Grok PR Assistant (hardened)
+
+Runs Grok 4.6 as a complementary PR reviewer alongside Claude, Codex, and Gemini, via the pinned Grok Build CLI (`grok` 1.0.34, linux-x86_64, sha256-verified `.zst`). Headless: `--prompt-file` + `--output-format json`. It loads Praetorian's curated review skills from [`praetorian-inc/palatine`](https://github.com/praetorian-inc/palatine) (`.agents/skills/`, pinned by SHA) when the caller supplies the palatine App creds.
+
+**Security posture** follows `gemini-code.yml`'s two-job defense-in-depth split:
+
+- **Tokenless read-only agent**: The `grok-review` job is `contents: read` only and holds no GitHub token. A prompt-injected agent has no credential to exfiltrate and no path to write to the PR.
+- **Tool surface**: `--permission-mode dontAsk` + `--deny Write` / `Edit` / `Bash` / `WebFetch` / `WebSearch` and credential-path `Read()` rules. deny wins over allow, so there is **no** `--allow Bash(...)` — graphify CLI is unavailable; Read/Grep cover the tree. `--no-auto-update`. `--no-subagents`. `--disable-web-search`.
+- **`--sandbox off`**: `--sandbox strict` fails on GitHub-hosted Ubuntu with Harden-Runner (`podman.sock` unreadable). Isolation is Harden-Runner + tool-layer denies.
+- **Pinned binary**: version + sha256 of the decompressed linux-x86_64 artifact from `https://x.ai/cli/grok-<ver>-linux-x86_64.zst`. Never `curl | bash`.
+- **Graphify (ENG-8335 / ENG-5658 / ENG-7654)**: fail-open fetch of the caller's `graphify-graph.yml` artifact (same `fetch-review-graph` script as Claude/Codex/Gemini). A missing graph still reviews via Read/Grep. Callers must grant `actions: read`.
+- **Untrusted-workspace purge**: `.agents` / `.grok` / `AGENTS.md` / `AGENTS.override.md` are removed from the PR tree before staging curated skills.
+- **Secret redaction**: `XAI_API_KEY` is stripped from the captured review text before it leaves the read-only job.
+- **Separate post-feedback job**: hardcoded `event: 'COMMENT'` — no APPROVE path.
+- **Same-repo-only gate**: Fork PRs blocked. `@grok` on a PR review comment re-triggers.
+- **Turn cap**: size-aware (floor 50, +3 per changed file, cap 80). Job `timeout-minutes: 15`.
+- **CODEOWNERS**: security-engineering review required on any change.
+
+**Minimal caller** (drop this in `.github/workflows/grok-code.yml` of a consumer repo):
+
+```yaml
+name: Grok PR Assistant
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+
+concurrency:
+  group: grok-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  grok-review:
+    uses: praetorian-inc/public-workflows/.github/workflows/grok-code.yml@<SHA>
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read  # ENG-8335: fetch-graph downloads this repo's graphify artifact
+    secrets:
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+```
+
+**Inputs** (all optional):
+
+| Input | Default | Purpose |
+|---|---|---|
+| `prompt` | Built-in 3-section review template | Custom review prompt (the PR diff is materialized to `.grok-review/pr.diff`) |
+| `model` | `grok-4.6` | Grok model ID |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `api.x.ai:443, x.ai:443, storage.googleapis.com:443, api.github.com:443, github.com:443, objects.githubusercontent.com:443, pypi.org:443, files.pythonhosted.org:443` |
+| `review_exclude_pathspecs` | `""` | Newline-separated git pathspecs excluded from the reviewed diff (generated artifacts only) |
+| `force_review_regex` | `""` | Extra force-review pattern passed to preflight |
+
+**Secrets:**
+
+- `XAI_API_KEY` — required. xAI API key from console.x.ai (org-level secret recommended).
+- `PALATINE_SKILLS_APP_ID` / `PALATINE_SKILLS_PRIVATE_KEY` — optional; load curated review skills.
+
+**Triggers:**
+
+- `pull_request` with `action == 'opened'` or `'ready_for_review'` — auto-reviews once on PR open
+- `pull_request_review_comment` with body containing `@grok` — re-review on demand
+
 ### `codex-code.yml` — Codex PR Review (hardened)
 
 Runs OpenAI Codex as a complementary **second-vendor** PR reviewer alongside the Claude PR Assistant, via [`openai/codex-action`](https://github.com/openai/codex-action) running the Codex CLI in a read-only sandbox. **All security posture is hardcoded** — callers cannot widen the attack surface; any change requires `@praetorian-inc/security-engineering` review (CODEOWNERS).
