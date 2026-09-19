@@ -1,0 +1,73 @@
+name: "Test: cli-surface-drift.yml"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/cli-surface-drift.yml"
+      - ".github/workflows/test-cli-surface-drift.yml"
+      - "test/cli-surface-drift.test.sh"
+      - "README.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cli-surface-drift.yml"
+      - ".github/workflows/test-cli-surface-drift.yml"
+      - "test/cli-surface-drift.test.sh"
+      - "README.md"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Contract checks + actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "v1.7.7"
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Lint workflow
+        run: actionlint
+
+      # The expansion-equivalence checks compare the reusable workflow's
+      # gate steps against the brutus copy it replaces (public repo, so
+      # contents: read on this job token is sufficient). Fetch just the
+      # workflow file. If the reference repo ever goes private, a same-org
+      # job token is NOT guaranteed cross-repo read access — switch to a
+      # PAT/App token or a committed fixture.
+      - name: Fetch brutus reference copy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eo pipefail
+          gh api "repos/praetorian-inc/brutus/contents/.github/workflows/cli-surface.yml" \
+            --jq '.content' | base64 -d > /tmp/brutus-cli-surface-ref.yml
+          grep -qF 'TestCLISurface' /tmp/brutus-cli-surface-ref.yml
+
+      - name: Run contract checks
+        env:
+          BRUTUS_FIXTURE: /tmp/brutus-cli-surface-ref.yml
+        run: bash test/cli-surface-drift.test.sh

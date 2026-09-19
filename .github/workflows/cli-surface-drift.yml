@@ -1,0 +1,111 @@
+name: "CLI Surface Drift Gate (Callable)"
+# Fails when a capability repo's committed documentation drifts from its
+# enumerated tool surface (cobra tree, probe registry, generator registry).
+#
+# Generalized from the per-repo copies in brutus / nerva / titus
+# (ENG-8402). The caller keeps its own surface enumerator tests in-repo and
+# passes the test command plus the expected test names; this workflow runs
+# the gate and fail-closed asserts every expected test actually executed, so
+# a silent no-op gate (wrong -run pattern, renamed test) still fails CI.
+#
+# Access: invocable from any repo in the praetorian-inc org.
+#
+# Caller template (brutus; other repos swap the test command and enumerator
+# path comments):
+#
+#   name: CLI Surface Drift
+#   on:
+#     # No `branches:` filter: `on.pull_request.branches` matches the BASE, so
+#     # `branches: [main]` would skip stacked PRs.
+#     pull_request:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#   concurrency:
+#     group: ${{ github.workflow }}-${{ github.ref }}
+#     cancel-in-progress: true
+#   permissions:
+#     contents: read
+#   jobs:
+#     cli-surface:
+#       uses: praetorian-inc/public-workflows/.github/workflows/cli-surface-drift.yml@<SHA>  # v2.x.y
+#       permissions:
+#         contents: read
+#       with:
+#         gate-test-cmd: "go test ./cmd/brutus -run 'TestCLISurface' -count=1 -v"
+#         expected-tests: "TestCLISurface,TestCLISurfaceDocLint,TestCLISurfaceGateDetectsRename"
+#         doc-paths: "docs README.md"
+#         go-test-cmd-prefix: "GOWORK=off "
+#         timeout-minutes: 15
+
+on:
+  workflow_call:
+    inputs:
+      gate-test-cmd:
+        description: "The gate test command to run (must be verbose: -v). E.g. \"go test ./cmd/brutus -run 'TestCLISurface' -count=1 -v\""
+        required: true
+        type: string
+      expected-tests:
+        description: "Comma-separated test names that must appear as '--- PASS:' in the gate log. A missing name fails the gate: a silent no-op gate must still fail CI."
+        required: true
+        type: string
+      doc-paths:
+        description: "Space-separated file/dir arguments to `find` for the committed documentation the gate must not rewrite (snapshot before/after)."
+        required: true
+        type: string
+      go-test-cmd-prefix:
+        description: "Optional prefix on the gate test command (e.g. 'GOWORK=off ' when the repo needs workspace mode off). Must end with a space when set."
+        required: false
+        type: string
+        default: ""
+      timeout-minutes:
+        description: "Job timeout in minutes."
+        required: false
+        type: number
+        default: 15
+
+jobs:
+  cli-surface:
+    name: CLI Surface Drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Snapshot the committed documentation
+        run: |
+          set -eo pipefail
+          find ${{ inputs.doc-paths }} -type f -exec sha256sum {} + \
+            | LC_ALL=C sort > "$RUNNER_TEMP/docs.before"
+          echo "baselined $(wc -l < "$RUNNER_TEMP/docs.before") file(s)"
+
+      - name: Check surface and documentation for drift
+        run: |
+          set -eo pipefail
+          ${{ inputs.go-test-cmd-prefix }}${{ inputs.gate-test-cmd }} \
+            | tee "$RUNNER_TEMP/gate.log"
+          IFS=',' read -ra EXPECTED <<< "${{ inputs.expected-tests }}"
+          for name in "${EXPECTED[@]}"; do
+            if ! grep -qE "^--- PASS: ${name} " "$RUNNER_TEMP/gate.log"; then
+              echo "::error::${name} did not run. The drift gate is not executing; check the -run pattern in 'gate-test-cmd' against the test names in the repo's cli_surface_test.go."
+              exit 1
+            fi
+          done
+
+      - name: Verify the gate did not rewrite the goldens
+        run: |
+          set -eo pipefail
+          find ${{ inputs.doc-paths }} -type f -exec sha256sum {} + \
+            | LC_ALL=C sort > "$RUNNER_TEMP/docs.after"
+          if ! diff -u "$RUNNER_TEMP/docs.before" "$RUNNER_TEMP/docs.after"; then
+            echo "::error::The drift gate wrote to the committed documentation; the diff above names every file added, removed or changed. Check mode must compare without writing, so this is a defect in the gate itself -- the repo's cli_surface_test.go, or a clisurface write reached outside the -update branch. Regenerating with 'make cli-docs' will not fix it."
+            exit 1
+          fi
