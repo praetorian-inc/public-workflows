@@ -106,6 +106,7 @@ jobs:
           # enumerator is whatever test command it owns); only data travels
           # through env so template expansion cannot inject shell syntax
           # outside the command string itself. zizmor: ignore[template-injection]
+          # shellcheck disable=SC2086  # word-splitting IS the command contract
           ${GATE_TEST_CMD_PREFIX}${GATE_TEST_CMD} \
             | tee "$RUNNER_TEMP/gate.log"
           IFS=',' read -ra EXPECTED <<< "$EXPECTED_TESTS"

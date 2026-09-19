@@ -50,7 +50,10 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Lint workflow
-        run: actionlint
+        # -S warning matches self-audit.yml's severity bar: this repo's other
+        # test-* jobs gate at warning+; a bare `actionlint` here would fail on
+        # pre-existing info-level SC2086/SC2016 nits in untouched workflows.
+        run: actionlint -color -shellcheck="-S warning"
 
       # The expansion-equivalence checks compare the reusable workflow's
       # gate steps against the brutus copy it replaces, pinned to the
