@@ -90,7 +90,7 @@ jobs:
           DOCS_PATHS: ${{ inputs.doc-paths }}
         run: |
           set -eo pipefail
-          # shellcheck disable=SC2086 -- multi-path find contract, see input docs
+          # shellcheck disable=SC2086  # multi-path find contract, see input docs
           find $DOCS_PATHS -type f -exec sha256sum {} + \
             | LC_ALL=C sort > "$RUNNER_TEMP/docs.before"
           echo "baselined $(wc -l < "$RUNNER_TEMP/docs.before") file(s)"
@@ -123,7 +123,7 @@ jobs:
           DOCS_PATHS: ${{ inputs.doc-paths }}
         run: |
           set -eo pipefail
-          # shellcheck disable=SC2086 -- multi-path find contract, see input docs
+          # shellcheck disable=SC2086  # multi-path find contract, see input docs
           find $DOCS_PATHS -type f -exec sha256sum {} + \
             | LC_ALL=C sort > "$RUNNER_TEMP/docs.after"
           if ! diff -u "$RUNNER_TEMP/docs.before" "$RUNNER_TEMP/docs.after"; then
