@@ -55,10 +55,18 @@ else
 fi
 
 # --- fail-closed test-name assertions (the brutus model) ---
-if grep -F -q '"^--- PASS: ${name} "' "$WF"; then
-  ok "fail-closed grep anchors on ^--- PASS:"
+# Fixed-string match ('grep -qF --'), so a caller test name containing regex
+# metacharacters cannot self-satisfy the check; expected-tests travels by env.
+if grep -F -q 'grep -qF -- "--- PASS: ${name} "' "$WF"; then
+  ok "fail-closed grep is fixed-string with -- terminator"
 else
-  bad "fail-closed grep anchors on ^--- PASS:" "missing the exact PASS-marker grep"
+  bad "fail-closed grep is fixed-string with -- terminator" "missing the literal PASS-marker grep"
+fi
+
+if grep -F -q 'EXPECTED_TESTS: ${{ inputs.expected-tests }}' "$WF"; then
+  ok "expected-tests passes through env, not template expansion"
+else
+  bad "expected-tests passes through env, not template expansion" "template-injection surface"
 fi
 
 if grep -F -q 'exit 1' "$WF" && grep -F -q '::error::' "$WF"; then

@@ -53,17 +53,18 @@ jobs:
         run: actionlint
 
       # The expansion-equivalence checks compare the reusable workflow's
-      # gate steps against the brutus copy it replaces (public repo, so
-      # contents: read on this job token is sufficient). Fetch just the
-      # workflow file. If the reference repo ever goes private, a same-org
-      # job token is NOT guaranteed cross-repo read access — switch to a
-      # PAT/App token or a committed fixture.
+      # gate steps against the brutus copy it replaces, pinned to the
+      # revision that copy was last touched at (public repo, so contents:
+      # read on this job token is sufficient; a private same-org repo would
+      # NOT be guaranteed readable by the job token — PAT/App token or a
+      # committed fixture in that case).
       - name: Fetch brutus reference copy
         env:
           GH_TOKEN: ${{ github.token }}
+          BRUTUS_REF: "63502268b2bbf7e8d9707ac4f10a810938b7af52"
         run: |
           set -eo pipefail
-          gh api "repos/praetorian-inc/brutus/contents/.github/workflows/cli-surface.yml" \
+          gh api "repos/praetorian-inc/brutus/contents/.github/workflows/cli-surface.yml?ref=${BRUTUS_REF}" \
             --jq '.content' | base64 -d > /tmp/brutus-cli-surface-ref.yml
           grep -qF 'TestCLISurface' /tmp/brutus-cli-surface-ref.yml
 

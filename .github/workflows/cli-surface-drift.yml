@@ -64,11 +64,16 @@ on:
         type: number
         default: 15
 
+permissions:
+  contents: read
+
 jobs:
   cli-surface:
     name: CLI Surface Drift
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -81,29 +86,45 @@ jobs:
           go-version-file: go.mod
 
       - name: Snapshot the committed documentation
+        env:
+          DOCS_PATHS: ${{ inputs.doc-paths }}
         run: |
           set -eo pipefail
-          find ${{ inputs.doc-paths }} -type f -exec sha256sum {} + \
+          # shellcheck disable=SC2086 -- multi-path find contract, see input docs
+          find $DOCS_PATHS -type f -exec sha256sum {} + \
             | LC_ALL=C sort > "$RUNNER_TEMP/docs.before"
           echo "baselined $(wc -l < "$RUNNER_TEMP/docs.before") file(s)"
 
       - name: Check surface and documentation for drift
+        env:
+          GATE_TEST_CMD: ${{ inputs.gate-test-cmd }}
+          GATE_TEST_CMD_PREFIX: ${{ inputs.go-test-cmd-prefix }}
+          EXPECTED_TESTS: ${{ inputs.expected-tests }}
         run: |
           set -eo pipefail
-          ${{ inputs.go-test-cmd-prefix }}${{ inputs.gate-test-cmd }} \
+          # The raw-command inputs are the documented contract (a repo's
+          # enumerator is whatever test command it owns); only data travels
+          # through env so template expansion cannot inject shell syntax
+          # outside the command string itself. zizmor: ignore[template-injection]
+          ${GATE_TEST_CMD_PREFIX}${GATE_TEST_CMD} \
             | tee "$RUNNER_TEMP/gate.log"
-          IFS=',' read -ra EXPECTED <<< "${{ inputs.expected-tests }}"
+          IFS=',' read -ra EXPECTED <<< "$EXPECTED_TESTS"
           for name in "${EXPECTED[@]}"; do
-            if ! grep -qE "^--- PASS: ${name} " "$RUNNER_TEMP/gate.log"; then
+            # Fixed-string match with -- : a caller name is a test name, not
+            # a pattern — 'TestSurface.*' must not self-satisfy the check.
+            if ! grep -qF -- "--- PASS: ${name} " "$RUNNER_TEMP/gate.log"; then
               echo "::error::${name} did not run. The drift gate is not executing; check the -run pattern in 'gate-test-cmd' against the test names in the repo's cli_surface_test.go."
               exit 1
             fi
           done
 
       - name: Verify the gate did not rewrite the goldens
+        env:
+          DOCS_PATHS: ${{ inputs.doc-paths }}
         run: |
           set -eo pipefail
-          find ${{ inputs.doc-paths }} -type f -exec sha256sum {} + \
+          # shellcheck disable=SC2086 -- multi-path find contract, see input docs
+          find $DOCS_PATHS -type f -exec sha256sum {} + \
             | LC_ALL=C sort > "$RUNNER_TEMP/docs.after"
           if ! diff -u "$RUNNER_TEMP/docs.before" "$RUNNER_TEMP/docs.after"; then
             echo "::error::The drift gate wrote to the committed documentation; the diff above names every file added, removed or changed. Check mode must compare without writing, so this is a defect in the gate itself -- the repo's cli_surface_test.go, or a clisurface write reached outside the -update branch. Regenerating with 'make cli-docs' will not fix it."
