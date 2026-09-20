@@ -90,6 +90,10 @@ jobs:
           DOCS_PATHS: ${{ inputs.doc-paths }}
         run: |
           set -eo pipefail
+          if ! printf '%s' "$DOCS_PATHS" | grep -q '[^[:space:]]'; then
+            echo "::error::doc-paths is empty; refusing to snapshot the whole workspace (GNU find would scan .)."
+            exit 1
+          fi
           # shellcheck disable=SC2086  # multi-path find contract, see input docs
           find $DOCS_PATHS -type f -exec sha256sum {} + \
             | LC_ALL=C sort > "$RUNNER_TEMP/docs.before"
@@ -108,9 +112,12 @@ jobs:
           if [ -n "$GOWORK_INPUT" ]; then
             export GOWORK="$GOWORK_INPUT"
           fi
+          # noglob: argv-split must not pathname-expand a -run regexp (Test.*)
+          set -f
           # shellcheck disable=SC2086  # word-splitting IS the command contract
           ${GATE_TEST_CMD} \
             | tee "$RUNNER_TEMP/gate.log"
+          set +f
           IFS=',' read -ra EXPECTED <<< "$EXPECTED_TESTS"
           for name in "${EXPECTED[@]}"; do
             # Fixed-string match with -- : a caller name is a test name, not
@@ -126,6 +133,10 @@ jobs:
           DOCS_PATHS: ${{ inputs.doc-paths }}
         run: |
           set -eo pipefail
+          if ! printf '%s' "$DOCS_PATHS" | grep -q '[^[:space:]]'; then
+            echo "::error::doc-paths is empty; refusing to snapshot the whole workspace (GNU find would scan .)."
+            exit 1
+          fi
           # shellcheck disable=SC2086  # multi-path find contract, see input docs
           find $DOCS_PATHS -type f -exec sha256sum {} + \
             | LC_ALL=C sort > "$RUNNER_TEMP/docs.after"

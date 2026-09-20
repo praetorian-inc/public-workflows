@@ -39,9 +39,10 @@ bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; FAIL=$((FAIL + 1
 
 echo "cli-surface-drift.test.sh"
 
-# --- workflow_call inputs ---
+# --- workflow_call inputs (scoped to on.workflow_call.inputs, not job keys) ---
+INPUTS_BLOCK="$(sed -n '/^    inputs:/,/^permissions:/p' "$WF")"
 for input in gate-test-cmd expected-tests doc-paths gowork timeout-minutes; do
-  if grep -qE "^ +${input}:" "$WF"; then
+  if printf '%s\n' "$INPUTS_BLOCK" | grep -qE "^ +${input}:"; then
     ok "workflow_call input: ${input}"
   else
     bad "workflow_call input: ${input}" "no ${input}: under on.workflow_call.inputs"
@@ -75,10 +76,23 @@ else
   ok "no go-test-cmd-prefix (gowork env input instead)"
 fi
 
-if grep -F -q 'export GOWORK="$GOWORK_INPUT"' "$WF"; then
+if sed -n '/if \[ -n "\$GOWORK_INPUT" \]; then/,/^[[:space:]]*fi[[:space:]]*$/p' "$WF" \
+  | grep -F -q 'export GOWORK="$GOWORK_INPUT"'; then
   ok "gowork exported only when non-empty"
 else
-  bad "gowork exported only when non-empty" "missing conditional export GOWORK"
+  bad "gowork exported only when non-empty" "export GOWORK not inside the non-empty guard"
+fi
+
+if grep -F -q 'set -f' "$WF"; then
+  ok "noglob before argv-split gate command"
+else
+  bad "noglob before argv-split gate command" "unquoted expansion would pathname-expand Test.*"
+fi
+
+if grep -F -q 'doc-paths is empty' "$WF"; then
+  ok "empty doc-paths fails closed"
+else
+  bad "empty doc-paths fails closed" "GNU find would snapshot ."
 fi
 
 if grep -F -q 'exit 1' "$WF" && grep -F -q '::error::' "$WF"; then
