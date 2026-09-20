@@ -41,7 +41,7 @@ echo "cli-surface-drift.test.sh"
 
 # --- workflow_call inputs (scoped to on.workflow_call.inputs, not job keys) ---
 INPUTS_BLOCK="$(sed -n '/^    inputs:/,/^permissions:/p' "$WF")"
-for input in gate-test-cmd expected-tests doc-paths gowork timeout-minutes; do
+for input in gate-test-cmd expected-tests doc-paths gowork go-version-file go-version timeout-minutes; do
   if printf '%s\n' "$INPUTS_BLOCK" | grep -qE "^ +${input}:"; then
     ok "workflow_call input: ${input}"
   else
@@ -53,6 +53,13 @@ if grep -F -q 'on:' "$WF" && grep -F -q 'workflow_call:' "$WF"; then
   ok "workflow_call trigger present"
 else
   bad "workflow_call trigger present" "reusable workflows need on.workflow_call"
+fi
+
+if grep -F -q 'inputs.go-version-file' "$WF" \
+  && grep -F -q 'go-version: ${{ inputs.go-version }}' "$WF"; then
+  ok "setup-go version comes from go-version / go-version-file inputs"
+else
+  bad "setup-go version comes from go-version / go-version-file inputs" "hardcoded go.mod blocks go.work / nested-module callers"
 fi
 
 # --- fail-closed test-name assertions (the brutus model) ---

@@ -512,6 +512,8 @@ Nerva (workspace mode off) also passes `gowork: "off"`.
 | `expected-tests` | — (required) | Comma-separated test names that must each appear as `--- PASS:`; a missing name is a gate failure |
 | `doc-paths` | — (required) | Space-separated `find` arguments for the committed documentation the gate must not rewrite |
 | `gowork` | `""` | If non-empty, exported as `GOWORK` for the gate test (e.g. `off` for nerva). Empty leaves `GOWORK` unset |
+| `go-version-file` | `go.mod` | Path to `go.mod` (nested module OK). Ignored when `go-version` is set. For a `go.work` repo with no root `go.mod`, point this at a member module |
+| `go-version` | `""` | Explicit Go version (e.g. `1.24.0`). When set, takes precedence over `go-version-file` |
 | `timeout-minutes` | `15` | Job timeout |
 
 **Notes:** the caller preserves its own `concurrency` group and `permissions` model — this workflow only requires `contents: read`. No `paths:` filter on `on:` (docs-only PRs skip the repo's ci.yml; the drift gate is exactly what docs-only PRs must not skip). No `branches:` filter on `pull_request` — `on.pull_request.branches` matches the BASE, so `branches: [main]` would skip stacked PRs.
