@@ -40,7 +40,7 @@ bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; FAIL=$((FAIL + 1
 echo "cli-surface-drift.test.sh"
 
 # --- workflow_call inputs ---
-for input in gate-test-cmd expected-tests doc-paths go-test-cmd-prefix timeout-minutes; do
+for input in gate-test-cmd expected-tests doc-paths gowork timeout-minutes; do
   if grep -qE "^ +${input}:" "$WF"; then
     ok "workflow_call input: ${input}"
   else
@@ -67,6 +67,18 @@ if grep -F -q 'EXPECTED_TESTS: ${{ inputs.expected-tests }}' "$WF"; then
   ok "expected-tests passes through env, not template expansion"
 else
   bad "expected-tests passes through env, not template expansion" "template-injection surface"
+fi
+
+if grep -F -q 'go-test-cmd-prefix' "$WF"; then
+  bad "no go-test-cmd-prefix" "prefix is not reparsed as KEY=VAL; use gowork input"
+else
+  ok "no go-test-cmd-prefix (gowork env input instead)"
+fi
+
+if grep -F -q 'export GOWORK="$GOWORK_INPUT"' "$WF"; then
+  ok "gowork exported only when non-empty"
+else
+  bad "gowork exported only when non-empty" "missing conditional export GOWORK"
 fi
 
 if grep -F -q 'exit 1' "$WF" && grep -F -q '::error::' "$WF"; then

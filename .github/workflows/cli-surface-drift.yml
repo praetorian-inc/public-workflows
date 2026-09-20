@@ -32,17 +32,17 @@ name: "CLI Surface Drift Gate (Callable)"
 #       permissions:
 #         contents: read
 #       with:
-#         gate-test-cmd: "go test ./cmd/brutus -run 'TestCLISurface' -count=1 -v"
+#         gate-test-cmd: "go test ./cmd/brutus -run TestCLISurface -count=1 -v"
 #         expected-tests: "TestCLISurface,TestCLISurfaceDocLint,TestCLISurfaceGateDetectsRename"
 #         doc-paths: "docs README.md"
-#         go-test-cmd-prefix: "GOWORK=off "
+#         gowork: "off"
 #         timeout-minutes: 15
 
 on:
   workflow_call:
     inputs:
       gate-test-cmd:
-        description: "The gate test command to run (must be verbose: -v). E.g. \"go test ./cmd/brutus -run 'TestCLISurface' -count=1 -v\""
+        description: "The gate test command to run (must be verbose: -v). IFS-split argv, not a shell string: no quotes, no KEY=VAL prefixes. E.g. \"go test ./cmd/brutus -run TestCLISurface -count=1 -v\""
         required: true
         type: string
       expected-tests:
@@ -53,8 +53,8 @@ on:
         description: "Space-separated file/dir arguments to `find` for the committed documentation the gate must not rewrite (snapshot before/after)."
         required: true
         type: string
-      go-test-cmd-prefix:
-        description: "Optional prefix on the gate test command (e.g. 'GOWORK=off ' when the repo needs workspace mode off). Must end with a space when set."
+      gowork:
+        description: "If non-empty, exported as GOWORK for the gate test (e.g. \"off\" for nerva). Empty leaves GOWORK unset so Go's default workspace lookup applies."
         required: false
         type: string
         default: ""
@@ -98,16 +98,18 @@ jobs:
       - name: Check surface and documentation for drift
         env:
           GATE_TEST_CMD: ${{ inputs.gate-test-cmd }}
-          GATE_TEST_CMD_PREFIX: ${{ inputs.go-test-cmd-prefix }}
           EXPECTED_TESTS: ${{ inputs.expected-tests }}
+          GOWORK_INPUT: ${{ inputs.gowork }}
         run: |
           set -eo pipefail
-          # The raw-command inputs are the documented contract (a repo's
-          # enumerator is whatever test command it owns); only data travels
-          # through env so template expansion cannot inject shell syntax
-          # outside the command string itself. zizmor: ignore[template-injection]
+          # Argv-split contract: GATE_TEST_CMD is IFS-split, not eval'd.
+          # Assignments (GOWORK=off) and quotes are not reparsed — pass
+          # GOWORK via gowork input, and write -run TestCLISurface with no quotes.
+          if [ -n "$GOWORK_INPUT" ]; then
+            export GOWORK="$GOWORK_INPUT"
+          fi
           # shellcheck disable=SC2086  # word-splitting IS the command contract
-          ${GATE_TEST_CMD_PREFIX}${GATE_TEST_CMD} \
+          ${GATE_TEST_CMD} \
             | tee "$RUNNER_TEMP/gate.log"
           IFS=',' read -ra EXPECTED <<< "$EXPECTED_TESTS"
           for name in "${EXPECTED[@]}"; do
