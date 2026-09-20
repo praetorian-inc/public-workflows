@@ -95,6 +95,13 @@ else
   bad "empty doc-paths fails closed" "GNU find would snapshot ."
 fi
 
+if grep -F -q 'expected-tests is empty' "$WF" \
+  && grep -F -q '"${#EXPECTED[@]}" -eq 0' "$WF"; then
+  ok "empty expected-tests fails closed"
+else
+  bad "empty expected-tests fails closed" "empty array would skip every PASS assertion"
+fi
+
 if grep -F -q 'exit 1' "$WF" && grep -F -q '::error::' "$WF"; then
   ok "missing test name fails the job with ::error::"
 else
