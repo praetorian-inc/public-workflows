@@ -1,0 +1,170 @@
+name: "CLI Surface Drift Gate (Callable)"
+# Fails when a capability repo's committed documentation drifts from its
+# enumerated tool surface (cobra tree, probe registry, generator registry).
+#
+# Generalized from the per-repo copies in brutus / nerva / titus
+# (ENG-8402). The caller keeps its own surface enumerator tests in-repo and
+# passes the test command plus the expected test names; this workflow runs
+# the gate and fail-closed asserts every expected test actually executed, so
+# a silent no-op gate (wrong -run pattern, renamed test) still fails CI.
+#
+# Access: invocable from any repo in the praetorian-inc org.
+#
+# Caller template (brutus; other repos swap the test command and enumerator
+# path comments):
+#
+#   name: CLI Surface Drift
+#   on:
+#     # No `branches:` filter: `on.pull_request.branches` matches the BASE, so
+#     # `branches: [main]` would skip stacked PRs.
+#     pull_request:
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#   concurrency:
+#     group: ${{ github.workflow }}-${{ github.ref }}
+#     cancel-in-progress: true
+#   permissions:
+#     contents: read
+#   jobs:
+#     cli-surface:
+#       uses: praetorian-inc/public-workflows/.github/workflows/cli-surface-drift.yml@<SHA>  # v2.x.y
+#       permissions:
+#         contents: read
+#       with:
+#         gate-test-cmd: "go test ./cmd/brutus -run TestCLISurface -count=1 -v"
+#         expected-tests: "TestCLISurface,TestCLISurfaceDocLint,TestCLISurfaceGateDetectsRename"
+#         doc-paths: "docs README.md"
+#         gowork: "off"
+#         go-version-file: go.mod
+#         timeout-minutes: 15
+
+on:
+  workflow_call:
+    inputs:
+      gate-test-cmd:
+        description: "The gate test command to run (must be verbose: -v). IFS-split argv, not a shell string: no quotes, no KEY=VAL prefixes. E.g. \"go test ./cmd/brutus -run TestCLISurface -count=1 -v\""
+        required: true
+        type: string
+      expected-tests:
+        description: "Comma-separated test names that must appear as '--- PASS:' in the gate log. Surrounding whitespace is trimmed. A missing or empty list fails the gate: a silent no-op gate must still fail CI."
+        required: true
+        type: string
+      doc-paths:
+        description: "Space-separated file/dir arguments to `find` for the committed documentation the gate must not rewrite (snapshot before/after)."
+        required: true
+        type: string
+      gowork:
+        description: "If non-empty, exported as GOWORK for the gate test (e.g. \"off\" for nerva). Empty leaves GOWORK unset so Go's default workspace lookup applies."
+        required: false
+        type: string
+        default: ""
+      go-version-file:
+        description: "Path to go.mod (or a nested module's go.mod) used as the Go version source. Ignored when go-version is set. For a go.work repo with no root go.mod, point this at a member module."
+        required: false
+        type: string
+        default: "go.mod"
+      go-version:
+        description: "Explicit Go version (e.g. \"1.24.0\"). When set, takes precedence over go-version-file."
+        required: false
+        type: string
+        default: ""
+      timeout-minutes:
+        description: "Job timeout in minutes."
+        required: false
+        type: number
+        default: 15
+
+permissions:
+  contents: read
+
+jobs:
+  cli-surface:
+    name: CLI Surface Drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: ${{ inputs.go-version == '' && inputs.go-version-file || '' }}
+          go-version: ${{ inputs.go-version }}
+
+      - name: Snapshot the committed documentation
+        env:
+          DOCS_PATHS: ${{ inputs.doc-paths }}
+        run: |
+          set -eo pipefail
+          if ! printf '%s' "$DOCS_PATHS" | grep -q '[^[:space:]]'; then
+            echo "::error::doc-paths is empty; refusing to snapshot the whole workspace (GNU find would scan .)."
+            exit 1
+          fi
+          # shellcheck disable=SC2086  # multi-path find contract, see input docs
+          find $DOCS_PATHS -type f -exec sha256sum {} + \
+            | LC_ALL=C sort > "$RUNNER_TEMP/docs.before"
+          echo "baselined $(wc -l < "$RUNNER_TEMP/docs.before") file(s)"
+
+      - name: Check surface and documentation for drift
+        env:
+          GATE_TEST_CMD: ${{ inputs.gate-test-cmd }}
+          EXPECTED_TESTS: ${{ inputs.expected-tests }}
+          GOWORK_INPUT: ${{ inputs.gowork }}
+        run: |
+          set -eo pipefail
+          # Argv-split contract: GATE_TEST_CMD is IFS-split, not eval'd.
+          # Assignments (GOWORK=off) and quotes are not reparsed — pass
+          # GOWORK via gowork input, and write -run TestCLISurface with no quotes.
+          if [ -n "$GOWORK_INPUT" ]; then
+            export GOWORK="$GOWORK_INPUT"
+          fi
+          # noglob: argv-split must not pathname-expand a -run regexp (Test.*)
+          set -f
+          # shellcheck disable=SC2086  # word-splitting IS the command contract
+          ${GATE_TEST_CMD} \
+            | tee "$RUNNER_TEMP/gate.log"
+          set +f
+          IFS=',' read -ra EXPECTED <<< "$EXPECTED_TESTS"
+          NAMES=()
+          for raw in "${EXPECTED[@]}"; do
+            name="${raw#"${raw%%[![:space:]]*}"}"
+            name="${name%"${name##*[![:space:]]}"}"
+            if [ -n "$name" ]; then
+              NAMES+=("$name")
+            fi
+          done
+          if [ "${#NAMES[@]}" -eq 0 ]; then
+            echo "::error::expected-tests is empty; a silent no-op gate must still fail CI."
+            exit 1
+          fi
+          for name in "${NAMES[@]}"; do
+            # Fixed-string match with -- : a caller name is a test name, not
+            # a pattern — 'TestSurface.*' must not self-satisfy the check.
+            if ! grep -qF -- "--- PASS: ${name} " "$RUNNER_TEMP/gate.log"; then
+              echo "::error::${name} did not run. The drift gate is not executing; check the -run pattern in 'gate-test-cmd' against the test names in the repo's cli_surface_test.go."
+              exit 1
+            fi
+          done
+
+      - name: Verify the gate did not rewrite the goldens
+        env:
+          DOCS_PATHS: ${{ inputs.doc-paths }}
+        run: |
+          set -eo pipefail
+          if ! printf '%s' "$DOCS_PATHS" | grep -q '[^[:space:]]'; then
+            echo "::error::doc-paths is empty; refusing to snapshot the whole workspace (GNU find would scan .)."
+            exit 1
+          fi
+          # shellcheck disable=SC2086  # multi-path find contract, see input docs
+          find $DOCS_PATHS -type f -exec sha256sum {} + \
+            | LC_ALL=C sort > "$RUNNER_TEMP/docs.after"
+          if ! diff -u "$RUNNER_TEMP/docs.before" "$RUNNER_TEMP/docs.after"; then
+            echo "::error::The drift gate wrote to the committed documentation; the diff above names every file added, removed or changed. Check mode must compare without writing, so this is a defect in the gate itself -- the repo's cli_surface_test.go, or a clisurface write reached outside the -update branch. Regenerating with 'make cli-docs' will not fix it."
+            exit 1
+          fi

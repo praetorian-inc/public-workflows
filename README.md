@@ -539,6 +539,51 @@ jobs:
 - `pull_request` with `action == 'opened'` or `'ready_for_review'` on a same-repo PR — reviews once per PR
 - `pull_request_review_comment` with body containing `@codex` — re-review on demand
 
+### `cli-surface-drift.yml` — CLI/tool-surface drift gate (callable) (ENG-8402)
+
+Fails when a capability repo's committed documentation drifts from its enumerated tool surface. The consumer repo owns its surface enumerator tests in-repo (a Go test that derives the real surface from code — cobra tree, probe registry, generator registry — and fails when committed docs or `cli-surface.pin.json` disagree); this workflow runs the gate, fail-closed asserts every expected test name actually appeared as `--- PASS:` in the log (so a silent no-op gate — wrong `-run` pattern, renamed test — still fails CI), and verifies the gate compared without writing (docs snapshot before/after must be identical). Generalized from the per-repo copies in brutus / nerva / titus.
+
+**Minimal caller** (brutus; swap the test command, expected test names, and doc paths per repo):
+
+```yaml
+name: CLI Surface Drift
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  cli-surface:
+    uses: praetorian-inc/public-workflows/.github/workflows/cli-surface-drift.yml@<SHA>  # v2.x.y
+    permissions:
+      contents: read
+    with:
+      gate-test-cmd: "go test ./cmd/brutus -run TestCLISurface -count=1 -v"
+      expected-tests: "TestCLISurface,TestCLISurfaceDocLint,TestCLISurfaceGateDetectsRename"
+      doc-paths: "docs README.md"
+```
+
+Nerva (workspace mode off) also passes `gowork: "off"`.
+
+**Inputs:**
+
+| Input | Default | Purpose |
+|---|---|---|
+| `gate-test-cmd` | — (required) | The gate test command as IFS-split argv (no quotes, no `KEY=VAL` prefixes); must be verbose (`-v`) so the fail-closed test-name assertions can read the log |
+| `expected-tests` | — (required) | Comma-separated test names that must each appear as `--- PASS:`; a missing name is a gate failure |
+| `doc-paths` | — (required) | Space-separated `find` arguments for the committed documentation the gate must not rewrite |
+| `gowork` | `""` | If non-empty, exported as `GOWORK` for the gate test (e.g. `off` for nerva). Empty leaves `GOWORK` unset |
+| `go-version-file` | `go.mod` | Path to `go.mod` (nested module OK). Ignored when `go-version` is set. For a `go.work` repo with no root `go.mod`, point this at a member module |
+| `go-version` | `""` | Explicit Go version (e.g. `1.24.0`). When set, takes precedence over `go-version-file` |
+| `timeout-minutes` | `15` | Job timeout |
+
+**Notes:** the caller preserves its own `concurrency` group and `permissions` model — this workflow only requires `contents: read`. No `paths:` filter on `on:` (docs-only PRs skip the repo's ci.yml; the drift gate is exactly what docs-only PRs must not skip). No `branches:` filter on `pull_request` — `on.pull_request.branches` matches the BASE, so `branches: [main]` would skip stacked PRs.
+
 ### `agents-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
 Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped.
