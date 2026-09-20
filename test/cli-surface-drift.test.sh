@@ -96,10 +96,16 @@ else
 fi
 
 if grep -F -q 'expected-tests is empty' "$WF" \
-  && grep -F -q '"${#EXPECTED[@]}" -eq 0' "$WF"; then
+  && grep -F -q '"${#NAMES[@]}" -eq 0' "$WF"; then
   ok "empty expected-tests fails closed"
 else
   bad "empty expected-tests fails closed" "empty array would skip every PASS assertion"
+fi
+
+if grep -F -q '${raw#"${raw%%[![:space:]]*}"}' "$WF"; then
+  ok "expected-tests names are whitespace-trimmed"
+else
+  bad "expected-tests names are whitespace-trimmed" "comma-space lists would miss --- PASS: lines"
 fi
 
 if grep -F -q 'exit 1' "$WF" && grep -F -q '::error::' "$WF"; then
