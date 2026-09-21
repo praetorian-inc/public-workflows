@@ -569,11 +569,25 @@ jobs:
           # such mapping and package.json publishConfig.registry would otherwise
           # choose the target; --registry overrides that so the upload always honors
           # registry-url rather than silently redirecting to publishConfig.
+          #
+          # --ignore-scripts: symmetric with the `npm pack --ignore-scripts` gate
+          # above. Publishing a pre-packed tarball already skips the pack-time
+          # lifecycle (prepare/prepack/prepublishOnly), but `npm publish` still
+          # fires publish-time scripts (publish/postpublish, and the deprecated
+          # prepublish) from the package's package.json. Those run with a
+          # publish-capable NODE_AUTH_TOKEN in the environment and could mutate or
+          # intercept the already-built, already-attested artifact — defeating the
+          # "attested bytes == tested bytes == published bytes" guarantee. Re-running
+          # a lifecycle script at publish time is exactly what surfaced the
+          # prepublishOnly vitest bug (PR #42). The build/test/verify/pack gates run
+          # explicitly earlier, so no publish-time script is needed; disabling them
+          # keeps the guarantee and shrinks the attack surface for a compromised
+          # dependency. This applies to the dry run too, so both paths behave alike.
           if [ "$DRY_RUN" = "true" ]; then
             echo "DRY RUN — packing and validating only, nothing is uploaded."
-            npm publish "$TARBALL" --registry "$REGISTRY_URL" --dry-run
+            npm publish "$TARBALL" --registry "$REGISTRY_URL" --ignore-scripts --dry-run
           else
-            npm publish "$TARBALL" --registry "$REGISTRY_URL"
+            npm publish "$TARBALL" --registry "$REGISTRY_URL" --ignore-scripts
           fi
 
       - name: Revoke private dependency git config
