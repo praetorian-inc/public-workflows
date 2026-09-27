@@ -70,16 +70,16 @@ on:
         default: 30
 
       model:
-        description: "Claude model ID for the review run. Default claude-opus-4-8 keeps existing callers on Opus (the senior-engineer review model). Callers pinning a non-default primary (e.g. claude-fable-5) should also set fallback_model so overload/availability errors degrade to the fallback instead of failing the review."
+        description: "Claude model ID for the review run. Default claude-opus-5-5, for the automatic review and for an @claude re-review (each run is a new session). Omitting fallback_model inherits claude-opus-4-8 even when model is overridden; pass fallback_model: \"\" to opt out."
+        required: false
+        type: string
+        default: "claude-opus-5-5"
+
+      fallback_model:
+        description: "Comma-separated fallback chain (no spaces — `a, b` fails validation). Default claude-opus-4-8 applies when the input is omitted, including when model is overridden, so a cyber-guardrail refusal of the primary retries once on Opus 4.8. Pass \"\" to opt out. Elements equal to the primary are dropped before --fallback-model; Claude Code rejects a fallback that equals the main model. --fallback-model itself does not cover refusals (stop_reason refusal). This workflow detects that and re-runs once on the first remaining chain element. A refusal with an empty chain still fails the job."
         required: false
         type: string
         default: "claude-opus-4-8"
-
-      fallback_model:
-        description: "Optional comma-separated fallback model chain (no spaces — `a, b` fails validation) passed to Claude Code's `--fallback-model`, used when the primary model is overloaded, unavailable, or returns a non-retryable server error (e.g. claude-opus-4-8 for callers pinning claude-fable-5). Caveat: `--fallback-model` itself does not cover refusals — a safety-classifier decline is not an availability error (it returns stop_reason 'refusal' and ends the review turn without switching models). This workflow closes that gap: it detects a safety-classifier refusal of the primary model and re-runs the review once on the first element of this chain that has not already run/refused (the remaining elements after it become that retry's availability-fallback chain). A refusal with no fallback_model set still fails the job. Empty = no fallback flag."
-        required: false
-        type: string
-        default: ""
 
       review_exclude_pathspecs:
         description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
@@ -461,6 +461,7 @@ jobs:
       # ::error::) to avoid workflow-command injection via embedded newlines;
       # the offending value is printed separately, %q-escaped, as a plain log line.
       - name: Validate model inputs
+        id: model-inputs
         if: steps.context.outputs.empty_scope != 'true'
         env:
           MODEL: ${{ inputs.model }}
@@ -480,6 +481,26 @@ jobs:
             printf 'offending value: %q\n' "$FALLBACK_MODEL"
             exit 1
           fi
+          # Claude Code rejects --fallback-model when any element equals --model
+          # ("Fallback model cannot be the same as the main model"). Drop those
+          # elements here. The remainder is charset-validated IDs only, so it is
+          # safe to interpolate into claude_args. An all-equal chain emits no flag.
+          cli_fallback=""
+          dropped=false
+          if [[ -n "$FALLBACK_MODEL" ]]; then
+            IFS=',' read -r -a chain <<< "$FALLBACK_MODEL"
+            for candidate in "${chain[@]}"; do
+              if [[ "$candidate" == "$MODEL" ]]; then
+                dropped=true
+                continue
+              fi
+              cli_fallback="${cli_fallback:+$cli_fallback,}$candidate"
+            done
+          fi
+          if [[ "$dropped" == "true" ]]; then
+            echo "::notice::Dropped fallback-chain elements equal to the primary model so Claude Code does not reject --fallback-model."
+          fi
+          echo "cli_fallback=$cli_fallback" >> "$GITHUB_OUTPUT"
 
       - name: Purge PR-supplied skill dirs
         if: steps.context.outputs.empty_scope != 'true'
@@ -528,7 +549,7 @@ jobs:
         # model, and any other failure is re-raised by the "Fail on unrecovered
         # review failure" step — so this does not soften real errors.
         continue-on-error: true
-        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e  # v1.0.227
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790  # v1.0.235
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -548,14 +569,15 @@ jobs:
           # step; the rationale stays here). Callers cannot widen this — see
           # praetorian-inc/public-workflows CODEOWNERS: any change requires AppSec review.
           #
-          # Model: default claude-opus-4-8 is the senior-engineer review model. Since
+          # Model: default claude-opus-5-5, fallback claude-opus-4-8. Since
           # Claude runs once per PR (on open, not on every push — CodeRabbit and Codex
           # handle per-push coverage), the per-turn Opus cost is paid ~1x per PR and
           # we get the highest-capability reasoning for the security/bug/test-gap read.
-          # Callers may override via the `model` input; a non-default primary should be
-          # paired with `fallback_model` so an unavailable or guardrail-gated model
-          # degrades to the fallback chain instead of failing the review job. Both
-          # inputs are charset-validated above before interpolation into claude_args.
+          # Callers may override model. Omitting fallback_model inherits
+          # claude-opus-4-8 (pass "" to opt out) so a guardrail refusal still
+          # retries on Opus 4.8. The validate step drops chain elements equal to
+          # the primary before this flag is emitted. Both inputs are
+          # charset-validated above before interpolation into claude_args.
           #
           # Allow:
           #   - Bash(gh pr {comment,view}:*) — minimum gh surface for reading + posting
@@ -588,7 +610,7 @@ jobs:
           # "tag mode" which union-merges write tools into the allowlist. See
           # anthropics/claude-code-action#860.
           claude_args: |
-            --model ${{ inputs.model }}${{ inputs.fallback_model != '' && format(' --fallback-model {0}', inputs.fallback_model) || '' }}
+            --model ${{ inputs.model }}${{ steps.model-inputs.outputs.cli_fallback != '' && format(' --fallback-model {0}', steps.model-inputs.outputs.cli_fallback) || '' }}
             ${{ env.CLAUDE_HARDENED_ARGS }}
 
       # Adjudicate a failed primary review: distinguish a safety-classifier
@@ -696,7 +718,7 @@ jobs:
       - name: Run Claude PR Action (refusal retry)
         id: claude-review-retry
         if: steps.refusal-check.outputs.refused == 'true'
-        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e  # v1.0.227
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790  # v1.0.235
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
