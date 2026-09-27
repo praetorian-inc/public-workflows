@@ -70,16 +70,16 @@ on:
         default: 30
 
       model:
-        description: "Claude model ID for the review run. Default claude-opus-4-8 keeps existing callers on Opus (the senior-engineer review model). Callers pinning a non-default primary (e.g. claude-fable-5) should also set fallback_model so overload/availability errors degrade to the fallback instead of failing the review."
+        description: "Claude model ID for the review run. Default claude-opus-5-5. Callers pinning a non-default primary should also set fallback_model so overload/availability errors degrade to the fallback instead of failing the review."
+        required: false
+        type: string
+        default: "claude-opus-5-5"
+
+      fallback_model:
+        description: "Optional comma-separated fallback model chain (no spaces — `a, b` fails validation) passed to Claude Code's `--fallback-model`, used when the primary model is overloaded, unavailable, or returns a non-retryable server error. Caveat: `--fallback-model` itself does not cover refusals — a safety-classifier decline is not an availability error (it returns stop_reason 'refusal' and ends the review turn without switching models). This workflow closes that gap: it detects a safety-classifier refusal of the primary model and re-runs the review once on the first element of this chain that has not already run/refused (the remaining elements after it become that retry's availability-fallback chain). A refusal with an empty fallback_model still fails the job. Empty = no fallback flag."
         required: false
         type: string
         default: "claude-opus-4-8"
-
-      fallback_model:
-        description: "Optional comma-separated fallback model chain (no spaces — `a, b` fails validation) passed to Claude Code's `--fallback-model`, used when the primary model is overloaded, unavailable, or returns a non-retryable server error (e.g. claude-opus-4-8 for callers pinning claude-fable-5). Caveat: `--fallback-model` itself does not cover refusals — a safety-classifier decline is not an availability error (it returns stop_reason 'refusal' and ends the review turn without switching models). This workflow closes that gap: it detects a safety-classifier refusal of the primary model and re-runs the review once on the first element of this chain that has not already run/refused (the remaining elements after it become that retry's availability-fallback chain). A refusal with no fallback_model set still fails the job. Empty = no fallback flag."
-        required: false
-        type: string
-        default: ""
 
       review_exclude_pathspecs:
         description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
@@ -399,7 +399,7 @@ jobs:
         # model, and any other failure is re-raised by the "Fail on unrecovered
         # review failure" step — so this does not soften real errors.
         continue-on-error: true
-        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e  # v1.0.227
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790  # v1.0.235
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -416,7 +416,7 @@ jobs:
           # step; the rationale stays here). Callers cannot widen this — see
           # praetorian-inc/public-workflows CODEOWNERS: any change requires AppSec review.
           #
-          # Model: default claude-opus-4-8 is the senior-engineer review model. Since
+          # Model: default claude-opus-5-5, fallback claude-opus-4-8. Since
           # Claude runs once per PR (on open, not on every push — CodeRabbit and Codex
           # handle per-push coverage), the per-turn Opus cost is paid ~1x per PR and
           # we get the highest-capability reasoning for the security/bug/test-gap read.
@@ -564,7 +564,7 @@ jobs:
       - name: Run Claude PR Action (refusal retry)
         id: claude-review-retry
         if: steps.refusal-check.outputs.refused == 'true'
-        uses: anthropics/claude-code-action@3b8197d3d486006dd4af54613517f21ac6ac625e  # v1.0.227
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790  # v1.0.235
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
