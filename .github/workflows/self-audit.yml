@@ -11,6 +11,7 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
+      - 'test/stage-review-skills.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
@@ -21,6 +22,7 @@ on:
       - '.github/workflows/**'
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
+      - 'test/stage-review-skills.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
@@ -52,6 +54,9 @@ jobs:
 
       - name: Unit-test fetch-review-graph (ENG-5658)
         run: bash test/fetch-review-graph.test.sh
+
+      - name: Unit-test stage-review-skills (ENG-8614)
+        run: bash test/stage-review-skills.test.sh
 
       - name: Unit-test Gemini CLI pin and turn cap (ENG-7656 / ENG-6428)
         run: bash test/gemini-cli-pin.test.sh

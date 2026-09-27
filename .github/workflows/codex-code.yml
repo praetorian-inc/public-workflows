@@ -83,7 +83,7 @@ on:
         description: "OpenAI API key for Codex (pay-per-token billing)"
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/palatine. OPTIONAL: when set (trusted internal callers), the curated review skills are loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
+        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL: when set (trusted internal callers), that repo's skill allowlist is loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
         description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
@@ -220,7 +220,7 @@ jobs:
       final_message: ${{ steps.run_codex.outputs.final-message }}
       empty_scope: ${{ steps.context.outputs.empty_scope }}
 
-    # Mapped from the secret so the optional palatine-token step can be gated in `if:`
+    # Mapped from the secret so the optional review-bot-skills token step can be gated in `if:`
     # (a step `if:` cannot read `secrets.*` directly).
     env:
       PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
@@ -299,6 +299,7 @@ jobs:
             echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
           else
             echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
+            rm -rf graphify-out
           fi
 
       - name: Verify merge-ref parents are present
@@ -368,8 +369,8 @@ jobs:
           # makes the on-disk neutralization guarantee hold regardless of exec trust posture.
           # A same-repo PR could plant any of these to
           # steer the review, so purge them from the PR tree BEFORE the trusted
-          # palatine checkout — the curated set is then never in scope of this sweep,
-          # and the only surviving agent config is palatine + this workflow's prompt.
+          # review-bot-skills checkout — the curated set is then never in scope of this sweep,
+          # and the only surviving agent config is that allowlist + this workflow's prompt.
           # RECURSIVE, not root-only: Codex re-derives discovery context if its cwd moves
           # into a subdirectory mid-run, so a nested .agents could otherwise re-enter scope.
           # find flags:
@@ -386,50 +387,79 @@ jobs:
             -prune -exec rm -rf {} +
 
       # Curated review skills, auto-discovered by the Codex CLI from `.agents/skills`
-      # in the CWD (implicit, task-matched invocation — developers.openai.com/codex/skills).
-      # praetorian-inc/palatine is the canonical source-of-truth repo and is INTERNAL,
-      # so reading it requires a token. We mint a short-lived GitHub App token scoped to
-      # palatine ONLY when the caller supplies the App credentials — i.e. on trusted
-      # internal callers. On public repos / fork PRs no such secret is available, so the
-      # mint + checkout + stage below are skipped and the review runs without curated
-      # skills (fail-closed: internal skills are never pulled into a public run's logs).
-      # The purge step above ALWAYS runs, so PR-supplied agent config is neutralized
-      # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
-      - name: Mint palatine read token
+      # in the CWD (explicit $id invocation only — each staged skill gets
+      # agents/openai.yaml allow_implicit_invocation: false).
+      # praetorian-inc/review-bot-skills is the allowlist repo and is INTERNAL. Gate, with
+      # no token: the caller supplied the App credentials AND the event payload says this
+      # repo is exactly `private` or `internal`. A public repo, a fork PR (no secrets), or
+      # a payload with no visibility stages nothing (fail-closed: internal skills never
+      # enter a public run's logs). The purge step above ALWAYS runs first, so the sweep
+      # never touches this trusted tree and PR-supplied agent config is neutralized
+      # either way. The shared stage script is the only stager: any failure leaves
+      # .agents/skills absent and staged=false. Pinned to a commit SHA — callers cannot
+      # point this elsewhere.
+      # The PR merge ref sits at the workspace root, so a PR could plant its own
+      # _pw/.github/actions/stage-review-skills/stage-review-skills.sh. Clear it
+      # before the trusted checkout; the stage step also requires that checkout
+      # to have succeeded, so a planted script can never run.
+      - name: Clear _pw before the stage-script checkout
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        run: rm -rf _pw
+
+      - name: Checkout stage script (same SHA as this reusable)
+        id: checkout-pw
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _pw
+          persist-credentials: false
+
+      # Token: contents:read on review-bot-skills only, the same content staged on
+      # disk. Passed only to the stage script, never to the agent's env. Skills
+      # are staged only after that script confirms the revoke (one retry); if
+      # the revoke fails twice the review runs without skills and this action's
+      # post-job revoke is the backstop. On the normal path that post-job
+      # revoke logs a benign "Token revocation failed" warning.
+      - name: Mint review-bot-skills read token
         id: skills-token
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
+        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
           private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
           owner: praetorian-inc
-          repositories: palatine
-          # Pin the token to the one permission its only consumer (the read-only
-          # checkout below) needs, so widening the App installation's grant cannot
-          # widen this token. metadata:read is omitted — GitHub adds that baseline.
+          repositories: review-bot-skills
           permission-contents: read
 
-      # Staged AFTER the purge so the sweep above never touches this trusted tree.
-      - name: Load curated review skills (palatine)
-        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          repository: praetorian-inc/palatine
-          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
-          path: .pr-skills
-          fetch-depth: 1
-          token: ${{ steps.skills-token.outputs.token }}
-          persist-credentials: false
-
+      # Fail-open, always exits 0. The agent step keys only on outputs.staged.
+      # _pw is removed afterwards so the reviewer never sees this repo's tree.
       - name: Stage curated skills
-        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
+        id: stage-skills
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
+        env:
+          SKILLS_TOKEN: ${{ steps.skills-token.outputs.token }}
+          SKILLS_REPO: praetorian-inc/review-bot-skills
+          SKILLS_REF: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
+          SKILLS_HARNESS: codex
+          DEST: .agents/skills
         run: |
-          set -euo pipefail
-          mkdir -p .agents/skills
-          cp -R .pr-skills/.agents/skills/. .agents/skills/
-          rm -rf .pr-skills
-          echo "Staged review skills:"
-          ls -1 .agents/skills
+          script=_pw/.github/actions/stage-review-skills/stage-review-skills.sh
+          if [ -f "$script" ]; then
+            bash "$script"
+          else
+            echo "::warning::stage script checkout failed; reviewing without curated skills"
+            echo "staged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Its own step so a partial checkout is removed even when checkout-pw
+      # failed and the stage step was skipped.
+      - name: Remove stage-script checkout
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        run: rm -rf _pw
 
       # Replicate the container half of Harden-Runner's `disable-sudo-and-containers`
       # that we had to turn off so codex-action could use (and then drop) sudo.
@@ -494,9 +524,11 @@ jobs:
             If the PR adds or changes any such file, review it FROM THE DIFF — do not expect
             to open it from the filesystem; the on-disk copy is absent or replaced by design.
 
-            REVIEW SKILLS: Apply your available review skills — adversarial
-            perspective, evidence-based analysis, simplicity, DRY, YAGNI, cyclomatic
-            complexity — where relevant, and ground every finding in a specific file and line.
+            REVIEW SKILLS: Invoke each skill listed below by its $name before writing
+            findings. If the list is empty, no curated skills were staged; review without
+            them. A skill that does not apply is not a failure — say not-applicable for
+            that skill. Ground every finding in a specific file and line.
+            ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
 
             GRAPH: If graphify-out/graph.json exists, a CI-published code knowledge graph
             of the default branch is on disk (provenance: graphify-out/.graphify-provenance.json).
