@@ -230,7 +230,9 @@ jobs:
           permission-contents: read
 
       - name: Load review-bot skills
+        id: load-skills
         if: steps.skills-token.outputs.token != ''
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: praetorian-inc/review-bot-skills
@@ -242,7 +244,8 @@ jobs:
 
       - name: Pack staged skills
         id: pack
-        if: steps.skills-token.outputs.token != ''
+        if: steps.load-skills.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           mkdir -p staged/skills
@@ -548,6 +551,7 @@ jobs:
       - name: Stage curated skills
         id: stage-skills
         if: steps.context.outputs.empty_scope != 'true' && steps.skills-artifact.outcome == 'success'
+        continue-on-error: true
         run: |
           set -euo pipefail
           test -d .review-skills/skills
@@ -562,6 +566,10 @@ jobs:
           rm -rf .review-skills
           echo "Staged review skills:"
           ls -1 .claude/skills
+
+      - name: Drop skills if stage failed
+        if: steps.stage-skills.outcome == 'failure'
+        run: rm -rf .claude/skills .review-skills
 
       - name: Run Claude PR Action
         id: claude-review

@@ -348,9 +348,23 @@ jobs:
           echo "n=${t}" >> "${GITHUB_OUTPUT}"
           echo "Turn cap ${t} for ${n} changed file(s)"
 
+      - name: Resolve repository visibility
+        id: repo-vis
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          vis=$(gh api "repos/$REPO" --jq '.visibility' 2>/dev/null || echo "")
+          case "$vis" in
+            private|internal) echo "allow=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "allow=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Mint review-bot-skills read token
         id: skills-token
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && steps.repo-vis.outputs.allow == 'true' }}
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
