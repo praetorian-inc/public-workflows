@@ -361,7 +361,9 @@ jobs:
           permission-contents: read
 
       - name: Load review-bot skills
+        id: load-skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
+        continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: praetorian-inc/review-bot-skills
@@ -373,7 +375,8 @@ jobs:
 
       - name: Stage curated skills
         id: stage-skills
-        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.load-skills.outcome == 'success' }}
+        continue-on-error: true
         run: |
           set -euo pipefail
           dest=".agents/skills"
@@ -405,6 +408,10 @@ jobs:
           rm -f "$names_file"
           echo "Staged review skills:"
           ls -1 "$dest"
+
+      - name: Drop skills if load or stage failed
+        if: steps.load-skills.outcome == 'failure' || steps.stage-skills.outcome == 'failure'
+        run: rm -rf .agents/skills .pr-skills
 
       - name: Validate model input
         if: steps.context.outputs.empty_scope != 'true'
