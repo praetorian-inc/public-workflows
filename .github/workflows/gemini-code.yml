@@ -7,7 +7,7 @@ name: Gemini PR Assistant (Callable)
 # the previous single-shot google-genai API call. Like the Claude and Codex reviewers,
 # Gemini now runs a tool loop and can read past the diff — opening the surrounding code
 # (definitions, callers, sibling modules) for real context. It also loads Praetorian's
-# curated review skills natively from praetorian-inc/palatine (`.gemini/skills/`).
+# the review-bot-skills allowlist (root-level skill dirs, staged into `.gemini/skills/`).
 #
 # Security posture (hardcoded — callers cannot widen the attack surface):
 #   - Two-job split, mirroring codex-code.yml's defense-in-depth: the agent runs in a
@@ -210,7 +210,7 @@ jobs:
   #
   # The job has `contents: read` only — no PR write access. The only credential it
   # can hold is a short-lived GitHub App token, minted ONLY when a trusted caller
-  # supplies the palatine App creds, scoped to palatine read, and consumed solely by
+  # supplies the App creds, scoped to review-bot-skills read, and consumed solely by
   # the curated-skills checkout (persist-credentials: false, so it is never written to
   # .git/config). The Gemini agent step runs later and is never handed that token, and
   # the depth-2 merge-ref checkout brings the diff's parents locally so "Build review
@@ -256,7 +256,7 @@ jobs:
       empty_scope: ${{ steps.context.outputs.empty_scope }}
       failure_kind: ${{ steps.failclass.outputs.kind }}
 
-    # Mapped from the secret so the optional palatine-token step can be gated in `if:`
+    # Mapped from the secret so the optional review-bot-skills token step can be gated in `if:`
     # (a step `if:` cannot read `secrets.*` directly).
     env:
       PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
@@ -398,12 +398,12 @@ jobs:
       #   - .geminiignore (recursive): would silently blind glob/list_directory.
       #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this cwd; a
       #     PR-supplied registry override is a supply-chain vector.
-      # This runs BEFORE the palatine checkout (which lands in .pr-skills), so the sweep
+      # This runs BEFORE the review-bot-skills checkout (which lands in .pr-skills), so the sweep
       # is UNCONDITIONAL — there is NO .pr-skills carve-out. A PR shipping its own
       # .pr-skills/GEMINI.md is therefore purged too; and if the gated checkout is skipped
       # (no token: public repos / fork PRs) nothing trusted is staged and Gemini reviews
       # with no agent config at all — never the attacker's. Settings + skills then come
-      # ONLY from the action input and, when present, the SHA-pinned palatine checkout.
+      # ONLY from the action input and, when present, the SHA-pinned review-bot-skills checkout.
       # find flags:
       #   - no -type f, so a *symlinked* GEMINI.md/AGENTS.md is removed (not skipped);
       #     gemini-cli would otherwise resolve the link. -iname covers case variants.
@@ -473,10 +473,9 @@ jobs:
           echo "Turn cap ${t} for ${n} changed file(s)"
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
-      # praetorian-inc/palatine is the canonical-source-of-truth repo (agentmesh
-      # materializes one canonical skill set into each runtime's native dir) and is
-      # INTERNAL, so reading it requires a token. We mint a short-lived GitHub App token
-      # scoped to palatine ONLY when the caller supplies the App credentials — i.e. on
+      # praetorian-inc/review-bot-skills is the allowlist repo and is INTERNAL, so reading
+      # it requires a token. We mint a short-lived GitHub App token scoped to
+      # review-bot-skills ONLY when the caller supplies the App credentials — i.e. on
       # trusted internal callers. On public repos / fork PRs no such secret is available,
       # so the mint + checkout + stage are skipped and the review runs without curated
       # skills (fail-closed: internal skills are never pulled into a public run's logs).
@@ -507,7 +506,7 @@ jobs:
           token: ${{ steps.skills-token.outputs.token }}
           persist-credentials: false
 
-      # Stage the trusted curated tree after the SHA-pinned palatine checkout. Gated on
+      # Stage the trusted curated tree after the SHA-pinned review-bot-skills checkout. Gated on
       # the token: skipped when no curated skills were checked out (public repos / fork
       # PRs) — Gemini then reviews with no skills dir (PR-supplied config already purged
       # unconditionally by the step above).

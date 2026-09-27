@@ -6,7 +6,7 @@ name: Grok PR Assistant (Callable)
 # Design: AGENTIC review via the pinned Grok Build CLI (xAI grok 1.0.34), spawned
 # headless with --prompt-file / --output-format json. Like Claude, Codex, and Gemini,
 # Grok runs a tool loop (Read / Grep / Glob) and can read past the diff. It loads
-# Praetorian's curated review skills from praetorian-inc/palatine (`.agents/skills/`)
+# the review-bot-skills allowlist (root-level skill dirs, staged into `.agents/skills/`)
 # when the caller supplies the App creds.
 #
 # Security posture (hardcoded — callers cannot widen the attack surface):
