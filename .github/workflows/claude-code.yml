@@ -194,6 +194,8 @@ jobs:
   # would be exfiltratable. This job never posts.
   prepare-skills:
     needs: preflight
+    outputs:
+      packed: ${{ steps.publish.outputs.packed }}
     if: |
       always() &&
       !cancelled() &&
@@ -218,6 +220,7 @@ jobs:
       - name: Mint review-bot-skills read token
         id: skills-token
         if: env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true'
+        continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
@@ -263,8 +266,27 @@ jobs:
           fi
           echo "packed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Upload staged skills
+      - name: Decide whether to publish skills
+        id: publish
         if: steps.pack.outputs.packed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          vis=$(gh api "repos/$REPO" --jq '.visibility' 2>/dev/null || echo "")
+          case "$vis" in
+            private|internal)
+              echo "packed=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::warning::not publishing the skills artifact (visibility: ${vis:-unknown})"
+              echo "packed=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Upload staged skills
+        if: steps.publish.outputs.packed == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
         with:
           name: review-skills
@@ -516,7 +538,7 @@ jobs:
 
       - name: Download staged skills
         id: skills-artifact
-        if: steps.context.outputs.empty_scope != 'true' && needs.prepare-skills.result == 'success'
+        if: steps.context.outputs.empty_scope != 'true' && needs.prepare-skills.outputs.packed == 'true'
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
