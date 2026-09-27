@@ -52,6 +52,7 @@ name: Changelog Scan (Callable)
 #         anthropic_api_key:   ${{ secrets.ANTHROPIC_API_KEY }}
 #         featurebase_api_key: ${{ secrets.FEATUREBASE_API_KEY }}
 #         slack_bot_token:     ${{ secrets.SLACK_BOT_TOKEN }}
+#         typesafe_api_key:    ${{ secrets.FEATUREBASE_TYPESAFE_JEV_API_KEY }}  # optional: JEV decisions (fold-into-draft)
 
 on:
   workflow_call:
@@ -112,6 +113,10 @@ on:
         required: true
       slack_bot_token:
         required: true
+      typesafe_api_key:
+        # Optional: the Typesafe JEV key the bot's decision steps use (fold-into-draft). Absent =
+        # the bot skips those decisions and creates a new draft, exactly as before.
+        required: false
 
 permissions:
   contents: read
@@ -133,17 +138,18 @@ jobs:
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
           # Disable sudo and container spawning: this job runs caller-controlled npm ci + scripts
-          # with five high-value secrets, so close off the privilege-escalation paths a compromised
+          # with six high-value secrets, so close off the privilege-escalation paths a compromised
           # dependency could use to defeat the egress allowlist below.
           disable-sudo-and-containers: true
           # Block egress to everything except the hosts this job legitimately needs, so a
-          # compromised dependency (npm ci) or caller script cannot exfiltrate the five secrets to
+          # compromised dependency (npm ci) or caller script cannot exfiltrate the six secrets to
           # an arbitrary host. Grouped by purpose:
           #   github.com, codeload.github.com, objects.githubusercontent.com,
           #   release-assets.githubusercontent.com   (checkout, App-token mint, state push)
           #   api.github.com                          (gh api / App token)
           #   registry.npmjs.org, nodejs.org          (npm ci + setup-node version fallback)
           #   api.linear.app, api.anthropic.com, do.featurebase.app, slack.com  (the pipeline APIs)
+          #   api.typesafe.ai                         (JEV decisions; only called when typesafe_api_key is set)
           # If a future run fails on a blocked endpoint, the harden-runner step summary names the
           # host — add it here rather than reverting to audit.
           egress-policy: block
@@ -159,9 +165,10 @@ jobs:
             api.anthropic.com:443
             do.featurebase.app:443
             slack.com:443
+            api.typesafe.ai:443
             ${{ inputs.additional_endpoints }}
 
-      # This job runs caller-controlled code (npm ci + scripts/main.ts) with five high-value
+      # This job runs caller-controlled code (npm ci + scripts/main.ts) with six high-value
       # secrets and contents:write, and pushes to the state branch. It is built for
       # schedule / workflow_dispatch ONLY. Enforce that with an allowlist rather than denying
       # specific events: a denylist would still let push / issue_comment / repository_dispatch /
@@ -309,6 +316,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
           FEATUREBASE_API_KEY: ${{ secrets.featurebase_api_key }}
           SLACK_BOT_TOKEN: ${{ secrets.slack_bot_token }}
+          TYPESAFE_API_KEY: ${{ secrets.typesafe_api_key }}
           SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
           SINCE_OVERRIDE: ${{ inputs.since }}
           LOOKBACK_SINCE: ${{ inputs.lookback_since }}
