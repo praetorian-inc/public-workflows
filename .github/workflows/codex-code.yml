@@ -288,16 +288,19 @@ jobs:
           name: review-graph
           path: graphify-out
 
-      - name: Install graphify CLI (pinned)
+      - name: Install graphify CLI (pinned, fail-open)
         if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
         env:
           GRAPHIFY_VERSION: "0.8.35"
         run: |
           set -euo pipefail
-          pipx install "graphifyy==${GRAPHIFY_VERSION}"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          command -v graphify
-          echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          if pipx install "graphifyy==${GRAPHIFY_VERSION}"; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          else
+            echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
+            rm -rf graphify-out
+          fi
 
       - name: Verify merge-ref parents are present
         run: |
@@ -393,7 +396,7 @@ jobs:
       # skills (fail-closed: internal skills are never pulled into a public run's logs).
       # The purge step above ALWAYS runs, so PR-supplied agent config is neutralized
       # either way. Pinned to a commit SHA — callers cannot point this elsewhere.
-      - name: Mint palatine read token
+      - name: Mint review-bot-skills read token
         id: skills-token
         if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
@@ -408,7 +411,7 @@ jobs:
           permission-contents: read
 
       # Staged AFTER the purge so the sweep above never touches this trusted tree.
-      - name: Load curated review skills (palatine)
+      - name: Load review-bot skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -428,8 +431,6 @@ jobs:
           rm -rf "$dest"
           mkdir -p "$dest"
           codex_file=$(mktemp)
-          claude_file=$(mktemp)
-          names_file=$(mktemp)
           found=0
           for skill_md in .pr-skills/*/SKILL.md; do
             [ -f "$skill_md" ] || continue
@@ -442,8 +443,6 @@ jobs:
             mkdir -p "$dest/$id/agents"
             printf '%s\n' 'policy:' '  allow_implicit_invocation: false' > "$dest/$id/agents/openai.yaml"
             printf '$%s\n' "$id" >> "$codex_file"
-            printf '/%s\n' "$id" >> "$claude_file"
-            printf '%s\n' "$id" >> "$names_file"
             found=1
           done
           rm -rf .pr-skills
@@ -455,14 +454,8 @@ jobs:
             echo "codex_invocations<<EOF"
             cat "$codex_file"
             echo "EOF"
-            echo "claude_invocations<<EOF"
-            cat "$claude_file"
-            echo "EOF"
-            echo "names<<EOF"
-            cat "$names_file"
-            echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          rm -f "$codex_file" "$claude_file" "$names_file"
+          rm -f "$codex_file"
           echo "Staged review skills:"
           ls -1 "$dest"
 

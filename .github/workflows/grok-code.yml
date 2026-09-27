@@ -250,16 +250,19 @@ jobs:
           name: review-graph
           path: graphify-out
 
-      - name: Install graphify CLI (pinned)
+      - name: Install graphify CLI (pinned, fail-open)
         if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
         env:
           GRAPHIFY_VERSION: "0.8.35"
         run: |
           set -euo pipefail
-          pipx install "graphifyy==${GRAPHIFY_VERSION}"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          command -v graphify
-          echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          if pipx install "graphifyy==${GRAPHIFY_VERSION}"; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          else
+            echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
+            rm -rf graphify-out
+          fi
 
       - name: Build review context (PR diff + changed files)
         id: context
@@ -345,7 +348,7 @@ jobs:
           echo "n=${t}" >> "${GITHUB_OUTPUT}"
           echo "Turn cap ${t} for ${n} changed file(s)"
 
-      - name: Mint palatine read token
+      - name: Mint review-bot-skills read token
         id: skills-token
         if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
@@ -356,7 +359,7 @@ jobs:
           repositories: review-bot-skills
           permission-contents: read
 
-      - name: Load curated review skills (palatine)
+      - name: Load review-bot skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -478,7 +481,7 @@ jobs:
           from the diff by the workflow and MUST NOT be read, grepped, or reviewed.
 
           EOF
-            printf '%s\n\n' "REVIEW SKILLS: Apply each skill id listed below. If the list is empty, no curated skills were staged. A skill that does not apply is not a failure — say not-applicable for that skill. GROK_CLAUDE_SKILLS_ENABLED is false; consumption of .agents/skills is not claimed."
+            printf '%s\n\n' "REVIEW SKILLS: If the list below is empty, no curated skills were staged; review without them. Otherwise, before applying a listed id, Read .agents/skills/<id>/SKILL.md. Do not claim the skill ran if that file was not read. A skill that does not apply is not a failure — say not-applicable. GROK_CLAUDE_SKILLS_ENABLED is false; automatic discovery is not claimed."
             printf '%s\n\n' "$SKILL_NAMES"
             printf '%s\n\n' "$PURGED_NOTE"
             printf '%s\n' "$CALLER_PROMPT"

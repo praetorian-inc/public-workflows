@@ -302,17 +302,20 @@ jobs:
           name: review-graph
           path: graphify-out
 
-      - name: Install graphify CLI (pinned)
+      - name: Install graphify CLI (pinned, fail-open)
         if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
         env:
           # Lockstep with graphify-graph.yml's graphify-version default.
           GRAPHIFY_VERSION: "0.8.35"
         run: |
           set -euo pipefail
-          pipx install "graphifyy==${GRAPHIFY_VERSION}"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          command -v graphify
-          echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          if pipx install "graphifyy==${GRAPHIFY_VERSION}"; then
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
+          else
+            echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
+            rm -rf graphify-out
+          fi
 
       - name: Build review context (PR diff + changed files)
         id: context
@@ -482,7 +485,7 @@ jobs:
           # v1 idiom: use `prompt` (not deprecated `direct_prompt`) so the hardened-prompt
           # treatment of repo-supplied content (CLAUDE.md, PR body, comments) is applied.
           prompt: |
-            Load each skill below with the Skill tool before reviewing. Skill directories are in .claude/skills. This action's prompt input does not process slash commands; the Skill tool is the invocation.
+            If the list below is empty, no curated skills were staged; review without them. Otherwise load each skill with the Skill tool before reviewing. Skill directories are in .claude/skills. This action's prompt input does not process slash commands; the Skill tool is the invocation. A skill that does not apply is not a failure — say not-applicable.
             ${{ steps.stage-skills.outputs.claude_invocations }}
             ${{ inputs.prompt }}
           # Hardened, non-configurable toolset (the lines themselves live in the
@@ -644,7 +647,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           track_progress: "false"
           prompt: |
-            Load each skill below with the Skill tool before reviewing. Skill directories are in .claude/skills. This action's prompt input does not process slash commands; the Skill tool is the invocation.
+            If the list below is empty, no curated skills were staged; review without them. Otherwise load each skill with the Skill tool before reviewing. Skill directories are in .claude/skills. This action's prompt input does not process slash commands; the Skill tool is the invocation. A skill that does not apply is not a failure — say not-applicable.
             ${{ steps.stage-skills.outputs.claude_invocations }}
             ${{ inputs.prompt }}
           claude_args: |
