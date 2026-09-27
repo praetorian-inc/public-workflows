@@ -83,7 +83,7 @@ on:
         description: "OpenAI API key for Codex (pay-per-token billing)"
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/palatine. OPTIONAL: when set (trusted internal callers), the curated review skills are loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
+        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL: when set (trusted internal callers), that repo's skill allowlist is loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
         description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
@@ -288,18 +288,16 @@ jobs:
           name: review-graph
           path: graphify-out
 
-      - name: Install graphify CLI (pinned, fail-open)
+      - name: Install graphify CLI (pinned)
         if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
         env:
           GRAPHIFY_VERSION: "0.8.35"
         run: |
           set -euo pipefail
-          if pipx install "graphifyy==${GRAPHIFY_VERSION}"; then
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
-          else
-            echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
-          fi
+          pipx install "graphifyy==${GRAPHIFY_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          command -v graphify
+          echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
 
       - name: Verify merge-ref parents are present
         run: |
@@ -403,7 +401,7 @@ jobs:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
           private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
           owner: praetorian-inc
-          repositories: palatine
+          repositories: review-bot-skills
           # Pin the token to the one permission its only consumer (the read-only
           # checkout below) needs, so widening the App installation's grant cannot
           # widen this token. metadata:read is omitted — GitHub adds that baseline.
@@ -414,22 +412,59 @@ jobs:
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          repository: praetorian-inc/palatine
-          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455  # palatine @ initial curated set
+          repository: praetorian-inc/review-bot-skills
+          ref: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
           path: .pr-skills
           fetch-depth: 1
           token: ${{ steps.skills-token.outputs.token }}
           persist-credentials: false
 
       - name: Stage curated skills
+        id: stage-skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         run: |
           set -euo pipefail
-          mkdir -p .agents/skills
-          cp -R .pr-skills/.agents/skills/. .agents/skills/
+          dest=".agents/skills"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          codex_file=$(mktemp)
+          claude_file=$(mktemp)
+          names_file=$(mktemp)
+          found=0
+          for skill_md in .pr-skills/*/SKILL.md; do
+            [ -f "$skill_md" ] || continue
+            id=$(basename "$(dirname "$skill_md")")
+            if [[ "$id" == *$'\n'* || "$id" == *$'\r'* || ! "$id" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+              echo "::error::refusing skill id that is not a safe token"
+              exit 1
+            fi
+            cp -R ".pr-skills/$id" "$dest/$id"
+            mkdir -p "$dest/$id/agents"
+            printf '%s\n' 'policy:' '  allow_implicit_invocation: false' > "$dest/$id/agents/openai.yaml"
+            printf '$%s\n' "$id" >> "$codex_file"
+            printf '/%s\n' "$id" >> "$claude_file"
+            printf '%s\n' "$id" >> "$names_file"
+            found=1
+          done
           rm -rf .pr-skills
+          if [ "$found" -ne 1 ]; then
+            echo "::error::review-bot-skills checkout contained no SKILL.md directories"
+            exit 1
+          fi
+          {
+            echo "codex_invocations<<EOF"
+            cat "$codex_file"
+            echo "EOF"
+            echo "claude_invocations<<EOF"
+            cat "$claude_file"
+            echo "EOF"
+            echo "names<<EOF"
+            cat "$names_file"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          rm -f "$codex_file" "$claude_file" "$names_file"
           echo "Staged review skills:"
-          ls -1 .agents/skills
+          ls -1 "$dest"
 
       # Replicate the container half of Harden-Runner's `disable-sudo-and-containers`
       # that we had to turn off so codex-action could use (and then drop) sudo.
@@ -494,9 +529,11 @@ jobs:
             If the PR adds or changes any such file, review it FROM THE DIFF — do not expect
             to open it from the filesystem; the on-disk copy is absent or replaced by design.
 
-            REVIEW SKILLS: Apply your available review skills — adversarial
-            perspective, evidence-based analysis, simplicity, DRY, YAGNI, cyclomatic
-            complexity — where relevant, and ground every finding in a specific file and line.
+            REVIEW SKILLS: Invoke each skill listed below by its $name before writing
+            findings. If the list is empty, no curated skills were staged; review without
+            them. A skill that does not apply is not a failure — say not-applicable for
+            that skill. Ground every finding in a specific file and line.
+            ${{ steps.stage-skills.outputs.codex_invocations }}
 
             GRAPH: If graphify-out/graph.json exists, a CI-published code knowledge graph
             of the default branch is on disk (provenance: graphify-out/.graphify-provenance.json).

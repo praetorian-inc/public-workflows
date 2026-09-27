@@ -110,7 +110,7 @@ on:
         description: "xAI API key for Grok (console.x.ai). Required."
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/palatine. OPTIONAL: when set (trusted internal callers), the curated review skills are loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
+        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL: when set (trusted internal callers), that repo's skill allowlist is loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
         description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
@@ -250,19 +250,16 @@ jobs:
           name: review-graph
           path: graphify-out
 
-      - name: Install graphify CLI (pinned, fail-open)
+      - name: Install graphify CLI (pinned)
         if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
         env:
           GRAPHIFY_VERSION: "0.8.35"
         run: |
           set -euo pipefail
-          if pipx install "graphifyy==${GRAPHIFY_VERSION}"; then
-            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-            echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
-          else
-            echo "::warning::graphify CLI install failed — review continues; graph queries will not run"
-            rm -rf graphify-out
-          fi
+          pipx install "graphifyy==${GRAPHIFY_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          command -v graphify
+          echo "graphify CLI installed (graphifyy==${GRAPHIFY_VERSION})"
 
       - name: Build review context (PR diff + changed files)
         id: context
@@ -356,29 +353,54 @@ jobs:
           app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
           private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
           owner: praetorian-inc
-          repositories: palatine
+          repositories: review-bot-skills
           permission-contents: read
 
       - name: Load curated review skills (palatine)
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          repository: praetorian-inc/palatine
-          ref: 1ad13aa73fc06b92676944ed74625d8c79b2b455
+          repository: praetorian-inc/review-bot-skills
+          ref: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
           path: .pr-skills
           fetch-depth: 1
           token: ${{ steps.skills-token.outputs.token }}
           persist-credentials: false
 
       - name: Stage curated skills
+        id: stage-skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
         run: |
           set -euo pipefail
-          mkdir -p .agents/skills
-          cp -R .pr-skills/.agents/skills/. .agents/skills/
+          dest=".agents/skills"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          names_file=$(mktemp)
+          found=0
+          for skill_md in .pr-skills/*/SKILL.md; do
+            [ -f "$skill_md" ] || continue
+            id=$(basename "$(dirname "$skill_md")")
+            if [[ "$id" == *$'\n'* || "$id" == *$'\r'* || ! "$id" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+              echo "::error::refusing skill id that is not a safe token"
+              exit 1
+            fi
+            cp -R ".pr-skills/$id" "$dest/$id"
+            printf '%s\n' "$id" >> "$names_file"
+            found=1
+          done
           rm -rf .pr-skills
+          if [ "$found" -ne 1 ]; then
+            echo "::error::review-bot-skills checkout contained no SKILL.md directories"
+            exit 1
+          fi
+          {
+            echo "names<<EOF"
+            cat "$names_file"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          rm -f "$names_file"
           echo "Staged review skills:"
-          ls -1 .agents/skills
+          ls -1 "$dest"
 
       - name: Validate model input
         if: steps.context.outputs.empty_scope != 'true'
@@ -424,6 +446,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           MAX_TURNS: ${{ steps.turns.outputs.n }}
           CALLER_PROMPT: ${{ inputs.prompt }}
+          SKILL_NAMES: ${{ steps.stage-skills.outputs.names }}
           PURGED_NOTE: ${{ steps.purged.outputs.note }}
           GROK_HOME: ${{ runner.temp }}/grok-home
           GROK_CLAUDE_SKILLS_ENABLED: "false"
@@ -455,6 +478,8 @@ jobs:
           from the diff by the workflow and MUST NOT be read, grepped, or reviewed.
 
           EOF
+            printf '%s\n\n' "REVIEW SKILLS: Apply each skill id listed below. If the list is empty, no curated skills were staged. A skill that does not apply is not a failure — say not-applicable for that skill. GROK_CLAUDE_SKILLS_ENABLED is false; consumption of .agents/skills is not claimed."
+            printf '%s\n\n' "$SKILL_NAMES"
             printf '%s\n\n' "$PURGED_NOTE"
             printf '%s\n' "$CALLER_PROMPT"
           } > "$PROMPT_FILE"
