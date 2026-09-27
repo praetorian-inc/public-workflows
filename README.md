@@ -340,6 +340,7 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 **Secrets:**
 
 - `ANTHROPIC_API_KEY` — required. Repository-level secret.
+- `PALATINE_SKILLS_APP_ID` / `PALATINE_SKILLS_PRIVATE_KEY` — optional. The App installation must have `contents: read` on `praetorian-inc/review-bot-skills`. Absent secrets skip the skills checkout and still review.
 
 **Triggers the reusable workflow responds to:**
 
@@ -352,21 +353,21 @@ Other event types and `synchronize` actions trigger the caller workflow but are 
 
 ### `gemini-code.yml` — Gemini PR Assistant (hardened)
 
-Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses [`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli) to run the Gemini CLI as an **agent** — like Claude and Codex, it reads past the diff to open the surrounding code (definitions, callers, sibling modules) for real context. It loads Praetorian's curated review skills natively from [`praetorian-inc/palatine`](https://github.com/praetorian-inc/palatine) (`.gemini/skills/`, pinned by SHA).
+Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant. Uses [`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli) to run the Gemini CLI as an **agent** — like Claude and Codex, it reads past the diff to open the surrounding code (definitions, callers, sibling modules) for real context. It loads the curated review-skill allowlist from [`praetorian-inc/review-bot-skills`](https://github.com/praetorian-inc/review-bot-skills) (root-level skill dirs, pinned at `480aaf29`, staged into `.gemini/skills/`) when the caller supplies App credentials for that repo.
 
 **Security posture** follows `codex-code.yml`'s two-job defense-in-depth split:
 
 - **Tokenless read-only agent**: The `gemini-review` job is `contents: read` only and **no step in it uses a GitHub token** — a prompt-injected agent has no credential to exfiltrate and no path to write to the PR. The PR diff is computed fully offline (the depth-2 merge-ref checkout brings the diff's parents locally), so the agent runs with zero credentials.
 - **Tool surface**: `tools.core` is an allowlist of read-only built-ins (`read_file`, `read_many_files`, `glob`, `grep_search`, `list_directory`) plus `activate_skill` and prefix-restricted shell for graphify only (`run_shell_command(graphify query|explain|path)`). Bare `run_shell_command` is a wildcard and is not listed. Write/edit/web stay excluded. `grep_search` stays — a PR reviewer still needs it for hunks. Names must match the pinned `gemini_cli_version` (`0.58.0`; `grep_search` is still `GREP_TOOL_NAME` at that tag). A User-tier Policy Engine deny (`~/.gemini/policies/ci-review-deny.toml`) hides write/web from the model under `--yolo` (workspace policies are disabled in gemini-cli); it does **not** deny `run_shell_command` so the graphify prefixes remain.
 - **Graphify (ENG-7654)**: fail-open fetch of the caller's `graphify-graph.yml` artifact (same `fetch-review-graph` action as Claude/Codex). A missing graph still reviews via read/grep. Callers must grant `actions: read` so the fetch job can download the artifact.
-- **Untrusted-workspace purge**: because the agent runs against the PR's merged tree with workspace trust enabled, the staging step removes every agent-control file a PR could plant before staging the curated set — `.gemini`/`.agents` (skill + settings discovery; `.agents/skills` would otherwise take precedence), all `GEMINI.md` (recursive), `.geminiignore` (review-blinding), and `.npmrc`/`.yarnrc*` (CLI-install supply-chain). Skills + settings come only from the action input and the SHA-pinned `palatine` checkout.
+- **Untrusted-workspace purge**: because the agent runs against the PR's merged tree with workspace trust enabled, the staging step removes every agent-control file a PR could plant before staging the curated set — `.gemini`/`.agents` (skill + settings discovery; `.agents/skills` would otherwise take precedence), all `GEMINI.md` (recursive), `.geminiignore` (review-blinding), and `.npmrc`/`.yarnrc*` (CLI-install supply-chain). Skills come only from the action input and the SHA-pinned `review-bot-skills` checkout.
 - **Secret redaction**: the `GEMINI_API_KEY` (the only secret in the read-only job) is stripped from the captured review output before it leaves that job — so a prompt-injection that coerces the agent into reading its own environment can't surface the key in the posted comment.
 - **No MCP servers, no containers**: Unlike Google's official PR-review example (which posts via a Docker-run `github-mcp-server`), Harden-Runner's `disable-sudo-and-containers: true` stays on throughout — a strictly stronger posture than `codex-code.yml` (which must relax sudo for `codex-action` and re-lock Docker manually).
 - **Separate post-feedback job**: A minimal `pull-requests: write` job (runs zero untrusted code) posts the captured review via `pulls.createReview` with hardcoded `event: 'COMMENT'` — no APPROVE path. If the agent job fails, it posts a fixed failure notice instead of failing silently (parity with the previous reviewer); it does not run when preflight skipped the review, but when the review job short-circuits on an empty exclusion scope it runs only to post the explanatory skip notice.
 - **Same-repo-only gate**: Fork PRs blocked outright (`head.repo.full_name == github.repository`)
 - **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter. Agent-behavior sources (`SKILL.md`, agent instruction files like `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`, harness config dirs `.agents/`/`.claude/`/`.gemini/`/`.codex/`, and `.agentsmesh/**`) always force a review even when markdown-only (built-in `FORCE_RE`; extend via the `force_review_regex` input). `review_exclude_pathspecs` (newline-separated git pathspecs) excludes generated artifacts (e.g. agentsmesh mirrors) from the reviewed diff; generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment.
 - **Anti-injection prompt**: Gemini instructed to treat all PR content (including `GEMINI.md`) as untrusted data
-- **Pinned**: `run-gemini-cli` action SHA-pinned; the CLI version is hardcoded (`0.58.0`, **not** a caller input — it governs folder-trust/tool-policy semantics); `palatine` checkout pinned by commit SHA
+- **Pinned**: `run-gemini-cli` action SHA-pinned; the CLI version is hardcoded (`0.58.0`, **not** a caller input — it governs folder-trust/tool-policy semantics); `review-bot-skills` checkout pinned at `480aaf29`
 - **Turn cap (ENG-6428)**: `maxSessionTurns` is size-aware (floor 50, +3 per changed file, cap 80). Job `timeout-minutes: 15` remains the wall clock. Turn-limit failures post a notice that does **not** advise retry.
 - **CODEOWNERS**: `@praetorian-inc/security-engineering` review required on any change
 
@@ -411,6 +412,7 @@ jobs:
 **Secrets:**
 
 - `GEMINI_API_KEY` — required. Google AI Studio API key (org-level secret recommended).
+- `PALATINE_SKILLS_APP_ID` / `PALATINE_SKILLS_PRIVATE_KEY` — optional. The App installation must have `contents: read` on `praetorian-inc/review-bot-skills`. Absent secrets skip the skills checkout and still review.
 
 **Triggers:**
 
@@ -419,7 +421,7 @@ jobs:
 
 ### `grok-code.yml` — Grok PR Assistant (hardened)
 
-Runs Grok 4.6 as a complementary PR reviewer alongside Claude, Codex, and Gemini, via the pinned Grok Build CLI (`grok` 1.0.34, linux-x86_64, sha256-verified `.zst`). Headless: `--prompt-file` + `--output-format json`. It loads Praetorian's curated review skills from [`praetorian-inc/palatine`](https://github.com/praetorian-inc/palatine) (`.agents/skills/`, pinned by SHA) when the caller supplies the palatine App creds.
+Runs Grok 4.6 as a complementary PR reviewer alongside Claude, Codex, and Gemini, via the pinned Grok Build CLI (`grok` 1.0.34, linux-x86_64, sha256-verified `.zst`). Headless: `--prompt-file` + `--output-format json`. It loads the curated review-skill allowlist from [`praetorian-inc/review-bot-skills`](https://github.com/praetorian-inc/review-bot-skills) (root-level skill dirs, pinned at `480aaf29`, staged into `.agents/skills/`) when the caller supplies App credentials for that repo.
 
 **Security posture** follows `gemini-code.yml`'s two-job defense-in-depth split:
 
@@ -476,7 +478,7 @@ jobs:
 **Secrets:**
 
 - `XAI_API_KEY` — required. xAI API key from console.x.ai (org-level secret recommended).
-- `PALATINE_SKILLS_APP_ID` / `PALATINE_SKILLS_PRIVATE_KEY` — optional; load curated review skills.
+- `PALATINE_SKILLS_APP_ID` / `PALATINE_SKILLS_PRIVATE_KEY` — optional. The App installation must have `contents: read` on `praetorian-inc/review-bot-skills`, not only on palatine. Absent secrets skip the skills checkout and still review.
 
 **Triggers:**
 
@@ -533,6 +535,7 @@ jobs:
 **Secrets:**
 
 - `OPENAI_API_KEY` — required (pay-per-token billing).
+- `PALATINE_SKILLS_APP_ID` / `PALATINE_SKILLS_PRIVATE_KEY` — optional. The App installation must have `contents: read` on `praetorian-inc/review-bot-skills`. Absent secrets skip the skills checkout and still review.
 
 **Triggers:**
 
