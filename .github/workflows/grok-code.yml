@@ -348,23 +348,44 @@ jobs:
           echo "n=${t}" >> "${GITHUB_OUTPUT}"
           echo "Turn cap ${t} for ${n} changed file(s)"
 
-      - name: Resolve repository visibility
-        id: repo-vis
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -eu
-          vis=$(gh api "repos/$REPO" --jq '.visibility' 2>/dev/null || echo "")
-          case "$vis" in
-            private|internal) echo "allow=true" >> "$GITHUB_OUTPUT" ;;
-            *) echo "allow=false" >> "$GITHUB_OUTPUT" ;;
-          esac
+      # Curated review skills, read by Grok from `.agents/skills/<id>/SKILL.md` (listed in the prompt).
+      # praetorian-inc/review-bot-skills is the allowlist repo and is INTERNAL. Gate, with
+      # no token: the caller supplied the App credentials AND the event payload says this
+      # repo is exactly `private` or `internal`. A public repo, a fork PR (no secrets), or
+      # a payload with no visibility stages nothing (fail-closed: internal skills never
+      # enter a public run's logs). The purge step above ALWAYS runs first, so the sweep
+      # never touches this trusted tree and PR-supplied agent config is neutralized
+      # either way. The shared stage script is the only stager: any failure leaves
+      # .agents/skills absent and staged=false. Pinned to a commit SHA — callers cannot
+      # point this elsewhere.
+      # The PR merge ref sits at the workspace root, so a PR could plant its own
+      # _pw/.github/actions/stage-review-skills/stage-review-skills.sh. Clear it
+      # before the trusted checkout; the stage step also requires that checkout
+      # to have succeeded, so a planted script can never run.
+      - name: Clear _pw before the stage-script checkout
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        run: rm -rf _pw
 
+      - name: Checkout stage script (same SHA as this reusable)
+        id: checkout-pw
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        continue-on-error: true
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _pw
+          persist-credentials: false
+
+      # Token: contents:read on review-bot-skills only, the same content staged on
+      # disk. Passed only to the stage script, never to the agent's env. Skills
+      # are staged only after that script confirms the revoke (one retry); if
+      # the revoke fails twice the review runs without skills and this action's
+      # post-job revoke is the backstop. On the normal path that post-job
+      # revoke logs a benign "Token revocation failed" warning.
       - name: Mint review-bot-skills read token
         id: skills-token
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && steps.repo-vis.outputs.allow == 'true' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
@@ -374,58 +395,31 @@ jobs:
           repositories: review-bot-skills
           permission-contents: read
 
-      - name: Load review-bot skills
-        id: load-skills
-        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.skills-token.outputs.token != '' }}
-        continue-on-error: true
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          repository: praetorian-inc/review-bot-skills
-          ref: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
-          path: .pr-skills
-          fetch-depth: 1
-          token: ${{ steps.skills-token.outputs.token }}
-          persist-credentials: false
-
+      # Fail-open, always exits 0. The agent step keys only on outputs.staged.
+      # _pw is removed afterwards so the reviewer never sees this repo's tree.
       - name: Stage curated skills
         id: stage-skills
-        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.load-skills.outcome == 'success' }}
-        continue-on-error: true
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
+        env:
+          SKILLS_TOKEN: ${{ steps.skills-token.outputs.token }}
+          SKILLS_REPO: praetorian-inc/review-bot-skills
+          SKILLS_REF: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
+          SKILLS_HARNESS: grok
+          DEST: .agents/skills
         run: |
-          set -euo pipefail
-          dest=".agents/skills"
-          rm -rf "$dest"
-          mkdir -p "$dest"
-          names_file=$(mktemp)
-          found=0
-          for skill_md in .pr-skills/*/SKILL.md; do
-            [ -f "$skill_md" ] || continue
-            id=$(basename "$(dirname "$skill_md")")
-            if [[ "$id" == *$'\n'* || "$id" == *$'\r'* || ! "$id" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
-              echo "::error::refusing skill id that is not a safe token"
-              exit 1
-            fi
-            cp -R ".pr-skills/$id" "$dest/$id"
-            printf '%s\n' "$id" >> "$names_file"
-            found=1
-          done
-          rm -rf .pr-skills
-          if [ "$found" -ne 1 ]; then
-            echo "::error::review-bot-skills checkout contained no SKILL.md directories"
-            exit 1
+          script=_pw/.github/actions/stage-review-skills/stage-review-skills.sh
+          if [ -f "$script" ]; then
+            bash "$script"
+          else
+            echo "::warning::stage script checkout failed; reviewing without curated skills"
+            echo "staged=false" >> "$GITHUB_OUTPUT"
           fi
-          {
-            echo "names<<EOF"
-            cat "$names_file"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-          rm -f "$names_file"
-          echo "Staged review skills:"
-          ls -1 "$dest"
 
-      - name: Drop skills if load or stage failed
-        if: steps.load-skills.outcome == 'failure' || steps.stage-skills.outcome == 'failure'
-        run: rm -rf .agents/skills .pr-skills
+      # Its own step so a partial checkout is removed even when checkout-pw
+      # failed and the stage step was skipped.
+      - name: Remove stage-script checkout
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        run: rm -rf _pw
 
       - name: Validate model input
         if: steps.context.outputs.empty_scope != 'true'
@@ -471,7 +465,7 @@ jobs:
           MODEL: ${{ inputs.model }}
           MAX_TURNS: ${{ steps.turns.outputs.n }}
           CALLER_PROMPT: ${{ inputs.prompt }}
-          SKILL_NAMES: ${{ steps.stage-skills.outputs.names }}
+          SKILL_NAMES: ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
           PURGED_NOTE: ${{ steps.purged.outputs.note }}
           GROK_HOME: ${{ runner.temp }}/grok-home
           GROK_CLAUDE_SKILLS_ENABLED: "false"
