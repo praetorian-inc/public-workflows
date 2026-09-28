@@ -457,6 +457,22 @@ jobs:
           grok --version
           rm -rf "${TMP}"
 
+      - name: Checkout Grok trace checker
+        if: steps.context.outputs.empty_scope != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _trace
+          persist-credentials: false
+
+      - name: Move Grok trace checker out of the review tree
+        if: steps.context.outputs.empty_scope != 'true'
+        run: |
+          set -euo pipefail
+          cp _trace/.github/actions/stage-review-skills/check-grok-skill-trace.sh "$RUNNER_TEMP/check-grok-skill-trace.sh"
+          rm -rf _trace
+
       - name: Run Grok PR Review
         id: grok
         if: steps.context.outputs.empty_scope != 'true'
@@ -466,6 +482,7 @@ jobs:
           MAX_TURNS: ${{ steps.turns.outputs.n }}
           CALLER_PROMPT: ${{ inputs.prompt }}
           SKILL_NAMES: ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
+          STAGED: ${{ steps.stage-skills.outputs.staged }}
           PURGED_NOTE: ${{ steps.purged.outputs.note }}
           GROK_HOME: ${{ runner.temp }}/grok-home
           GROK_CLAUDE_SKILLS_ENABLED: "false"
@@ -504,9 +521,12 @@ jobs:
           } > "$PROMPT_FILE"
 
           set +e
+          # json has no tool calls. streaming-json does (tool_call / rawInput.path).
+          # ENG-8651: fail closed before post-feedback if a staged SKILL.md was not read.
+          TRACE="${RUNNER_TEMP}/grok-trace.jsonl"
           grok \
             --prompt-file "$PROMPT_FILE" \
-            --output-format json \
+            --output-format streaming-json \
             --model "$MODEL" \
             --max-turns "$MAX_TURNS" \
             --permission-mode dontAsk \
@@ -523,13 +543,21 @@ jobs:
             --deny 'Read(**/auth.json)' \
             --deny 'Read(**/.grok/**)' \
             --deny "Read(${GROK_HOME}/**)" \
-            > "$OUT_FILE"
+            > "$TRACE"
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
             echo "::error::Grok CLI exited ${status}"
             exit "$status"
           fi
+          script="${RUNNER_TEMP}/check-grok-skill-trace.sh"
+          if [ ! -f "$script" ]; then
+            echo "::error::grok trace checker is missing"
+            exit 1
+          fi
+          unset XAI_API_KEY
+          STAGED="${STAGED:-false}" IDS="$SKILL_NAMES" TRACE="$TRACE" JSON_OUT="$OUT_FILE" \
+            bash "$script"
 
       - name: Sanitize review output
         id: sanitize
@@ -557,6 +585,32 @@ jobs:
             echo "${DELIM}"
             echo "stop_reason=${STOP}"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Scrub Grok skill trace
+        if: always() && steps.context.outputs.empty_scope != 'true'
+        env:
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          trace="${RUNNER_TEMP}/grok-trace.jsonl"
+          if [ ! -f "$trace" ]; then
+            exit 0
+          fi
+          if ! python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); k=sys.argv[2].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace" "$XAI_API_KEY"; then
+            rm -f "$trace"
+            echo "::error::grok trace scrub failed; deleted the trace"
+            exit 1
+          fi
+
+      - name: Upload Grok skill trace
+        if: always() && steps.context.outputs.empty_scope != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
+        with:
+          name: grok-skill-trace
+          path: ${{ runner.temp }}/grok-trace.jsonl
+          retention-days: 1
+          if-no-files-found: warn
 
       - name: Classify Grok failure
         id: failclass
