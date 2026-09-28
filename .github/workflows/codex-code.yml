@@ -557,8 +557,7 @@ jobs:
           rm -rf .codex-review/trace
           mkdir -p .codex-review/trace
           if [ -d "${HOME}/.codex/sessions" ]; then
-            cp -a "${HOME}/.codex/sessions" .codex-review/trace/sessions
-            find .codex-review/trace -name 'auth.json' -delete
+            find "${HOME}/.codex/sessions" -type f -print > .codex-review/trace/session-files.txt
           fi
 
       - name: Upload Codex session trace
