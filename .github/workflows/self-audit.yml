@@ -12,6 +12,7 @@ on:
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
       - 'test/stage-review-skills.test.sh'
+      - 'test/build-claude-skill-prompt.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
@@ -23,6 +24,7 @@ on:
       - '.github/actions/**'
       - 'test/fetch-review-graph.test.sh'
       - 'test/stage-review-skills.test.sh'
+      - 'test/build-claude-skill-prompt.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
@@ -57,6 +59,9 @@ jobs:
 
       - name: Unit-test stage-review-skills (ENG-8614)
         run: bash test/stage-review-skills.test.sh
+
+      - name: Unit-test Claude skill prompt (ENG-8648)
+        run: bash test/build-claude-skill-prompt.test.sh
 
       - name: Unit-test Gemini CLI pin and turn cap (ENG-7656 / ENG-6428)
         run: bash test/gemini-cli-pin.test.sh
