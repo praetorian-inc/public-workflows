@@ -623,6 +623,10 @@ jobs:
           denyMessage = "CI Gemini reviewer: tool denied"
           EOF
 
+      - name: Clear planted trace checkout
+        if: steps.context.outputs.empty_scope != 'true'
+        run: rm -rf _trace
+
       - name: Checkout Gemini trace checker
         if: steps.context.outputs.empty_scope != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -730,6 +734,14 @@ jobs:
           unset gemini_key
           if [ "$status" -ne 0 ]; then
             echo "::error::Gemini CLI exited ${status}"
+            delim="GEMINI_ERR_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+            {
+              echo "error<<${delim}"
+              if [ -f "$TRACE" ]; then
+                cat "$TRACE"
+              fi
+              echo "${delim}"
+            } >> "$GITHUB_OUTPUT"
             exit "$status"
           fi
           STAGED="${STAGED:-false}" IDS="$SKILL_IDS" TRACE="$TRACE" REVIEW_OUT="$REVIEW" bash "$script"
@@ -803,7 +815,10 @@ jobs:
           if [ ! -f "$trace" ]; then
             exit 0
           fi
-          if ! python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); k=sys.argv[2].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace" "$GEMINI_API_KEY"; then
+          if [ -z "${GEMINI_API_KEY}" ]; then
+            exit 0
+          fi
+          if ! python3 -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); k=os.environ["GEMINI_API_KEY"].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace"; then
             rm -f "$trace"
             echo "::error::gemini trace scrub failed; deleted the trace"
             exit 1

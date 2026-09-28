@@ -14,10 +14,10 @@ bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; FAIL=$((FAIL + 1
 
 echo "gemini-cli-pin.test.sh"
 
-if grep -F -q 'gemini_cli_version: "0.58.0"' "$WF"; then
+if grep -F -q 'gemini_cli_version: "0.58.0"' "$WF" || grep -F -q '@google/gemini-cli@0.58.0' "$WF"; then
   ok "CLI pin is 0.58.0"
 else
-  bad "CLI pin is 0.58.0" "$(grep -n gemini_cli_version "$WF" || true)"
+  bad "CLI pin is 0.58.0" "$(grep -n -E 'gemini_cli_version|gemini-cli@' "$WF" || true)"
 fi
 
 if grep -F -q 'gemini_cli_version: "0.45.2"' "$WF"; then

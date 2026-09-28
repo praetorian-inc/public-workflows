@@ -40,13 +40,26 @@ with open(trace, encoding="utf-8") as fh:
         line = line.strip()
         if not line:
             continue
-        events.append(json.loads(line))
+        try:
+            parsed = json.loads(line)
+        except json.JSONDecodeError:
+            if staged == "true":
+                print("::error::gemini trace has a non-JSON line", file=sys.stderr)
+                sys.exit(1)
+            continue
+        if isinstance(parsed, dict):
+            events.append(parsed)
 
 chunks = []
 deltas = []
+result_error = False
 for ev in events:
+    if ev.get("type") == "result" and ev.get("status") not in (None, "success"):
+        result_error = True
     if ev.get("type") == "message" and ev.get("role") == "assistant":
         text = ev.get("content") or ""
+        if not isinstance(text, str):
+            continue
         if ev.get("delta"):
             deltas.append(text)
         elif text:
@@ -57,6 +70,9 @@ if review_out:
         fh.write(review)
         if review and not review.endswith("\n"):
             fh.write("\n")
+if not review.strip() or result_error:
+    print("::error::gemini trace has no assistant review", file=sys.stderr)
+    sys.exit(1)
 
 if staged != "true":
     sys.exit(0)
@@ -68,16 +84,19 @@ uses = {}
 for ev in events:
     if ev.get("type") != "tool_use" or ev.get("tool_name") != "activate_skill":
         continue
-    name = (ev.get("parameters") or {}).get("name")
+    params = ev.get("parameters") or {}
+    name = params.get("name") if isinstance(params, dict) else None
     if isinstance(name, str):
-        uses.setdefault(name, ev.get("tool_id"))
+        uses[name] = ev.get("tool_id")
 
 results = {}
 for ev in events:
     if ev.get("type") != "tool_result":
         continue
-    results.setdefault(ev.get("tool_id"), "")
-    results[ev.get("tool_id")] += ev.get("output") or ""
+    output = ev.get("output") or ""
+    if not isinstance(output, str):
+        output = json.dumps(output)
+    results[ev.get("tool_id")] = results.get(ev.get("tool_id"), "") + output
 
 missing = []
 for skill_id in ids:
