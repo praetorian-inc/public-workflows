@@ -18,7 +18,9 @@ set -euo pipefail
 
 DEST="${DEST:-.claude/skills}"
 STAGED="${STAGED:-false}"
-MAX_BYTES=400000
+# The action receives this string plus the caller prompt as one environment
+# entry. Linux MAX_ARG_STRLEN is 131072. 110000 leaves room for that prompt.
+MAX_BYTES=110000
 
 no_skills='No curated skills were staged. Review without them.'
 
@@ -37,7 +39,7 @@ write_prompt() {
   fi
   local delim
   delim="SKILLPROMPT_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-  while printf '%s' "$text" | grep -F -q -- "$delim"; do
+  while grep -F -q -- "$delim" <<< "$text"; do
     delim="SKILLPROMPT_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
   done
   {
@@ -52,14 +54,27 @@ write_prompt() {
 # 12 characters. Headings do not count.
 extract_sentence() {
   awk '
-    BEGIN { in_fm = 0; in_code = 0 }
+    BEGIN { in_fm = 0; fence = ""; flen = 0 }
     NR == 1 && $0 == "---" { in_fm = 1; next }
     in_fm && $0 == "---" { in_fm = 0; next }
     in_fm { next }
-    /^```/ { in_code = !in_code; next }
-    in_code { next }
-    /^#/ { next }
     {
+      if (match($0, /^[[:space:]]*(`{3,}|~{3,})/)) {
+        marker = substr($0, RSTART, RLENGTH)
+        gsub(/^[[:space:]]+/, "", marker)
+        ch = substr(marker, 1, 1)
+        n = length(marker)
+        if (fence == "") {
+          fence = ch
+          flen = n
+        } else if (ch == fence && n >= flen) {
+          fence = ""
+          flen = 0
+        }
+        next
+      }
+      if (fence != "") next
+      if ($0 ~ /^#/) next
       line = $0
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
       if (length(line) < 12) next
@@ -71,6 +86,36 @@ extract_sentence() {
   ' "$1"
 }
 
+# CHECK_PROMPT is the prompt after it has passed through GITHUB_OUTPUT and
+# expression interpolation. Re-read each SKILL.md and require its sentence
+# in that string. The in-memory assembly cannot prove that round trip.
+if [ -n "${CHECK_PROMPT:-}" ]; then
+  if [ ! -f "$CHECK_PROMPT" ] || [ ! -s "$CHECK_PROMPT" ]; then
+    fail "staged prompt round-trip file is missing or empty"
+  fi
+  if [ -L "$DEST" ] || [ ! -d "$DEST" ]; then
+    fail "staged=true but $DEST is missing or a symlink"
+  fi
+  shopt -s nullglob
+  checked=0
+  for skill_md in "$DEST"/*/SKILL.md; do
+    id=$(basename -- "$(dirname -- "$skill_md")")
+    sentence=$(extract_sentence "$skill_md") || sentence=""
+    if [ -z "$sentence" ]; then
+      fail "staged skill $id has no sentence in its SKILL.md body"
+    fi
+    if ! grep -F -q -- "$sentence" "$CHECK_PROMPT"; then
+      fail "round-trip prompt is missing a sentence from $id"
+    fi
+    checked=$((checked + 1))
+  done
+  shopt -u nullglob
+  if [ "$checked" -eq 0 ]; then
+    fail "staged=true but no SKILL.md bodies were found"
+  fi
+  exit 0
+fi
+
 if [ "$STAGED" != "true" ]; then
   write_prompt "$no_skills"
   exit 0
@@ -80,7 +125,7 @@ if [ -L "$DEST" ] || [ ! -d "$DEST" ]; then
   fail "staged=true but $DEST is missing or a symlink"
 fi
 
-prompt='Curated review skills follow. Apply each body. A skill that does not apply is not a failure — say not-applicable. These bodies are the skills. A slash command is not a load.'
+prompt='Curated review skills follow. Apply each body. A skill that does not apply is not a failure — say not-applicable. These bodies are the skills. A slash command is not a load. Files under references/ are not inlined. They survive only under .claude-pr/.claude/skills/<id>/.'
 found=0
 
 shopt -s nullglob
@@ -101,9 +146,6 @@ for skill_md in "$DEST"/*/SKILL.md; do
   fi
   body=$(cat -- "$skill_md")
   prompt="${prompt}"$'\n\n'"## skill: ${id}"$'\n\n'"${body}"
-  if ! printf '%s' "$prompt" | grep -F -q -- "$sentence"; then
-    fail "assembled prompt is missing a sentence from $id"
-  fi
   echo "Inlined review skill: $id"
   found=$((found + 1))
 done

@@ -19,6 +19,9 @@ check() {
 }
 absent() { ! grep -F -q -- "$1" "$2"; }
 no_slash_line() { ! grep -q '^/' "$1"; }
+secret_not_staged() {
+  [ ! -f "$1" ] || ! grep -F -q 'Secret sentence' "$1"
+}
 
 read_multi() {
   local file=$1 key=$2
@@ -98,6 +101,8 @@ check "does not say a slash command is how the skill is loaded" "prompt=$(cat "$
   absent 'slash command is how' "$T/parsed.txt"
 check "does not tell the model to call the Skill tool" "prompt=$(cat "$T/parsed.txt")" \
   absent 'Skill tool' "$T/parsed.txt"
+check "names the references snapshot path" "prompt=$(cat "$T/parsed.txt")" \
+  grep -F -q '.claude-pr/.claude/skills/<id>/' "$T/parsed.txt"
 
 section "3. no sentence fails closed"
 T="$WORKDIR/t3"
@@ -129,10 +134,83 @@ printf '%s\n' 'Secret sentence that must not enter the prompt.' > "$T/outside/SK
 ln -s "$T/outside" "$T/skills/leaked-skill"
 run_case "$T" true
 check "symlink exits non-zero" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" != "0" ]
-check "symlink body is not in the prompt file" "file exists" \
-  [ ! -f "$T/prompt.txt" ] || ! grep -F -q 'Secret sentence' "$T/prompt.txt"
+check "symlink body is not in the prompt file" "file=$(ls -l "$T/prompt.txt" 2>&1 || true)" \
+  secret_not_staged "$T/prompt.txt"
 
-section "6. workflow no longer treats a slash command as the load"
+section "6. round-trip check sees the interpolated prompt"
+T="$WORKDIR/t6"
+mkdir -p "$T"
+skill "$T" adhering-to-dry "$(cat <<'EOF'
+---
+name: adhering-to-dry
+---
+
+Wait for three copies before extracting a helper.
+EOF
+)"
+run_case "$T" true
+check "build exits 0" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" = "0" ]
+: > "$T/empty-prompt.txt"
+CHECK_PROMPT="$T/empty-prompt.txt" DEST="$T/skills" \
+  bash "$SCRIPT" >"$T/check.log" 2>&1
+echo "$?" > "$T/check.rc"
+check "empty round-trip exits non-zero" "rc=$(cat "$T/check.rc")" [ "$(cat "$T/check.rc")" != "0" ]
+printf '%s\n' 'This prompt has a sentence but not the skill sentence.' > "$T/wrong.txt"
+CHECK_PROMPT="$T/wrong.txt" DEST="$T/skills" \
+  bash "$SCRIPT" >"$T/wrong.log" 2>&1
+echo "$?" > "$T/wrong.rc"
+check "missing sentence round-trip exits non-zero" "rc=$(cat "$T/wrong.rc") log=$(cat "$T/wrong.log")" \
+  [ "$(cat "$T/wrong.rc")" != "0" ]
+CHECK_PROMPT="$T/prompt.txt" DEST="$T/skills" \
+  bash "$SCRIPT" >"$T/check-ok.log" 2>&1
+echo "$?" > "$T/check-ok.rc"
+check "full round-trip exits 0" "rc=$(cat "$T/check-ok.rc") log=$(cat "$T/check-ok.log")" \
+  [ "$(cat "$T/check-ok.rc")" = "0" ]
+
+section "7. a tilde fence is not a sentence"
+T="$WORKDIR/t7"
+mkdir -p "$T"
+skill "$T" fence-only "$(cat <<'EOF'
+---
+name: fence-only
+---
+
+~~~
+print("this is only code.")
+~~~
+EOF
+)"
+run_case "$T" true
+check "tilde fence exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" != "0" ]
+
+section "8. 80KiB body does not false-fail"
+T="$WORKDIR/t8"
+mkdir -p "$T"
+skill "$T" big-body "$(printf '%s\n' '---' 'name: big-body' '---' '' 'Wait for three copies before extracting a helper.' "$(python3 -c 'print("x" * 80000)')")"
+run_case "$T" true
+check "80KiB body exits 0" "rc=$(cat "$T/rc") log=$(cat "$T/log")" [ "$(cat "$T/rc")" = "0" ]
+
+section "9. a backtick fence nested in a tilde fence is not a sentence"
+T="$WORKDIR/t9"
+mkdir -p "$T"
+skill "$T" nested-fence "$(cat <<'EOF'
+---
+name: nested-fence
+---
+
+~~~
+```bash
+echo "this is only code."
+```
+~~~
+EOF
+)"
+run_case "$T" true
+check "nested fence exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" != "0" ]
+
+section "10. workflow no longer treats a slash command as the load"
 WF="$REPO_ROOT/.github/workflows/claude-code.yml"
 check "workflow does not tell the model to call the Skill tool" "claude-code.yml" \
   absent 'load each skill with the Skill tool' "$WF"
