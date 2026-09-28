@@ -54,26 +54,61 @@ write_prompt() {
 # 12 characters. Headings do not count.
 extract_sentence() {
   awk '
-    BEGIN { in_fm = 0; fence = ""; flen = 0 }
+    function lead_len(s,    i, c) {
+      i = 0
+      while (i < length(s)) {
+        c = substr(s, i + 1, 1)
+        if (c != " " && c != "\t") break
+        i++
+      }
+      return i
+    }
+    function fence_run(s,    i, c, ch) {
+      if (length(s) < 3) return ""
+      ch = substr(s, 1, 1)
+      if (ch != "`" && ch != "~") return ""
+      i = 1
+      while (i <= length(s) && substr(s, i, 1) == ch) i++
+      if (i - 1 < 3) return ""
+      return substr(s, 1, i - 1)
+    }
+    function suffix_blank(s,    i, c) {
+      i = 1
+      while (i <= length(s)) {
+        c = substr(s, i, 1)
+        if (c != " " && c != "\t") return 0
+        i++
+      }
+      return 1
+    }
+    BEGIN { in_fm = 0; fence = ""; flen = 0; findent = 0; findent_str = "" }
+    { gsub(/\r$/, "", $0) }
     NR == 1 && $0 == "---" { in_fm = 1; next }
     in_fm && $0 == "---" { in_fm = 0; next }
     in_fm { next }
     {
-      if (match($0, /^[[:space:]]*(`{3,}|~{3,})/)) {
-        marker = substr($0, RSTART, RLENGTH)
-        gsub(/^[[:space:]]+/, "", marker)
-        ch = substr(marker, 1, 1)
-        n = length(marker)
-        if (fence == "") {
-          fence = ch
-          flen = n
-        } else if (ch == fence && n >= flen) {
-          fence = ""
-          flen = 0
-        }
+      ind = lead_len($0)
+      rest = substr($0, ind + 1)
+      run = fence_run(rest)
+      if (fence == "" && run != "") {
+        fence = substr(run, 1, 1)
+        flen = length(run)
+        findent = ind
+        findent_str = substr($0, 1, ind)
         next
       }
-      if (fence != "") next
+      if (fence != "") {
+        indent_ok = 0
+        if (index(findent_str, "\t") == 0 && findent <= 3 && ind <= 3 && index(substr($0, 1, ind), "\t") == 0) indent_ok = 1
+        if ((index(findent_str, "\t") > 0 || findent > 3) && substr($0, 1, findent) == findent_str && ind == findent) indent_ok = 1
+        if (indent_ok && run != "" && substr(run, 1, 1) == fence && length(run) >= flen && suffix_blank(substr(rest, length(run) + 1))) {
+          fence = ""
+          flen = 0
+            findent = 0
+            findent_str = ""
+          }
+        next
+      }
       if ($0 ~ /^#/) next
       line = $0
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)

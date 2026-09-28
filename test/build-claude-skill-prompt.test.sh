@@ -194,7 +194,8 @@ check "80KiB body exits 0" "rc=$(cat "$T/rc") log=$(cat "$T/log")" [ "$(cat "$T/
 section "9. a backtick fence nested in a tilde fence is not a sentence"
 T="$WORKDIR/t9"
 mkdir -p "$T"
-skill "$T" nested-fence "$(cat <<'EOF'
+mkdir -p "$T/skills/nested-fence"
+cat > "$T/skills/nested-fence/SKILL.md" <<'EOF'
 ---
 name: nested-fence
 ---
@@ -205,12 +206,97 @@ echo "this is only code."
 ```
 ~~~
 EOF
-)"
 run_case "$T" true
 check "nested fence exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
   [ "$(cat "$T/rc")" != "0" ]
 
-section "10. workflow no longer treats a slash command as the load"
+section "10. an info string does not close a backtick fence"
+T="$WORKDIR/t10"
+mkdir -p "$T"
+mkdir -p "$T/skills/info-string"
+cat > "$T/skills/info-string/SKILL.md" <<'EOF'
+---
+name: info-string
+---
+
+```
+```bash
+echo "this is only code."
+```
+EOF
+run_case "$T" true
+check "info-string fence exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" != "0" ]
+
+section "11. a four-space closer does not end a fence"
+T="$WORKDIR/t11"
+mkdir -p "$T"
+mkdir -p "$T/skills/four-space"
+cat > "$T/skills/four-space/SKILL.md" <<'EOF'
+---
+name: four-space
+---
+
+```
+    ```
+echo "this is only code."
+```
+EOF
+run_case "$T" true
+check "four-space closer exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" != "0" ]
+
+section "12. a list-indented fence does not steal the prose sentence"
+T="$WORKDIR/t12"
+mkdir -p "$T/skills/list-fence"
+cat > "$T/skills/list-fence/SKILL.md" <<'EOF'
+---
+name: list-fence
+---
+
+1. Run:
+
+    ```bash
+    echo "this is only code."
+    ```
+
+This is the real sentence.
+EOF
+run_case "$T" true
+check "list fence exits 0" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" = "0" ]
+check "list fence witness is the prose" "prompt=$(cat "$T/prompt.txt")" \
+  grep -F -q 'This is the real sentence.' "$T/prompt.txt"
+
+section "13. a tab-indented fence closes and the prose is the witness"
+T="$WORKDIR/t13"
+mkdir -p "$T/skills/tab-fence"
+printf '%s\n' '---' 'name: tab-fence' '---' '' '1. Run:' '' $'\t```bash' $'\techo "this is only code."' $'\t```' '' 'This is the real sentence.' > "$T/skills/tab-fence/SKILL.md"
+run_case "$T" true
+check "tab fence exits 0" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" = "0" ]
+check "tab fence witness is the prose" "prompt=$(cat "$T/prompt.txt")" \
+  grep -F -q 'This is the real sentence.' "$T/prompt.txt"
+
+section "14. a CRLF closer still ends the fence"
+T="$WORKDIR/t14"
+mkdir -p "$T/skills/crlf-fence"
+printf '%s\r\n' '---' 'name: crlf-fence' '---' '' '```' 'echo "this is only code."' '```' '' 'This is the real sentence.' > "$T/skills/crlf-fence/SKILL.md"
+run_case "$T" true
+check "CRLF fence exits 0" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" = "0" ]
+check "CRLF fence witness is the prose" "prompt=$(cat "$T/prompt.txt")" \
+  grep -F -q 'This is the real sentence.' "$T/prompt.txt"
+
+section "15. a CRLF front matter marker is still front matter"
+T="$WORKDIR/t15"
+mkdir -p "$T/skills/crlf-fm"
+printf '%s\r\n' '---' 'name: crlf-fm' 'description: Use when reviewing shell changes.' '---' '' '# Only a heading' > "$T/skills/crlf-fm/SKILL.md"
+run_case "$T" true
+check "CRLF front matter exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" != "0" ]
+
+section "16. workflow no longer treats a slash command as the load"
 WF="$REPO_ROOT/.github/workflows/claude-code.yml"
 check "workflow does not tell the model to call the Skill tool" "claude-code.yml" \
   absent 'load each skill with the Skill tool' "$WF"
