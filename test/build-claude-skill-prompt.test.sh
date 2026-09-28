@@ -296,7 +296,21 @@ run_case "$T" true
 check "CRLF front matter exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
   [ "$(cat "$T/rc")" != "0" ]
 
-section "16. workflow no longer treats a slash command as the load"
+section "16. an indented heading is not a sentence"
+T="$WORKDIR/t16"
+mkdir -p "$T/skills/indented-heading"
+cat > "$T/skills/indented-heading/SKILL.md" <<'EOF'
+---
+name: indented-heading
+---
+
+  # Heading with punctuation.
+EOF
+run_case "$T" true
+check "indented heading exits non-zero" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" != "0" ]
+
+section "17. workflow no longer treats a slash command as the load"
 WF="$REPO_ROOT/.github/workflows/claude-code.yml"
 check "workflow does not tell the model to call the Skill tool" "claude-code.yml" \
   absent 'load each skill with the Skill tool' "$WF"

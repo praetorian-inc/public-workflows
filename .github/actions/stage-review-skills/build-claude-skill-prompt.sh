@@ -109,7 +109,9 @@ extract_sentence() {
           }
         next
       }
-      if ($0 ~ /^#/) next
+      hi = 0
+      while (hi < 3 && substr($0, hi + 1, 1) == " ") hi++
+      if (substr($0, hi + 1, 1) == "#") next
       line = $0
       gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
       if (length(line) < 12) next
