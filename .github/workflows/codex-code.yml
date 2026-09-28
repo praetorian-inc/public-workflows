@@ -551,6 +551,7 @@ jobs:
       # in the default home. Upload failure must not skip post-feedback.
       - name: Stage Codex session trace
         if: always() && steps.run_codex.outcome != 'skipped' && steps.context.outputs.empty_scope != 'true'
+        continue-on-error: true
         run: |
           set -euo pipefail
           rm -rf .codex-review/trace
