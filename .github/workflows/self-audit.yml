@@ -16,6 +16,7 @@ on:
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
+      - 'test/check-grok-skill-trace.test.sh'
   push:
     branches: [main]
     paths:
@@ -27,6 +28,7 @@ on:
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
+      - 'test/check-grok-skill-trace.test.sh'
 
 permissions:
   contents: read
@@ -69,6 +71,9 @@ jobs:
 
       - name: Unit-test Grok graphify tool allowlist (ENG-8335)
         run: bash test/grok-graphify-tools.test.sh
+
+      - name: Grok skill-trace gate
+        run: bash test/check-grok-skill-trace.test.sh
 
       - name: Install zizmor
         env:

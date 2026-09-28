@@ -33,8 +33,9 @@ trace, staged, json_out = sys.argv[1], sys.argv[2], sys.argv[3]
 ids = [line.strip() for line in os.environ.get("IDS", "").splitlines() if line.strip()]
 text = []
 stop = ""
-paths = []
-saw_tool = False
+reads = {}
+completed = set()
+workspace = os.environ.get("GITHUB_WORKSPACE", "").rstrip("/")
 with open(trace, encoding="utf-8") as fh:
     for line in fh:
         line = line.strip()
@@ -47,39 +48,45 @@ with open(trace, encoding="utf-8") as fh:
         elif kind == "end" and isinstance(ev.get("stopReason"), str):
             stop = ev["stopReason"]
         elif kind == "tool_call":
-            saw_tool = True
+            call_id = ev.get("toolCallId")
             raw = ev.get("rawInput") or {}
-            path = raw.get("path") or raw.get("file_path") or ""
-            if isinstance(path, str) and path:
-                paths.append(path)
-        elif kind == "assistant":
-            # streaming-messages-json fallback, if a newer pin emits it on this flag
-            for block in (ev.get("message") or {}).get("content") or []:
-                if block.get("type") == "tool_use":
-                    saw_tool = True
-                    path = (block.get("input") or {}).get("path") or ""
-                    if path:
-                        paths.append(path)
+            path = raw.get("path") if isinstance(raw.get("path"), str) else ""
+            if (
+                ev.get("kind") == "read"
+                and ev.get("toolName") == "read_file"
+                and call_id
+                and path
+            ):
+                reads[call_id] = path
+        elif kind == "tool_call_update" and ev.get("status") == "completed":
+            call_id = ev.get("toolCallId")
+            if call_id:
+                completed.add(call_id)
 
 body = "".join(text)
 with open(json_out, "w", encoding="utf-8") as fh:
     json.dump({"text": body, "stopReason": stop}, fh)
+
+def accepted(path, skill_id):
+    want = f".agents/skills/{skill_id}/SKILL.md"
+    if path == want:
+        return True
+    return bool(workspace) and path == f"{workspace}/{want}"
 
 if staged != "true":
     sys.exit(0)
 if not ids:
     print("::error::staged=true but no skill ids were passed", file=sys.stderr)
     sys.exit(1)
-if not saw_tool:
-    print("::error::grok trace has no tool_call events; pinned CLI did not emit a tool stream", file=sys.stderr)
-    sys.exit(1)
 missing = []
 for skill_id in ids:
-    suffix = f".agents/skills/{skill_id}/SKILL.md"
-    if not any(path == suffix or path.endswith("/" + suffix) for path in paths):
+    if not any(
+        call_id in completed and accepted(path, skill_id)
+        for call_id, path in reads.items()
+    ):
         missing.append(skill_id)
 if missing:
-    print("::error::grok trace is missing a SKILL.md read for: " + ", ".join(missing), file=sys.stderr)
+    print("::error::grok trace is missing a completed read_file of SKILL.md for: " + ", ".join(missing), file=sys.stderr)
     sys.exit(1)
 print("SKILL.md read confirmed for " + ", ".join(ids))
 PY
