@@ -512,10 +512,8 @@ jobs:
             echo "staged=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Fail-closed when staged=true: the prompt the action will log must
-      # contain a sentence from each SKILL.md before that action starts.
-      # Logging and posting happen in the same action step, so this gate has
-      # to run first. Reads .claude/skills while it still exists.
+      # Assemble the prompt, then verify the value that survived GITHUB_OUTPUT
+      # before the action starts. Logging and posting happen in that action.
       - name: Build Claude skill prompt
         id: skill-prompt
         if: steps.context.outputs.empty_scope != 'true'
@@ -543,6 +541,29 @@ jobs:
               echo 'NO_SKILLS_EOF'
             } >> "$GITHUB_OUTPUT"
           fi
+
+      # The in-memory assembly cannot prove the value survived GITHUB_OUTPUT.
+      # This step receives that output through an expression and re-reads each
+      # SKILL.md. It also rejects a combined prompt that would exceed Linux's
+      # 131072-byte environment-entry limit inside claude-code-action.
+      - name: Verify skill prompt round-trip
+        if: steps.context.outputs.empty_scope != 'true' && steps.stage-skills.outputs.staged == 'true'
+        env:
+          ASSEMBLED: ${{ steps.skill-prompt.outputs.prompt }}
+          REVIEW_PROMPT: ${{ inputs.prompt }}
+          DEST: .claude/skills
+        run: |
+          set -euo pipefail
+          script=_pw/.github/actions/stage-review-skills/build-claude-skill-prompt.sh
+          printf '%s\n' "$ASSEMBLED" > "$RUNNER_TEMP/assembled-skill-prompt.txt"
+          assembled_bytes=$(wc -c < "$RUNNER_TEMP/assembled-skill-prompt.txt" | tr -d ' ')
+          review_bytes=$(printf '%s' "$REVIEW_PROMPT" | wc -c | tr -d ' ')
+          total=$((assembled_bytes + review_bytes + 1))
+          if [ "$total" -gt 120000 ]; then
+            echo "::error::combined Claude prompt is ${total} bytes; the action passes it as one environment entry and Linux rejects entries over 131072"
+            exit 1
+          fi
+          CHECK_PROMPT="$RUNNER_TEMP/assembled-skill-prompt.txt" bash "$script"
 
       # Its own step so a partial checkout is removed even when checkout-pw
       # failed and the stage step was skipped.
