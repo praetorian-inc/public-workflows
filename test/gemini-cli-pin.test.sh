@@ -84,6 +84,20 @@ else
   bad "failclass runs on sanitizer fail and reads summary" "classifier still gemini-only/error-only"
 fi
 
+if grep -F -q 'GEMINI_API_KEY="$gemini_key" TRACE="$TRACE" STDERR="$stderr" DEST="$class" STATUS="$status" bash "$class_script"' "$WF"; then
+  ok "classifier receives the key"
+else
+  bad "classifier receives the key" "classifier call does not prefix GEMINI_API_KEY"
+fi
+
+class_line=$(grep -n -F 'bash "$class_script"' "$WF" | head -1 | cut -d: -f1)
+unset_line=$(grep -n -F 'unset gemini_key' "$WF" | head -1 | cut -d: -f1)
+if [ -n "$class_line" ] && [ -n "$unset_line" ] && [ "$unset_line" -gt "$class_line" ]; then
+  ok "key is dropped only after classification"
+else
+  bad "key is dropped only after classification" "unset gemini_key at ${unset_line:-missing}, classifier at ${class_line:-missing}"
+fi
+
 if grep -F -q 'FatalTurnLimitedError' "$WF"; then
   ok "fallback names FatalTurnLimitedError"
 else

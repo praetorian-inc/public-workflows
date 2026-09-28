@@ -737,17 +737,19 @@ jobs:
           GEMINI_API_KEY="$gemini_key" gemini --yolo --output-format stream-json < "$PROMPT_FILE" > "$TRACE" 2> "$stderr"
           status=$?
           set -e
-          unset gemini_key
           # Classification input is the terminal result/error event plus a
           # stderr tail. Never copy the trace: tool_result text can contain
           # FatalTurnLimitedError and the API key, and it can exceed the
-          # step-output cap. The classifier scrubs GEMINI_API_KEY first.
+          # step-output cap. Pass the key only to this process. The parent
+          # shell unset GEMINI_API_KEY above, so the classifier cannot see it
+          # unless this prefix restores it.
           class_script="${RUNNER_TEMP}/classify-gemini-failure.sh"
           if [ ! -f "$class_script" ]; then
             echo "::error::gemini failure classifier is missing"
             exit 1
           fi
-          TRACE="$TRACE" STDERR="$stderr" DEST="$class" STATUS="$status" bash "$class_script"
+          GEMINI_API_KEY="$gemini_key" TRACE="$TRACE" STDERR="$stderr" DEST="$class" STATUS="$status" bash "$class_script"
+          unset gemini_key
           delim="GEMINI_ERR_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
             echo "error<<${delim}"
