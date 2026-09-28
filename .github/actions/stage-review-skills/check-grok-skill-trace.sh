@@ -41,7 +41,12 @@ with open(trace, encoding="utf-8") as fh:
         line = line.strip()
         if not line:
             continue
-        ev = json.loads(line)
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(ev, dict):
+            continue
         kind = ev.get("type")
         if kind == "text" and isinstance(ev.get("data"), str):
             text.append(ev["data"])

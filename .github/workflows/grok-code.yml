@@ -546,16 +546,17 @@ jobs:
             > "$TRACE"
           status=$?
           set -e
-          if [ "$status" -ne 0 ]; then
-            echo "::error::Grok CLI exited ${status}"
-            exit "$status"
-          fi
           script="${RUNNER_TEMP}/check-grok-skill-trace.sh"
           if [ ! -f "$script" ]; then
             echo "::error::grok trace checker is missing"
             exit 1
           fi
           unset XAI_API_KEY
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Grok CLI exited ${status}"
+            STAGED=false IDS="$SKILL_NAMES" TRACE="$TRACE" JSON_OUT="$OUT_FILE" bash "$script" || true
+            exit "$status"
+          fi
           STAGED="${STAGED:-false}" IDS="$SKILL_NAMES" TRACE="$TRACE" JSON_OUT="$OUT_FILE" \
             bash "$script"
 
@@ -596,7 +597,10 @@ jobs:
           if [ ! -f "$trace" ]; then
             exit 0
           fi
-          if ! python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); k=sys.argv[2].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace" "$XAI_API_KEY"; then
+          if [ -z "${XAI_API_KEY}" ]; then
+            exit 0
+          fi
+          if ! python3 -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); k=os.environ["XAI_API_KEY"].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace"; then
             rm -f "$trace"
             echo "::error::grok trace scrub failed; deleted the trace"
             exit 1
