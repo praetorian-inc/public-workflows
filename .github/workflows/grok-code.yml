@@ -457,6 +457,10 @@ jobs:
           grok --version
           rm -rf "${TMP}"
 
+      - name: Clear planted trace checkout
+        if: steps.context.outputs.empty_scope != 'true'
+        run: rm -rf _trace
+
       - name: Checkout Grok trace checker
         if: steps.context.outputs.empty_scope != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -589,6 +593,7 @@ jobs:
 
       - name: Scrub Grok skill trace
         if: always() && steps.context.outputs.empty_scope != 'true'
+        continue-on-error: true
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         run: |

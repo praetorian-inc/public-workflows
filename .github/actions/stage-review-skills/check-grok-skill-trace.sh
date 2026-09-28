@@ -2,8 +2,11 @@
 # ENG-8651: require a read of each staged SKILL.md in a Grok streaming-json trace.
 #
 # Current grok-build docs: streaming-json tool_call has toolName and rawInput.path.
-# --output-format json does not. The pinned CLI is 1.0.34; if it does not emit
-# tool_call events this script fails closed.
+# This workflow's deny rules and prompt call that tool Read. Accept both names.
+# Do not require kind=read: pinned 1.0.34 has no captured trace, and ENG-8651
+# forbids asserting a field the binary has not been shown to write.
+# --output-format json does not include tool calls. If 1.0.34 emits neither
+# name, a staged run fails closed.
 #
 # Env:
 #   TRACE      — streaming-json file
@@ -54,15 +57,13 @@ with open(trace, encoding="utf-8") as fh:
             stop = ev["stopReason"]
         elif kind == "tool_call":
             call_id = ev.get("toolCallId")
-            raw = ev.get("rawInput") or {}
+            raw = ev.get("rawInput")
+            raw = raw if isinstance(raw, dict) else {}
             path = raw.get("path") if isinstance(raw.get("path"), str) else ""
-            if (
-                ev.get("kind") == "read"
-                and ev.get("toolName") == "read_file"
-                and call_id
-                and path
-            ):
+            if ev.get("toolName") in ("read_file", "Read") and call_id and path:
                 reads[call_id] = path
+                if ev.get("status") == "completed":
+                    completed.add(call_id)
         elif kind == "tool_call_update" and ev.get("status") == "completed":
             call_id = ev.get("toolCallId")
             if call_id:
@@ -72,11 +73,23 @@ body = "".join(text)
 with open(json_out, "w", encoding="utf-8") as fh:
     json.dump({"text": body, "stopReason": stop}, fh)
 
+def fold(path):
+    parts = []
+    for part in path.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
 def accepted(path, skill_id):
     want = f".agents/skills/{skill_id}/SKILL.md"
-    if path == want:
-        return True
-    return bool(workspace) and path == f"{workspace}/{want}"
+    if path.startswith("/"):
+        return bool(workspace) and fold(path) == fold(f"{workspace}/{want}")
+    return fold(path) == want
 
 if staged != "true":
     sys.exit(0)
@@ -91,7 +104,7 @@ for skill_id in ids:
     ):
         missing.append(skill_id)
 if missing:
-    print("::error::grok trace is missing a completed read_file of SKILL.md for: " + ", ".join(missing), file=sys.stderr)
+    print("::error::grok trace is missing a completed Read of SKILL.md for: " + ", ".join(missing), file=sys.stderr)
     sys.exit(1)
 print("SKILL.md read confirmed for " + ", ".join(ids))
 PY

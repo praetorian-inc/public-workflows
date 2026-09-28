@@ -65,5 +65,32 @@ else
   ok "nested path is not the skill"
 fi
 
+cat > "$T/read-name.jsonl" <<'EOF'
+{"type":"tool_call","toolCallId":"c5","toolName":"Read","rawInput":{"path":"./.agents/skills/adhering-to-dry/SKILL.md"},"status":"completed"}
+{"type":"text","data":"Read name ok."}
+{"type":"end","stopReason":"end_turn"}
+EOF
+if STAGED=true IDS=$'adhering-to-dry\n' TRACE="$T/read-name.jsonl" JSON_OUT="$T/read-name.json" bash "$SCRIPT" >/dev/null \
+  && grep -q 'Read name ok' "$T/read-name.json"; then ok "Read name and dot path"; else bad "Read name and dot path"; fi
+
+cat > "$T/bad-raw.jsonl" <<'EOF'
+{"type":"tool_call","toolCallId":"c6","toolName":"Read","rawInput":"not-an-object"}
+{"type":"text","data":"still an envelope"}
+{"type":"end","stopReason":"end_turn"}
+EOF
+if STAGED=false IDS= TRACE="$T/bad-raw.jsonl" JSON_OUT="$T/bad-raw.json" bash "$SCRIPT" >/dev/null \
+  && grep -q 'still an envelope' "$T/bad-raw.json"; then ok "non-object rawInput does not crash"; else bad "non-object rawInput does not crash"; fi
+
+cat > "$T/backslash.jsonl" <<'EOF'
+{"type":"tool_call","toolCallId":"c7","toolName":"Read","rawInput":{"path":".\\.agents\\skills\\adhering-to-dry\\SKILL.md"},"status":"completed"}
+{"type":"text","data":"x"}
+{"type":"end","stopReason":"end_turn"}
+EOF
+if STAGED=true IDS=$'adhering-to-dry\n' TRACE="$T/backslash.jsonl" JSON_OUT="$T/backslash.json" bash "$SCRIPT" >/dev/null; then
+  bad "backslash path is not the skill"
+else
+  ok "backslash path is not the skill"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
