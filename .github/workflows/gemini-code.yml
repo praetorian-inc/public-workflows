@@ -641,6 +641,7 @@ jobs:
         run: |
           set -euo pipefail
           cp _trace/.github/actions/stage-review-skills/check-gemini-skill-trace.sh "$RUNNER_TEMP/check-gemini-skill-trace.sh"
+          cp _trace/.github/actions/stage-review-skills/classify-gemini-failure.sh "$RUNNER_TEMP/classify-gemini-failure.sh"
           rm -rf _trace
 
       # Run Gemini CLI as a review agent. No github_token is passed — the
@@ -727,21 +728,37 @@ jobs:
             echo "::error::gemini trace checker is missing"
             exit 1
           fi
+          stderr="${RUNNER_TEMP}/gemini-stderr.txt"
+          class="${RUNNER_TEMP}/gemini-class.txt"
           set +e
-          GEMINI_API_KEY="$gemini_key" gemini --yolo --prompt "$(cat "$PROMPT_FILE")" --output-format stream-json > "$TRACE"
+          # stdin is the prompt. --prompt "$(cat …)" puts the whole prompt in
+          # argv and dies at Linux MAX_ARG_STRLEN (131072). gemini-cli 0.58.0
+          # reads a non-TTY stdin as the prompt.
+          GEMINI_API_KEY="$gemini_key" gemini --yolo --output-format stream-json < "$PROMPT_FILE" > "$TRACE" 2> "$stderr"
           status=$?
           set -e
           unset gemini_key
+          # Classification input is the terminal result/error event plus a
+          # stderr tail. Never copy the trace: tool_result text can contain
+          # FatalTurnLimitedError and the API key, and it can exceed the
+          # step-output cap. The classifier scrubs GEMINI_API_KEY first.
+          class_script="${RUNNER_TEMP}/classify-gemini-failure.sh"
+          if [ ! -f "$class_script" ]; then
+            echo "::error::gemini failure classifier is missing"
+            exit 1
+          fi
+          TRACE="$TRACE" STDERR="$stderr" DEST="$class" STATUS="$status" bash "$class_script"
+          delim="GEMINI_ERR_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "error<<${delim}"
+            if [ -f "$class" ]; then
+              cat "$class"
+              echo
+            fi
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
           if [ "$status" -ne 0 ]; then
             echo "::error::Gemini CLI exited ${status}"
-            delim="GEMINI_ERR_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-            {
-              echo "error<<${delim}"
-              if [ -f "$TRACE" ]; then
-                cat "$TRACE"
-              fi
-              echo "${delim}"
-            } >> "$GITHUB_OUTPUT"
             exit "$status"
           fi
           STAGED="${STAGED:-false}" IDS="$SKILL_IDS" TRACE="$TRACE" REVIEW_OUT="$REVIEW" bash "$script"

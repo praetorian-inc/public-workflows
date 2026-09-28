@@ -28,5 +28,17 @@ else
   ok "missing activate fails"
 fi
 
+cat > "$T/result-error.jsonl" <<'EOF'
+{"type":"tool_use","tool_name":"activate_skill","tool_id":"t1","parameters":{"name":"adhering-to-dry"}}
+{"type":"tool_result","tool_id":"t1","status":"success","output":"<activated_skill name=\"adhering-to-dry\">ok</activated_skill>"}
+{"type":"message","role":"assistant","content":"partial review","delta":false}
+{"type":"result","status":"error","error":{"type":"FatalTurnLimitedError","message":"turn cap"}}
+EOF
+if STAGED=true IDS=$'adhering-to-dry\n' TRACE="$T/result-error.jsonl" REVIEW_OUT="$T/re.txt" bash "$SCRIPT" >/dev/null; then
+  bad "result error fails"
+else
+  ok "result error fails"
+fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

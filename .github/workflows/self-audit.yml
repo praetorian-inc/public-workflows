@@ -14,6 +14,7 @@ on:
       - 'test/stage-review-skills.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/check-gemini-skill-trace.test.sh'
+      - 'test/classify-gemini-failure.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
@@ -26,6 +27,7 @@ on:
       - 'test/stage-review-skills.test.sh'
       - 'test/gemini-cli-pin.test.sh'
       - 'test/check-gemini-skill-trace.test.sh'
+      - 'test/classify-gemini-failure.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
@@ -65,6 +67,9 @@ jobs:
 
       - name: Gemini skill-trace gate
         run: bash test/check-gemini-skill-trace.test.sh
+
+      - name: Gemini failure classifier
+        run: bash test/classify-gemini-failure.test.sh
 
       - name: Unit-test Gemini graphify tool allowlist (ENG-7654)
         run: bash test/gemini-graphify-tools.test.sh

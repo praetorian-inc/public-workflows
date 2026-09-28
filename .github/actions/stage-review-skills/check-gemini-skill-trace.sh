@@ -70,8 +70,11 @@ if review_out:
         fh.write(review)
         if review and not review.endswith("\n"):
             fh.write("\n")
-if not review.strip() or result_error:
+if not review.strip():
     print("::error::gemini trace has no assistant review", file=sys.stderr)
+    sys.exit(1)
+if result_error:
+    print("::error::gemini trace completed with a non-success status", file=sys.stderr)
     sys.exit(1)
 
 if staged != "true":
