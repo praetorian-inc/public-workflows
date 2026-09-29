@@ -14,10 +14,10 @@ bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; FAIL=$((FAIL + 1
 
 echo "gemini-cli-pin.test.sh"
 
-if grep -F -q 'gemini_cli_version: "0.58.0"' "$WF"; then
+if grep -F -q 'gemini_cli_version: "0.58.0"' "$WF" || grep -F -q '@google/gemini-cli@0.58.0' "$WF"; then
   ok "CLI pin is 0.58.0"
 else
-  bad "CLI pin is 0.58.0" "$(grep -n gemini_cli_version "$WF" || true)"
+  bad "CLI pin is 0.58.0" "$(grep -n -E 'gemini_cli_version|gemini-cli@' "$WF" || true)"
 fi
 
 if grep -F -q 'gemini_cli_version: "0.45.2"' "$WF"; then
@@ -82,6 +82,28 @@ if grep -F -q 'steps.sanitize.outcome == '"'"'failure'"'" "$WF" \
   ok "failclass runs on sanitizer fail and reads summary"
 else
   bad "failclass runs on sanitizer fail and reads summary" "classifier still gemini-only/error-only"
+fi
+
+if grep -F -q 'GEMINI_API_KEY="$gemini_key" TRACE="$TRACE" STDERR="$stderr" DEST="$class" STATUS="$status" bash "$class_script"' "$WF"; then
+  ok "classifier receives the key"
+else
+  bad "classifier receives the key" "classifier call does not prefix GEMINI_API_KEY"
+fi
+
+class_line=$(grep -n -F 'bash "$class_script"' "$WF" | head -1 | cut -d: -f1)
+unset_line=$(grep -n -F 'unset gemini_key' "$WF" | head -1 | cut -d: -f1)
+if [ -n "$class_line" ] && [ -n "$unset_line" ] && [ "$unset_line" -gt "$class_line" ]; then
+  ok "key is dropped only after classification"
+else
+  bad "key is dropped only after classification" "unset gemini_key at ${unset_line:-missing}, classifier at ${class_line:-missing}"
+fi
+
+if grep -F -q 'the tool call fails the job' "$WF" \
+  && grep -F -q 'including a skill that does not apply' "$WF" \
+  && ! grep -F -q 'A skill that does not apply is not a failure' "$WF"; then
+  ok "prompt requires activate_skill even when not applicable"
+else
+  bad "prompt requires activate_skill even when not applicable" "old skip permission still present"
 fi
 
 if grep -F -q 'FatalTurnLimitedError' "$WF"; then
