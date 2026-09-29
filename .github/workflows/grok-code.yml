@@ -518,7 +518,7 @@ jobs:
           from the diff by the workflow and MUST NOT be read, grepped, or reviewed.
 
           EOF
-            printf '%s\n\n' "REVIEW SKILLS: If the list below is empty, no curated skills were staged; review without them. Otherwise, before applying a listed id, Read .agents/skills/<id>/SKILL.md. Do not claim the skill ran if that file was not read. A skill that does not apply is not a failure — say not-applicable. GROK_CLAUDE_SKILLS_ENABLED is false; automatic discovery is not claimed."
+            printf '%s\n\n' "REVIEW SKILLS: If the list below is empty, no curated skills were staged; review without them. Otherwise Read .agents/skills/<id>/SKILL.md once for every listed id before writing findings, including an id that does not apply. Skipping that Read fails the job. After the Read, say not-applicable in the review when the skill does not apply. Do not claim the skill ran if that file was not read. GROK_CLAUDE_SKILLS_ENABLED is false; automatic discovery is not claimed."
             printf '%s\n\n' "$SKILL_NAMES"
             printf '%s\n\n' "$PURGED_NOTE"
             printf '%s\n' "$CALLER_PROMPT"

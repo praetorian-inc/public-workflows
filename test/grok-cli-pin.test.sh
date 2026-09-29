@@ -104,6 +104,13 @@ else
   bad "sandbox off (GHA+Harden-Runner compatible)" "missing --sandbox off"
 fi
 
+if grep -F -q 'Skipping that Read fails the job' "$WF" \
+  && ! grep -F -q 'A skill that does not apply is not a failure' "$WF"; then
+  ok "prompt requires a Read even when the skill does not apply"
+else
+  bad "prompt requires a Read even when the skill does not apply" "old skip permission still present"
+fi
+
 if grep -F -q -- '--sandbox strict' "$WF"; then
   bad "no sandbox strict" "strict fails on GHA Linux (podman.sock)"
 else
