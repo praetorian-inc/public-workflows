@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ENG-8651: require a read of each staged SKILL.md in a Grok streaming-json trace.
 #
-# Current grok-build docs: streaming-json tool_call has toolName and rawInput.path.
-# This workflow's deny rules and prompt call that tool Read. Accept both names.
-# Do not require kind=read: pinned 1.0.34 has no captured trace, and ENG-8651
-# forbids asserting a field the binary has not been shown to write.
+# Pinned grok 1.0.34 streaming-json (captured 2026-09-29, palatine run
+# 36512841273): toolName is read_file, kind is read, and the path is
+# rawInput.target_file, not rawInput.path. The call starts status=pending.
+# A later tool_call_update on the same toolCallId has status=completed.
+# Docs also name rawInput.path. Accept path, then target_file. Accept tool
+# names read_file and Read. Do not require kind.
 # --output-format json does not include tool calls. If 1.0.34 emits neither
 # name, a staged run fails closed.
 # Staged runs post only text emitted after every staged SKILL.md read completed
@@ -63,7 +65,12 @@ with open(trace, encoding="utf-8") as fh:
             call_id = ev.get("toolCallId")
             raw = ev.get("rawInput")
             raw = raw if isinstance(raw, dict) else {}
-            path = raw.get("path") if isinstance(raw.get("path"), str) else ""
+            path = ""
+            for key in ("path", "target_file"):
+                val = raw.get(key)
+                if isinstance(val, str) and val:
+                    path = val
+                    break
             if ev.get("toolName") in ("read_file", "Read") and call_id and path:
                 reads[call_id] = path
                 if ev.get("status") == "completed":
