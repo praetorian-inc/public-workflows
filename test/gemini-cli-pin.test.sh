@@ -98,6 +98,14 @@ else
   bad "key is dropped only after classification" "unset gemini_key at ${unset_line:-missing}, classifier at ${class_line:-missing}"
 fi
 
+if grep -F -q 'the tool call fails the job' "$WF" \
+  && grep -F -q 'including a skill that does not apply' "$WF" \
+  && ! grep -F -q 'A skill that does not apply is not a failure' "$WF"; then
+  ok "prompt requires activate_skill even when not applicable"
+else
+  bad "prompt requires activate_skill even when not applicable" "old skip permission still present"
+fi
+
 if grep -F -q 'FatalTurnLimitedError' "$WF"; then
   ok "fallback names FatalTurnLimitedError"
 else

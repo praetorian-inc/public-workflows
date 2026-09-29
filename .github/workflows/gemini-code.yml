@@ -714,10 +714,12 @@ jobs:
           are generated artifacts that CI verifies mechanically — they are excluded
           from the diff by the workflow and MUST NOT be read, grepped, or reviewed.
 
-          REVIEW SKILLS: Call activate_skill for each skill id listed below before
-          writing findings. If the list is empty, no curated skills were staged; review
-          without them. A skill that does not apply is not a failure — say not-applicable
-          for that skill. Headless consent is not claimed by this workflow.
+          REVIEW SKILLS: Call activate_skill once for every skill id listed below
+          before writing findings, including a skill that does not apply. Skipping
+          the tool call fails the job. If the list is empty, no curated skills were
+          staged; review without them. After the tool call, say not-applicable in
+          the review when the skill does not apply. Headless consent is not claimed
+          by this workflow.
           EOF
             printf '%s\n\n' "$SKILL_IDS"
             printf '%s\n\n' "$PURGED_NOTE"
