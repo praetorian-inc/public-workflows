@@ -1,0 +1,103 @@
+name: Linear ID Required (Callable)
+# Reusable workflow that fails a PR when its branch name, title, and body
+# do NOT contain a Linear issue identifier (e.g., ENG-1234, LAB-42).
+#
+# Why this exists: Linear's native GitHub integration creates the ⑂ #NN
+# badge and bidirectional status sync ONLY when it can detect an issue ID
+# on the PR (branch, title, or body). Without enforcement, PRs slip
+# through without an ID — no linkage, no traceability, no status sync.
+# Catching this at CI time is cheaper than back-filling after merge.
+#
+# Caller example (drop in .github/workflows/pr-linear-id.yml):
+#
+#   name: Linear ID
+#   on:
+#     pull_request:
+#       types: [opened, edited, synchronize, reopened]
+#   permissions:
+#     contents: read
+#     pull-requests: read
+#   jobs:
+#     check:
+#       uses: praetorian-inc/public-workflows/.github/workflows/linear-id-required.yml@<SHA>
+#       permissions:
+#         contents: read
+#         pull-requests: read
+
+on:
+  workflow_call:
+    inputs:
+      id-pattern:
+        description: >
+          Extended regex (grep -iE) for a Linear issue identifier.
+          Default matches any TEAM-123 pattern (2+ alphanumeric prefix,
+          dash, 1+ digits) case-insensitively — covers lowercase branch
+          names (eng-1234) and digit-prefixed teams (13T-202).
+        required: false
+        type: string
+        default: '\b[A-Z0-9][A-Z0-9]+-[0-9]+\b'
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+jobs:
+  check:
+    name: Linear ID
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Harden Runner
+        if: inputs.enable-harden-runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          disable-sudo-and-containers: true
+
+      - name: Check for Linear issue ID
+        env:
+          BRANCH: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          ID_PATTERN: ${{ inputs.id-pattern }}
+        run: |
+          found_in=""
+
+          if echo "$BRANCH" | grep -qiE "$ID_PATTERN"; then
+            found_in="branch"
+          elif echo "$PR_TITLE" | grep -qiE "$ID_PATTERN"; then
+            found_in="title"
+          elif echo "$PR_BODY" | grep -qiE "$ID_PATTERN"; then
+            found_in="body"
+          fi
+
+          if [ -n "$found_in" ]; then
+            id=$(echo "$BRANCH $PR_TITLE $PR_BODY" | grep -oiE "$ID_PATTERN" | head -1)
+            echo "✅ Found Linear issue ID: $id (in PR $found_in)"
+            exit 0
+          fi
+
+          echo "::error::No Linear issue ID found in branch name, PR title, or PR body."
+          echo ""
+          echo "Every PR must reference a Linear ticket so the native GitHub integration"
+          echo "can link the PR to the issue (⑂ badge + status sync)."
+          echo ""
+          echo "How to fix:"
+          echo "  • Branch name: use 'fix/ENG-1234-short-desc' or 'feat/LAB-42-feature'"
+          echo "    (Tip: copy the git branch name from Linear with Cmd+Shift+.)"
+          echo "  • PR title:    include the ID, e.g. 'fix(gateway): scrub paths (ENG-1234)'"
+          echo "  • PR body:     mention the ID anywhere in the description"
+          echo ""
+          echo "The ID must match the pattern: TEAM-123 (e.g., ENG-1234, LAB-42, 13T-202)"
+          exit 1

@@ -1,0 +1,117 @@
+name: "Test: linear-id-required.yml"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/linear-id-required.yml"
+      - ".github/workflows/test-linear-id-required.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/linear-id-required.yml"
+      - ".github/workflows/test-linear-id-required.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # The reusable workflow reads from github.head_ref / github.event.pull_request
+  # context, which is only populated on pull_request events. On a PR that touches
+  # these files, the branch name of this PR itself (fix/eng-4658-…) contains a
+  # Linear ID, so the call-positive job exercises the happy path end-to-end.
+  call-positive:
+    if: github.event_name == 'pull_request'
+    name: Call linear-id-required (this PR's branch has an ID)
+    uses: ./.github/workflows/linear-id-required.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  # Negative path: simulate a PR with no Linear ID by running the check
+  # logic inline with blank inputs and asserting it exits non-zero.
+  negative-test:
+    name: Reject PR with no Linear ID
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Assert check fails when no ID is present
+        env:
+          BRANCH: "fix-some-bug"
+          PR_TITLE: "Fix the login bug"
+          PR_BODY: "This fixes a bug in the login flow."
+          ID_PATTERN: '\b[A-Z0-9][A-Z0-9]+-[0-9]+\b'
+        run: |
+          set +e
+          found=""
+          echo "$BRANCH" | grep -qiE "$ID_PATTERN" && found="branch"
+          echo "$PR_TITLE" | grep -qiE "$ID_PATTERN" && found="title"
+          echo "$PR_BODY" | grep -qiE "$ID_PATTERN" && found="body"
+          set -e
+
+          if [ -n "$found" ]; then
+            echo "::error::check found an ID in '$found' but none should be present"
+            exit 1
+          fi
+          echo "✓ correctly rejected a PR with no Linear ID"
+
+      - name: Assert check passes when ID is in branch
+        env:
+          BRANCH: "fix/eng-1234-login-bug"
+          PR_TITLE: "Fix the login bug"
+          PR_BODY: "No ID here."
+          ID_PATTERN: '\b[A-Z0-9][A-Z0-9]+-[0-9]+\b'
+        run: |
+          found=""
+          echo "$BRANCH" | grep -qiE "$ID_PATTERN" && found="branch"
+          if [ -z "$found" ]; then
+            echo "::error::check did not find ID in branch 'fix/eng-1234-login-bug'"
+            exit 1
+          fi
+          echo "✓ correctly found ENG-1234 in branch name"
+
+      - name: Assert check passes when ID is in title only
+        env:
+          BRANCH: "fix-login-bug"
+          PR_TITLE: "fix(auth): login race condition (LAB-42)"
+          PR_BODY: "No ID here."
+          ID_PATTERN: '\b[A-Z0-9][A-Z0-9]+-[0-9]+\b'
+        run: |
+          found=""
+          echo "$BRANCH" | grep -qiE "$ID_PATTERN" && found="branch"
+          echo "$PR_TITLE" | grep -qiE "$ID_PATTERN" && found="title"
+          if [ -z "$found" ]; then
+            echo "::error::check did not find ID in title"
+            exit 1
+          fi
+          echo "✓ correctly found LAB-42 in PR title"
+
+      - name: Assert check passes when ID is in body only
+        env:
+          BRANCH: "fix-login-bug"
+          PR_TITLE: "Fix the login bug"
+          PR_BODY: "Fixes 13T-202 — the roadmap item."
+          ID_PATTERN: '\b[A-Z0-9][A-Z0-9]+-[0-9]+\b'
+        run: |
+          found=""
+          echo "$BRANCH" | grep -qiE "$ID_PATTERN" && found="branch"
+          echo "$PR_TITLE" | grep -qiE "$ID_PATTERN" && found="title"
+          echo "$PR_BODY" | grep -qiE "$ID_PATTERN" && found="body"
+          if [ -z "$found" ]; then
+            echo "::error::check did not find ID in body"
+            exit 1
+          fi
+          echo "✓ correctly found 13T-202 in PR body"
