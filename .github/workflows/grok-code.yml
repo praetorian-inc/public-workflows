@@ -475,6 +475,7 @@ jobs:
         run: |
           set -euo pipefail
           cp _trace/.github/actions/stage-review-skills/check-grok-skill-trace.sh "$RUNNER_TEMP/check-grok-skill-trace.sh"
+          cp _trace/.github/actions/stage-review-skills/grok-trace-meta.sh "$RUNNER_TEMP/grok-trace-meta.sh"
           rm -rf _trace
 
       - name: Run Grok PR Review
@@ -596,20 +597,17 @@ jobs:
         continue-on-error: true
         env:
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+        # Upload metadata only: Read results can carry SKILL.md bodies.
         run: |
           set -euo pipefail
           trace="${RUNNER_TEMP}/grok-trace.jsonl"
-          if [ ! -f "$trace" ]; then
-            exit 0
-          fi
-          if [ -z "${XAI_API_KEY}" ]; then
-            exit 0
-          fi
-          if ! python3 -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); k=os.environ["XAI_API_KEY"].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace"; then
+          script="${RUNNER_TEMP}/grok-trace-meta.sh"
+          if [ ! -f "$script" ]; then
             rm -f "$trace"
-            echo "::error::grok trace scrub failed; deleted the trace"
+            echo "::error::grok trace metadata script is missing; deleted the trace"
             exit 1
           fi
+          TRACE="$trace" OUT="${RUNNER_TEMP}/grok-trace-meta.jsonl" bash "$script"
 
       - name: Upload Grok skill trace
         if: always() && steps.context.outputs.empty_scope != 'true'
@@ -617,7 +615,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.4.3
         with:
           name: grok-skill-trace
-          path: ${{ runner.temp }}/grok-trace.jsonl
+          path: ${{ runner.temp }}/grok-trace-meta.jsonl
           retention-days: 1
           if-no-files-found: warn
 

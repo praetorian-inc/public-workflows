@@ -7,6 +7,8 @@
 # forbids asserting a field the binary has not been shown to write.
 # --output-format json does not include tool calls. If 1.0.34 emits neither
 # name, a staged run fails closed.
+# Staged runs post only text emitted after every staged SKILL.md read completed
+# (the gate is the latest per-id earliest completion); no such text fails.
 #
 # Env:
 #   TRACE      — streaming-json file
@@ -37,7 +39,8 @@ ids = [line.strip() for line in os.environ.get("IDS", "").splitlines() if line.s
 text = []
 stop = ""
 reads = {}
-completed = set()
+done_at = {}
+pos = 0
 workspace = os.environ.get("GITHUB_WORKSPACE", "").rstrip("/")
 with open(trace, encoding="utf-8") as fh:
     for line in fh:
@@ -50,9 +53,10 @@ with open(trace, encoding="utf-8") as fh:
             continue
         if not isinstance(ev, dict):
             continue
+        pos += 1
         kind = ev.get("type")
         if kind == "text" and isinstance(ev.get("data"), str):
-            text.append(ev["data"])
+            text.append((pos, ev["data"]))
         elif kind == "end" and isinstance(ev.get("stopReason"), str):
             stop = ev["stopReason"]
         elif kind == "tool_call":
@@ -63,15 +67,15 @@ with open(trace, encoding="utf-8") as fh:
             if ev.get("toolName") in ("read_file", "Read") and call_id and path:
                 reads[call_id] = path
                 if ev.get("status") == "completed":
-                    completed.add(call_id)
+                    done_at.setdefault(call_id, pos)
         elif kind == "tool_call_update" and ev.get("status") == "completed":
             call_id = ev.get("toolCallId")
             if call_id:
-                completed.add(call_id)
+                done_at.setdefault(call_id, pos)
 
-body = "".join(text)
-with open(json_out, "w", encoding="utf-8") as fh:
-    json.dump({"text": body, "stopReason": stop}, fh)
+def write(body):
+    with open(json_out, "w", encoding="utf-8") as fh:
+        json.dump({"text": body, "stopReason": stop}, fh)
 
 def fold(path):
     parts = []
@@ -92,19 +96,31 @@ def accepted(path, skill_id):
     return fold(path) == want
 
 if staged != "true":
+    write("".join(data for _, data in text))
     sys.exit(0)
+write("")
 if not ids:
     print("::error::staged=true but no skill ids were passed", file=sys.stderr)
     sys.exit(1)
 missing = []
+gate = 0
 for skill_id in ids:
-    if not any(
-        call_id in completed and accepted(path, skill_id)
+    done = [
+        done_at[call_id]
         for call_id, path in reads.items()
-    ):
+        if call_id in done_at and accepted(path, skill_id)
+    ]
+    if done:
+        gate = max(gate, min(done))
+    else:
         missing.append(skill_id)
 if missing:
     print("::error::grok trace is missing a completed Read of SKILL.md for: " + ", ".join(missing), file=sys.stderr)
+    sys.exit(1)
+body = "".join(data for at, data in text if at > gate)
+write(body)
+if not body.strip():
+    print("::error::grok wrote no review after reading the staged skills", file=sys.stderr)
     sys.exit(1)
 print("SKILL.md read confirmed for " + ", ".join(ids))
 PY
