@@ -92,5 +92,15 @@ else
   ok "backslash path is not the skill"
 fi
 
+cat > "$T/pin134.jsonl" <<'EOF'
+{"type":"tool_call","toolCallId":"pin1","toolName":"read_file","kind":"read","status":"pending","rawInput":{"target_file":".agents/skills/adhering-to-dry/SKILL.md"}}
+{"type":"tool_call_update","toolCallId":"pin1","status":null}
+{"type":"tool_call_update","toolCallId":"pin1","status":"completed"}
+{"type":"text","data":"pin 1.0.34 ok"}
+{"type":"end","stopReason":"end_turn"}
+EOF
+if STAGED=true IDS=$'adhering-to-dry\n' TRACE="$T/pin134.jsonl" JSON_OUT="$T/pin134.json" bash "$SCRIPT" >/dev/null \
+  && grep -q 'pin 1.0.34 ok' "$T/pin134.json"; then ok "1.0.34 target_file read"; else bad "1.0.34 target_file read"; fi
+
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]
