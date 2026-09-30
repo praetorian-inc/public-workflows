@@ -83,7 +83,7 @@ on:
         description: "OpenAI API key for Codex (pay-per-token billing)"
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL: when set (trusted internal callers), that repo's skill allowlist is loaded; when unset (public repos / fork PRs), the review runs without them (fail-closed — internal skills never enter a public run's logs)."
+        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL: when set, that repo's skill allowlist is loaded, including on public repos. When unset (fork PRs), the review runs without them. A public run's log and artifact will contain the staged skill bodies."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
         description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
@@ -390,10 +390,10 @@ jobs:
       # in the CWD (explicit $id invocation only — each staged skill gets
       # agents/openai.yaml allow_implicit_invocation: false).
       # praetorian-inc/review-bot-skills is the allowlist repo and is INTERNAL. Gate, with
-      # no token: the caller supplied the App credentials AND the event payload says this
-      # repo is exactly `private` or `internal`. A public repo, a fork PR (no secrets), or
-      # a payload with no visibility stages nothing (fail-closed: internal skills never
-      # enter a public run's logs). The purge step above ALWAYS runs first, so the sweep
+      # no token: the caller supplied the App credentials. A fork PR with no secrets
+      # stages nothing. A public repo with the secrets stages the allowlist; those
+      # skill bodies will be in that public run's log and artifact. The purge step
+      # above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized
       # either way. The shared stage script is the only stager: any failure leaves
       # .agents/skills absent and staged=false. Pinned to a commit SHA — callers cannot
@@ -403,12 +403,12 @@ jobs:
       # before the trusted checkout; the stage step also requires that checkout
       # to have succeeded, so a planted script can never run.
       - name: Clear _pw before the stage-script checkout
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         run: rm -rf _pw
 
       - name: Checkout stage script (same SHA as this reusable)
         id: checkout-pw
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -425,7 +425,7 @@ jobs:
       # revoke logs a benign "Token revocation failed" warning.
       - name: Mint review-bot-skills read token
         id: skills-token
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && steps.checkout-pw.outcome == 'success' }}
         continue-on-error: true
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
@@ -439,7 +439,7 @@ jobs:
       # _pw is removed afterwards so the reviewer never sees this repo's tree.
       - name: Stage curated skills
         id: stage-skills
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && steps.checkout-pw.outcome == 'success' }}
         env:
           SKILLS_TOKEN: ${{ steps.skills-token.outputs.token }}
           SKILLS_REPO: praetorian-inc/review-bot-skills
@@ -458,7 +458,7 @@ jobs:
       # Its own step so a partial checkout is removed even when checkout-pw
       # failed and the stage step was skipped.
       - name: Remove stage-script checkout
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' }}
         run: rm -rf _pw
 
       # Replicate the container half of Harden-Runner's `disable-sudo-and-containers`
