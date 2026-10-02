@@ -1,0 +1,7 @@
+## 2026-09-26 — LAB-7029
+
+- Added general, convention-aware guidance for cohesive module ownership and proportionate code organization.
+- TDD: RED GAP_NOT_FOUND; GREEN PASSED (fresh independent executor/evaluator contexts, three handoffs). This is codification and behavior preservation, not demonstrated failure repair. See validation.md.
+- Pressure: PASS in four instruction-supported handoffs combining deadline, authority, and sunk-cost pressure; no application execution or automatic activation claim.
+- Validation: skillctl, full catalog schema, local catalog resolution, pinned generation/drift, and Markdown formatting.
+- Corrected CI finding: place the skill in the on-demand library tier; retain its public ID.

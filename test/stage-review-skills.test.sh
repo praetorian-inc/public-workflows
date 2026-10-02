@@ -159,20 +159,47 @@ section() { printf '\n%s\n' "$1"; }
 install_fakes
 DEST_REL=".claude/skills"
 
-# --- 1. empty token: clean no-op ---
+# --- 1. empty token: vendored allowlist, no network ---
 section "1. empty token"
 T="$WORKDIR/t1"
 mkdir -p "$T/fix"
-skill "$T" review-a
 echo "$REF" > "$T/fix/commit"
 run_case "$T" claude ""
 check "empty token exits 0" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" = "0" ]
-check "empty token writes staged=false" "out=$(cat "$T/github_output")" \
-  [ "$(read_out "$T/github_output" staged)" = "false" ]
+check "empty token writes staged=true" "out=$(cat "$T/github_output") log=$(cat "$T/log")" \
+  [ "$(read_out "$T/github_output" staged)" = "true" ]
 check "empty token never fetches" "fetch-args present" [ ! -f "$T/fix/fetch-args" ]
 check "empty token never calls revoke" "curl was called" [ ! -f "$T/fix/revoked" ]
-check "empty token stages nothing" "DEST exists" [ ! -e "$T/ws/$DEST_REL" ]
-check "empty token explains the skip" "log=$(cat "$T/log")" grep -q '::notice::' "$T/log"
+check "empty token stages the vendored pin" "missing adhering-to-dry" \
+  [ -f "$T/ws/$DEST_REL/adhering-to-dry/SKILL.md" ]
+check "empty token does not copy SOURCE" "SOURCE copied" \
+  [ ! -e "$T/ws/$DEST_REL/SOURCE" ]
+
+section "1b. empty token, missing allowlist"
+T="$WORKDIR/t1b"
+mkdir -p "$T/fix" "$T/ws" "$T/runner-temp"
+: > "$T/github_output"
+echo "$REF" > "$T/fix/commit"
+(
+  cd "$T/ws" || exit 1
+  export FAKE_FIXTURE="$T/fix"
+  export FAKE_TOKEN="$TOKEN"
+  export SKILLS_TOKEN=""
+  export SKILLS_REPO="praetorian-inc/review-bot-skills"
+  export SKILLS_REF="$REF"
+  export SKILLS_HARNESS="claude"
+  export DEST="$DEST_REL"
+  export RUNNER_TEMP="$T/runner-temp"
+  export GITHUB_OUTPUT="$T/github_output"
+  export SKILLS_REVOKE_BACKOFF=0
+  export SKILLS_ALLOWLIST="$T/missing-allowlist"
+  bash "$SCRIPT"
+) >"$T/log" 2>&1
+echo "$?" > "$T/rc"
+check "missing allowlist exits 0" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" = "0" ]
+check "missing allowlist stages nothing" "out=$(cat "$T/github_output") log=$(cat "$T/log")" \
+  [ "$(read_out "$T/github_output" staged)" = "false" ]
+check "missing allowlist never fetches" "fetch-args present" [ ! -f "$T/fix/fetch-args" ]
 
 # --- 2. fetch failure ---
 section "2. fetch failure"
