@@ -1,0 +1,161 @@
+## [2026-08-15] — Update (LAB-5284): separate textual claims from causal claims
+
+
+## [2026-09-06] — LAB-4868
+
+### Changed
+- Rewrote inbound skill ids to gerund canonicals.
+
+### Verification
+- TDD: skipped — catalog identity merge, no new skill behavior
+
+### Changed
+
+- **SKILL.md**: new section *"Classify the Claim BEFORE You Grade Its Evidence"* — the two
+  claim classes, the discriminator ("could a competent engineer accept your quote as accurate
+  and still disagree with your conclusion?"), the causal-verb list, the ranking trap, and
+  "review multiplied within one evidence class multiplies confidence, not correctness".
+  Second core principle (*If you didn't MEASURE it, you cannot claim to know what it CAUSES*),
+  a fifth Anti-Hallucination Rules row, three red flags, four rationalizations, and a
+  `description` that makes the rule reachable for root-cause work. 118 → 155 lines after all
+  five adjudication rounds.
+- **references/causal-claims.md (new)**: measurement-artifact definition (including the
+  negative-control requirement on correlational evidence and the re-takeability condition on
+  a timing), the `HYPOTHESIS` label format, the ENG-5367 worked negative
+  example (two fully compliant reviewers, 100% accurate quotes, wrong root cause; the real
+  fix was a one-line Neo4j index in guard PR #7207, 151,501 → 602 DbHits), and the dogfood
+  table showing exactly one claim flipping to `HYPOTHESIS`.
+- **references/integration.md**: the pre-existing *"Root Cause Analysis"* section described a
+  purely textual check — the loophole written into the skill's own debugging integration.
+  Split into *Behavior Verification (textual)* and *Root Cause Confirmation (causal)*;
+  hypothesis generation now states that reading X cannot confirm X is responsible; fix
+  validation gains a before/after differential on the original measurement.
+- **references/anti-hallucination-rules.md**: Rule 9 (*No Measurement = No Cause*), explicitly
+  scoped against Rules 1–8 in both directions.
+- **references/rationalizations.md**: ten causal-class excuses with counters (six in the
+  original amendment, two added in round 2 for the third gap, two in round 3 for
+  proximate-vs-root and the uncontrolled differential).
+
+### Adjudication (PR #656)
+
+- Codex critical finding — the class table read "what happens when it runs" without
+  qualification, which would have forced statically provable defects (unconditional
+  dereference, unreachable branch, absent authorization check) to be labelled `HYPOTHESIS`.
+  Confirmed and narrowed: the causal class now begins where the quoted text stops deciding,
+  with an explicit *"Static certainty is textual"* carve-out naming both failure modes.
+- Codex suggestion — the cross-reference to `triaging-performance-reports` read as an
+  available hand-off. Confirmed; it is now marked forthcoming (LAB-5283) with an explicit
+  instruction not to attempt resolution.
+
+### Adjudication round 2 (PR #656)
+
+- Codex critical — the "static certainty is textual" table listed *"this loop is off by one —
+  it stops at `len-1`"*, which fails the skill's own discriminator: the bound is textual but
+  its wrongness needs the intended range. Confirmed. Row replaced with a genuinely exhaustive
+  example, and off-by-one promoted to the worked example of the new third gap below.
+- Gemini suggestion — *"this endpoint is unauthenticated"* differs from the handler-scoped
+  claim because middleware or a gateway could authenticate it. Confirmed as a defect, but
+  **reclassified**: the missing fact is unread text, not a runtime fact, so it is an
+  under-evidenced textual claim, not a causal one as suggested.
+- The two converge on one root cause: the textual/causal binary was not exhaustive. New
+  section *"A third gap: facts that are neither in the quote nor in a measurement"* routes
+  spec-dependence and unread-text-dependence to Rules 1–8 (read it, or scope the claim down)
+  rather than to Rule 9, mirrored into SKILL.md, anti-hallucination-rules.md, and two
+  rationalization rows.
+- Codex critical — the positive-control requirement applied to every log artifact. Confirmed:
+  a control is meaningful for *correlational* evidence and incoherent for a *deterministic
+  record of the event* (a stack trace at the failing line). Bullet split along that axis. The
+  same finding's claim of a contradiction with integration.md:148 was **refuted** — that line
+  enumerates instrument categories and asserts nothing about sufficiency.
+- Codex critical — Fix Validation said *"a passing test proves the fix is safe"* and treated
+  the reproducer as insufficient. Confirmed, and backwards on both halves: rewritten to
+  require an explicit fail-before/pass-after result, with the measurement differential
+  scoped to cost/latency/precedence claims.
+
+### Adjudication round 3 (PR #656)
+
+- Codex critical — the round-2 "deterministic record needs no control" carve-out, read together
+  with integration.md's root-cause step, licensed treating a stack trace as proof of the root
+  cause. Confirmed: a trace settles the **proximate** failure (what failed, where), never why
+  the value was bad — a race, an upstream mutation, or an invalid producer can each be the
+  origin. Both sites now separate proximate from root and carry the label upstream.
+- Codex critical — the before/after differential bullet accepted any pair, so unrelated runtime
+  variation could satisfy the rubric. Confirmed: now requires comparable workload, data, and
+  cache state; one pair suffices on a deterministic instrument; a noisy one needs repetition
+  and a reported spread.
+- Gemini suggestion — the discriminator's *yes* branch still returned the two-way verdict
+  ("Causal") and contradicted the third-gap section below it. Confirmed; this is the primary
+  classifier, so the stale branch would have misrouted every under-evidenced textual claim.
+  Rewritten as a two-step: yes, then *what would settle it?*
+- Gemini suggestion — root-cause step 4 said "only now drop the label", licensing adoption of a
+  hypothesis the instrument had killed. Confirmed and rewritten.
+- Claude — no critical issues; flagged a cosmetic line-count drift, corrected above.
+
+### Adjudication round 4 (PR #656) — findings from `ec9d2c52`, fixes at this head
+
+The re-review round budget (3/PR) was spent, so these findings were adjudicated and fixed
+without a further reviewer pass. The final head therefore carries fixes no bot has seen;
+disclosed on the PR rather than left implicit.
+
+- Gemini critical + Codex critical (they converge) — SKILL.md's own discriminator still
+  carried the round-1 binary ("If yes, the claim is causal"), and the absolute above it
+  ("can never prove what causes a failure") contradicted the static-certainty carve-out two
+  paragraphs below. Confirmed both. **This is the third recurrence of one pattern**: each
+  round narrowed the reference file and left the SKILL.md site behind. SKILL.md is the
+  entry point, so a reader who never opens `causal-claims.md` got the un-narrowed rule.
+  Both paragraphs rewritten; the absolute now carries line 63's qualifier and the
+  discriminator is the same two-step as the reference.
+- Codex critical — the timing bullet made a UTC timestamp *evidence of causal attribution*
+  and required it universally. Confirmed on both halves: a timestamp is not evidence, it is
+  what lets a reader check the number against concurrent deploys and incidents; and a
+  controlled benchmark is valid without one, because its isolation is the control. Bullet
+  reframed around "the conditions a reader needs to rule out confounders", split by
+  live-system vs controlled-benchmark.
+- Codex suggestion — the symptom-free comparison was called a **positive** control; it is a
+  **negative** control. Confirmed, and not cosmetic: an agent sent for a "positive control"
+  fetches another symptomatic surface, which cannot show a correlation is spurious.
+  Corrected at both sites, with the reason stated so the term is not re-flipped.
+- Claude, non-blocking — the rationalization count read "six" here and "seven" in the PR
+  body against 10 actual added rows. Corrected to ten with the per-round split.
+
+### Adjudication round 5 (PR #656) — findings from `ec9d2c52`, fixes at this head
+
+Also outside the spent round budget. One finding, from the `chatgpt-codex-connector` app's
+inline comments (a channel distinct from the `codex-review` workflow, whose findings were
+round 4's) — collected in the same sweep, adjudicated after them.
+
+- Codex connector P1 — SKILL.md:65 enumerated "log or metric evidence with a negative
+  control" without qualification, so a reader who never opens `causal-claims.md` would
+  demand a control for a **deterministic record** and downgrade a directly observed
+  proximate failure to `HYPOTHESIS`. Confirmed: this is the round-1 over-application
+  failure mode reappearing at the entry point, and the GREEN witness could not have caught
+  it — the witness model was given all three files, not SKILL.md alone. The enumeration now
+  scopes the control to *correlational* evidence and names the deterministic-record
+  exception inline, with the proximate-only limit attached so the round-3 distinction
+  travels with it.
+- Its second P1 (SKILL.md:67, the un-narrowed discriminator) duplicates round-4 finding 1,
+  already fixed at `5ffe6080`. No action.
+
+- TDD: PASSED — RED via the external-evidence path `updating-skills` permits ("External RED
+  evidence (a real failure) can be accepted in lieu of a fresh run"): ENG-5367 is a documented
+  real-world failure of the pre-amendment text, confirmed first-hand at both ends (the two
+  reviewer briefs, and guard PR #7207's outcome). GREEN witnessed against the amended text by
+  an independent model with no shared context (`codex exec`, gpt-5.6-sol) given only the three
+  skill files and eight unlabelled draft findings, re-run after the round-3 edits: 8/8 routed
+  as intended, covering every boundary the amendment rounds moved — an N+1 cost attribution with
+  no profile → `HYPOTHESIS`; an unconditional dereference → textual, ships as written (the
+  over-application round 1 guards); an off-by-one and an endpoint-scope claim →
+  under-evidenced textual, scoped down (round 2's third gap); a ranking of two verified
+  defects → `HYPOTHESIS`; a stack-trace-backed nil deref → causal, ships as written on a
+  deterministic artifact with no negative control demanded; the *same* trace stretched to
+  blame an uninstrumented upstream producer → `HYPOTHESIS` (round 3's proximate-vs-root
+  split — the witness separated this from the preceding case unprompted); and a single
+  uncontrolled p99 before/after pair → `HYPOTHESIS` (round 3's differential rule). Re-run a
+  third time after round 4 rewrote SKILL.md's own discriminator — the entry-point classifier,
+  so the one edit most able to break routing: **8/8 again, every verdict and reason
+  unchanged.** Re-run a fourth time after round 5 scoped the entrypoint's control
+  requirement: **8/8, verdicts unchanged**, and case 6's stated reason now names the
+  qualifier the edit added ("deterministically establish the proximate failure without a
+  negative control") — the change is visible in the classifier's reasoning, not merely
+  survived by it. This supersedes the PARTIAL verdict recorded before the witness run
+  existed.

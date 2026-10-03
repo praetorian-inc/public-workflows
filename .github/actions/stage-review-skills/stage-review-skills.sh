@@ -18,8 +18,10 @@
 # environment / stdin, never argv, and is never written to disk or echoed.
 #
 # Env:
-#   SKILLS_TOKEN    — installation token with contents:read on SKILLS_REPO
-#                     (empty = clean no-op, staged=false)
+#   SKILLS_TOKEN    — installation token with contents:read on SKILLS_REPO.
+#                     Empty stages the vendored allowlist beside this script
+#                     (no network, no key). A missing or unpinned vendor is a
+#                     clean no-op, staged=false.
 #   SKILLS_REPO     — owner/repo of the allowlist
 #   SKILLS_REF      — 40-hex commit to stage; the fetched commit must equal it
 #   SKILLS_HARNESS  — claude | codex | gemini | grok (invocation format + extras)
@@ -105,11 +107,6 @@ if [ -L "$DEST" ] || [ -L "$(dirname -- "$DEST")" ]; then
 fi
 dest_ok=1
 
-if [ -z "${SKILLS_TOKEN:-}" ]; then
-  echo "::notice::No review-bot-skills token (App secrets absent, repo not private/internal, or mint failed); reviewing without curated skills"
-  exit 0
-fi
-
 case "${SKILLS_HARNESS:-}" in
   claude) prefix="/" ;;
   codex) prefix="\$" ;;
@@ -129,31 +126,45 @@ case "$ref" in
   *[!0-9a-f]*) skip "bad SKILLS_REF" ;;
 esac
 
-tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/stage-review-skills.XXXXXX") || skip "mktemp failed"
-clone="$tmp/repo"
+if [ -z "${SKILLS_TOKEN:-}" ]; then
+  # Public callers have no App key. The allowlist beside this script is the
+  # trusted checkout of this repo at job.workflow_sha, not the PR tree.
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || skip "script dir"
+  clone="${SKILLS_ALLOWLIST:-$script_dir/allowlist}"
+  if [ ! -d "$clone" ] || [ -L "$clone" ]; then
+    skip "no vendored allowlist"
+  fi
+  got=$(tr -d '[:space:]' < "$clone/SOURCE" 2>/dev/null || true)
+  if [ "$got" != "$ref" ]; then
+    skip "vendored allowlist is not the pinned ref"
+  fi
+else
+  tmp=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/stage-review-skills.XXXXXX") || skip "mktemp failed"
+  clone="$tmp/repo"
 
-export GIT_TERMINAL_PROMPT=0
-git init -q "$clone" >/dev/null 2>&1 || skip "git init failed"
-auth=$(printf 'x-access-token:%s' "$SKILLS_TOKEN" | base64 | tr -d '\n')
-if ! GIT_CONFIG_COUNT=1 \
-  GIT_CONFIG_KEY_0=http.extraheader \
-  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
-  git -C "$clone" fetch -q --no-tags --depth 1 \
-    "https://github.com/${SKILLS_REPO}.git" "$ref" >/dev/null 2>&1; then
+  export GIT_TERMINAL_PROMPT=0
+  git init -q "$clone" >/dev/null 2>&1 || skip "git init failed"
+  auth=$(printf 'x-access-token:%s' "$SKILLS_TOKEN" | base64 | tr -d '\n')
+  if ! GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=http.extraheader \
+    GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+    git -C "$clone" fetch -q --no-tags --depth 1 \
+      "https://github.com/${SKILLS_REPO}.git" "$ref" >/dev/null 2>&1; then
+    unset auth
+    skip "fetch failed"
+  fi
   unset auth
-  skip "fetch failed"
-fi
-unset auth
-# Nothing below needs the token; kill it before touching the tree. Stage
-# only after a confirmed revoke, so staged=true implies a dead token.
-revoke || skip "token revoke not confirmed"
+  # Nothing below needs the token; kill it before touching the tree. Stage
+  # only after a confirmed revoke, so staged=true implies a dead token.
+  revoke || skip "token revoke not confirmed"
 
-got=$(git -C "$clone" rev-parse --verify -q 'FETCH_HEAD^{commit}' 2>/dev/null) || got=""
-if [ "$got" != "$ref" ]; then
-  skip "fetched commit does not match the pinned ref"
+  got=$(git -C "$clone" rev-parse --verify -q 'FETCH_HEAD^{commit}' 2>/dev/null) || got=""
+  if [ "$got" != "$ref" ]; then
+    skip "fetched commit does not match the pinned ref"
+  fi
+  git -C "$clone" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD >/dev/null 2>&1 \
+    || skip "checkout failed"
 fi
-git -C "$clone" -c advice.detachedHead=false checkout -q --detach FETCH_HEAD >/dev/null 2>&1 \
-  || skip "checkout failed"
 
 ids=()
 for skill_md in "$clone"/*/SKILL.md; do

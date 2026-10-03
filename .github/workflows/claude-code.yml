@@ -98,7 +98,7 @@ on:
         description: "Anthropic API key for Claude"
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID (client ID) for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL: when set, that repo's skill allowlist is loaded; when unset, the review runs without them."
+        description: "GitHub App ID for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL and private/internal only. A public repository stages the vendored allowlist and must not set this secret."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
         description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
@@ -446,11 +446,11 @@ jobs:
       # the base branch before the CLI starts, so a slash command or the Skill
       # tool cannot load them. The build step inlines each SKILL.md into the
       # prompt, which is the load. Skill is not in allowedTools.
-      # praetorian-inc/review-bot-skills is the allowlist repo and is INTERNAL. Gate, with
-      # no token: the caller supplied the App credentials AND the event payload says this
-      # repo is exactly `private` or `internal`. A public repo, a fork PR (no secrets), or
-      # a payload with no visibility stages nothing (fail-closed: internal skills never
-      # enter a public run's logs). The purge step above ALWAYS runs first, so the sweep
+      # The allowlist ships in this repo next to the stage script (tree 480aaf29).
+      # No App key is required. A public repo stages that copy and never mints.
+      # A private or internal repo that supplies the App secrets still fetches the
+      # same pin from praetorian-inc/review-bot-skills. Skill bodies will be in a
+      # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized
       # either way. The shared stage script is the only stager: any failure leaves
       # .claude/skills absent and staged=false. Pinned to a commit SHA — callers cannot
@@ -460,12 +460,12 @@ jobs:
       # before the trusted checkout; the stage step also requires that checkout
       # to have succeeded, so a planted script can never run.
       - name: Clear _pw before the stage-script checkout
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        if: steps.context.outputs.empty_scope != 'true'
         run: rm -rf _pw
 
       - name: Checkout stage script (same SHA as this reusable)
         id: checkout-pw
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        if: steps.context.outputs.empty_scope != 'true'
         continue-on-error: true
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -496,7 +496,7 @@ jobs:
       # _pw is removed afterwards so the reviewer never sees this repo's tree.
       - name: Stage curated skills
         id: stage-skills
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
+        if: ${{ steps.context.outputs.empty_scope != 'true' && steps.checkout-pw.outcome == 'success' }}
         env:
           SKILLS_TOKEN: ${{ steps.skills-token.outputs.token }}
           SKILLS_REPO: praetorian-inc/review-bot-skills
@@ -568,7 +568,7 @@ jobs:
       # Its own step so a partial checkout is removed even when checkout-pw
       # failed and the stage step was skipped.
       - name: Remove stage-script checkout
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') }}
+        if: steps.context.outputs.empty_scope != 'true'
         run: rm -rf _pw
 
       - name: Run Claude PR Action

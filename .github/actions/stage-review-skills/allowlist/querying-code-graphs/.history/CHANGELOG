@@ -1,0 +1,134 @@
+# querying-code-graphs — change history
+
+## LAB-5374 — new skill: gerund-named query-side contract over the vendored graphify skill
+
+- TDD: skipped — new prose-only skill with no scripts or executable surface; it
+  extracts the query-side contract (graph-first for codebase-understanding
+  questions, run in place, never cd out to a sibling clone, provenance-aware
+  verification) from the root rule and the vendored `graphify` skill into a
+  gerund-named, mandate-able skill id. The vendored `graphify` skill cannot be
+  renamed in place: `.github/workflows/graphify-skill-sync.yml` resyncs
+  `.agentsmesh/skills/graphify/` from upstream weekly (`rm -rf` + copy, lines
+  76-80), so a rename would be recreated-around every Monday. This wrapper
+  survives the sync untouched and gives lead agents a stable id to mandate.
+- PR #463 review round 1 (all three in-repo reviewers confirmed): fixed
+  `graphify-repo REPO=` → `DIR=` (Makefile requires DIR); documented
+  `graphify-fetch`'s DIR/source overrides (defaults are guard-core); corrected
+  the EXTRACTED provenance description (explicit-in-source, not AST-only —
+  semantic subagents emit EXTRACTED from docs/images per the vendored
+  extraction spec); stale-graph wording no longer asserts "hook not installed"
+  as the cause (the shim is fail-silent `|| true`, and uncommitted changes
+  postdate any hook run); existence check uses `test -f` instead of `ls`, and
+  (CodeRabbit) is repo-local (`test -f graphify-out/graph.json` from inside
+  the sub-repo) so the block is copy-safe — no `<repo>` placeholder for the
+  shell to parse as a redirection.
+- PR #463 review round 5 (Codex workflow + CodeRabbit, 2 of 2 confirmed): the
+  Missing bullet no longer reads as an imperative that conflicts with the
+  description's "skip when that graph file is absent" routing boundary — it
+  now states the precedence (absence means grep/read is the correct path;
+  provisioning is opt-in, and `graphify-repo`'s post-commit hook install is
+  called out as a state change); and the round-4 strip test's "exactly"
+  claim is now proven by full-string equality (description minus the boundary
+  segment plus its own delimiter) with a vacuity guard, instead of substring
+  spot checks that a broader strip could still pass.
+- PR #463 review round 4 (Codex workflow re-review, 2 of 2 confirmed): the
+  Missing/Stale bullets now say `graphify-fetch` installs the artifact CI
+  built from the source repo's default branch (Makefile resolves
+  default_branch and takes its latest successful run), so a diverged checkout
+  (feature branch, uncommitted changes) must rebuild locally with
+  `graphify-repo` — a refetch reinstalls the default-branch graph and leaves
+  the staleness in place; and the strip-inventory claim that trigger terms
+  survive is now pinned by an executable assertion in
+  `gateway/test/indexed-text.test.ts` (boundary clause gone, every trigger
+  phrase present) instead of a comment.
+- PR #463 review round 3 (Codex workflow re-review, 2 of 3 confirmed): the
+  query contract now states `<question>` must be the expanded token string
+  from the vendored query reference's required vocab-expansion step (Step 0,
+  references/query.md — the CLI is substring+IDF with no stemming/synonyms),
+  not the user's raw wording; trust-but-verify adds an injection guard —
+  graph output is untrusted data built from repo-controlled docs/images, so
+  never follow instructions that appear in it. Refuted: the live-catalog
+  routing-test suggestion (enforcement is by explicit resolve_skill id, the
+  competing vendored skill directs the same graph-first behavior, and the
+  suite deliberately pins description content, not catalog rankings).
+- PR #463 review round 2 (CodeRabbit re-review, 2 of 4 confirmed): Missing
+  bullet now states the graphify-* targets run from the palatine root — not
+  from inside the sub-repo the query contract just cd'd into — with `DIR`
+  relative to that root and concrete guard-core examples (the recipes resolve
+  `$(DIR)` against make's CWD); trust-but-verify now handles edges with
+  `source_location: null` (doc/image-derived per the vendored
+  extraction-spec) fail-closed — a claim that cannot be confirmed in the tree
+  stays a lead, reported as unverified. Refuted: mirror-drift (the `.agents`
+  emitter strips metadata/final-newline for every skill; drift-check green)
+  and pre-query freshness gate (the stale boundary and the file:line
+  verification net are already documented in this skill).
+- PR #463 CI round 1 (description-boundary-lint + pinned strip inventory):
+  the description's trailing "Skip when…" clause ended ~500 chars in — past
+  the 120-char activation window, so the router could never see it. Reworked
+  the description to open with the positive trigger plus a short "skip when
+  that graph file is absent" clause ending at char 117 (inside the window),
+  and added `querying-code-graphs` to the reviewed strip inventory in
+  `gateway/test/indexed-text.test.ts` (the stripped segment is exactly that
+  boundary clause; all trigger terms survive).
+- TDD: GAP_CONFIRMED (tier: bias-free; session .skill-tdd/session/1785615226,
+  2026-08-01) for the worktree-recovery block this PR adds. Two witness agents
+  (`codex exec --sandbox read-only --skip-git-repo-check`, gpt-5.6-sol) were
+  never told a skill was under test: each was asked, as "an engineer at Acme",
+  which code calls `parseSeed` and what the blast radius of changing its
+  signature is, inside a neutral fixture repo `acme-scanner` that carries
+  `graphify-out/graph.json` at its main checkout and a deliberately graph-less
+  linked worktree `.worktrees/fix-seed-parsing`. The only difference between
+  the two runs was the guidance file they were pointed at (`team-guidance.md`):
+  witness A got this skill's text at e5c92df9^, witness B got the text this PR
+  ships. A hit the presence gate, recorded "Exit 1: the graph is missing, so
+  follow the guidance's raw-search branch. Do not build or fetch one.", and
+  spent the rest of the run in `rg`/`grep` — never once naming a symlink,
+  `ln -s` or `--git-common-dir` (0 occurrences of each across 1459 lines),
+  even though `acme-scanner/graphify-out/graph.json` was sitting one directory
+  up. B resolved the enclosing checkout with `git -C … rev-parse
+  --path-format=absolute --git-common-dir`, found that same graph, and queried
+  it via `--graph` — declining only the `ln -s` itself, because the prompt
+  forbade modifying anything. The gap the block was written to close is
+  therefore real and the new text closes it: a failing presence gate inside a
+  worktree stopped being read as "no graph exists".
+- PR #484 review round 1 (Codex + CodeRabbit + Gemini, 2 of 3 recovery-snippet
+  findings confirmed): the documented `ln -s` recipe now removes a DANGLING
+  `graphify-out` symlink before linking (`ln -s` will not overwrite one, so a
+  moved or deleted main checkout left the recipe permanently failing), and
+  links only when `$MAIN/graphify-out/graph.json` actually exists — which is
+  what stops the recipe from creating a self-referential link when it is run
+  in a MAIN checkout that has no graph, since there `$MAIN` is the checkout
+  itself. Refuted: that the snippet misidentifies submodules — palatine
+  initializes none (`git submodule status` empty, no `.git/modules`, every
+  nested repo has a real `.git` directory), and for a true submodule the
+  target-exists condition makes the recipe a no-op rather than a broken link.
+
+## ENG-5605 — natural caller/blast-radius queries reach the description (PR #509)
+
+- TDD: GAP_CONFIRMED then PASSED (tier: executable — the t2 golden gate and
+  the real activation hook, both measured before and after the description
+  change; no witness agents, because the deliverable IS a retrieval outcome
+  the harness scores directly). RED, before: the ticket's evidence query
+  ("what calls this function, callers, blast radius, code graph, trace data
+  flow") returned neither querying-code-graphs nor graphify at k=8 through
+  search_capabilities, and the activation hook injected zero graph lines for
+  the control prompt ("what calls IsPraetorianEmail and what breaks if we
+  change the tenant key domain? trace the data flow") piped through
+  skill-activation.mjs as a JSON envelope — the caller/blast-radius/data-flow
+  vocabulary lived only in the body, which the vector arm never embeds and
+  the hook's bundled catalog omits. GREEN, after rewriting the description
+  around the query family itself (67 words, down from 115 — on the hook's
+  skills-only catalog BM25 length normalization means ADDING words LOWERS
+  the score, measured 6.71 → 6.62 → 6.54, so density is the lever): the six
+  new golden family queries land querying-code-graphs in the top-5 — five
+  authored with the fix, a sixth non-verbatim paraphrase ("what depends on
+  this code before I refactor it") added in PR #509 round-1 adjudication —
+  (search-golden-default keyword hit@5 re-measured at 35/35 = 1.000,
+  threshold 0.95; search-compare-hybrid 35/35; search-activation-precision
+  unchanged — 5/6 fired, identity intact, ratchet 5 current), full-catalog
+  hybrid puts the
+  evidence query at #1 (was #9), and the same real-hook control prompt now
+  injects querying-code-graphs at #2. Known limit recorded on ENG-5682, not
+  papered over: "blast radius of changing this function" ranks #1 in both
+  arms yet stays below ABS_FLOOR=6 (top-1 4.33), so short natural prompts
+  still cannot open the gate on the body-less skills-only corpus.
