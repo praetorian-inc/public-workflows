@@ -302,6 +302,11 @@ jobs:
             rm -rf graphify-out
           fi
 
+      - name: Overlay PR changed files onto the review graph
+        if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/overlay-pr-graph
+
       - name: Verify merge-ref parents are present
         run: |
           set -euo pipefail
@@ -539,11 +544,13 @@ jobs:
             that skill. Ground every finding in a specific file and line.
             ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
 
-            GRAPH: If graphify-out/graph.json exists, a CI-published code knowledge graph
-            of the default branch is on disk (provenance: graphify-out/.graphify-provenance.json).
-            Prefer `graphify query` / `graphify explain` / `graphify path` for callers and
+            GRAPH: If graphify-out/graph.json exists, it is the default-branch graph plus
+            a fail-open overlay of this PR's changed source files when
+            graphify-out/.graphify-provenance.json has overlay=applied. Prefer
+            `graphify query` / `graphify explain` / `graphify path` for callers and
             blast radius over grep. Confirm every graph answer at file:line in this PR's
-            tree — the graph is the default branch, not the PR head. Codex project-doc
+            tree. If overlay is missing or not applied, the graph omits this PR's new
+            symbols. Codex project-doc
             truncation does not apply to this wrapper; do not rely on AGENTS.md for this.
 
             ${{ inputs.prompt }}
