@@ -51,7 +51,17 @@ if [ ! -s "$DEST/graph.json" ]; then
   note "no graph.json; skip"
   exit 0
 fi
-if [ -L "$DEST" ] || [ -L "$DEST/graph.json" ]; then
+probe="$DEST"
+while [ -n "$probe" ] && [ "$probe" != "." ] && [ "$probe" != "/" ]; do
+  if [ -L "$probe" ]; then
+    note "refusing symlink dest"
+    exit 0
+  fi
+  next="${probe%/*}"
+  [ "$next" = "$probe" ] && break
+  probe="$next"
+done
+if [ -L "$DEST/graph.json" ]; then
   note "refusing symlink dest"
   exit 0
 fi
@@ -90,7 +100,7 @@ fi
 
 is_source() {
   case "$1" in
-    *.go|*.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs|*.mts|*.cts|*.py|*.rs|*.java|*.rb|*.php|*.cs|*.kt|*.swift) return 0 ;;
+    *.go|*.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs|*.mts|*.cts|*.py|*.rs|*.java|*.rb|*.php|*.cs|*.kt|*.swift|*.sh|*.bash) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -152,6 +162,9 @@ fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/overlay-pr-graph.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/tree"
+if [ -f .graphifyignore ] && [ ! -L .graphifyignore ]; then
+  cp -P -- .graphifyignore "$tmp/tree/.graphifyignore"
+fi
 while IFS= read -r path; do
   [ -n "$path" ] || continue
   if [ -L "$path" ]; then
@@ -183,11 +196,18 @@ if [ -L "$DEST/graph.json.labels" ]; then
   rm -f -- "$DEST/graph.json.labels"
 fi
 set +e
-python3 -I - "$DEST/graph.json" "$overlay_graph" "$src_files" "$drop_files" <<'PY'
+printf '%s' "$src_files" > "$tmp/src_files"
+printf '%s' "$drop_files" > "$tmp/drop_files"
+python3 -I - "$DEST/graph.json" "$overlay_graph" "$tmp/src_files" "$tmp/drop_files" <<'PY'
 import json, os, sys, tempfile
-base_path, overlay_path, raw_files, raw_drop = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-changed = {line for line in raw_files.splitlines() if line}
-drop = {line for line in raw_drop.splitlines() if line} | changed
+base_path, overlay_path, src_list, drop_list = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+changed = {line for line in open(src_list, encoding="utf-8").read().splitlines() if line}
+drop = {line for line in open(drop_list, encoding="utf-8").read().splitlines() if line} | changed
+def norm(path):
+    if path.startswith("./"):
+        return path[2:]
+    return path
+changed_norm = {norm(path) for path in changed}
 base = json.load(open(base_path, encoding="utf-8"))
 overlay = json.load(open(overlay_path, encoding="utf-8"))
 base_nodes = base.get("nodes")
@@ -210,6 +230,9 @@ new_ids = set()
 for node in overlay_nodes:
     if not isinstance(node, dict):
         continue
+    src = node.get("source_file")
+    if not isinstance(src, str) or norm(src) not in changed_norm:
+        sys.exit(2)
     node_id = node.get("id")
     if isinstance(node_id, str):
         new_ids.add(node_id)
@@ -228,11 +251,23 @@ def keep_edge(edge):
 base_edges = base.get("edges") if isinstance(base.get("edges"), list) else []
 overlay_edges = overlay.get("edges") if isinstance(overlay.get("edges"), list) else []
 merged_edges = [e for e in base_edges if keep_edge(e)]
-merged_edges.extend(e for e in overlay_edges if isinstance(e, dict))
+for edge in overlay_edges:
+    if not isinstance(edge, dict):
+        sys.exit(2)
+    src = edge.get("source_file")
+    if not isinstance(src, str) or norm(src) not in changed_norm:
+        sys.exit(2)
+    merged_edges.append(edge)
 base["nodes"] = kept
 base["edges"] = merged_edges
-if os.path.islink(base_path) or os.path.islink(os.path.dirname(base_path) or "."):
-    sys.exit(1)
+parent_probe = base_path
+while parent_probe and parent_probe not in (".", "/"):
+    if os.path.islink(parent_probe):
+        sys.exit(1)
+    nxt = os.path.dirname(parent_probe)
+    if nxt == parent_probe:
+        break
+    parent_probe = nxt
 parent = os.path.dirname(base_path) or "."
 fd, tmp_path = tempfile.mkstemp(prefix=".graph.", dir=parent)
 try:
@@ -260,6 +295,11 @@ finally:
         os.unlink(label_tmp)
 PY
 merge_rc=$?
+if [ "$merge_rc" -eq 2 ]; then
+  note "overlay source_file keys do not match changed paths; base graph unchanged"
+  record "failed" "source-file-mismatch"
+  exit 0
+fi
 if [ "$merge_rc" -ne 0 ]; then
   note "merge failed; graph may be unchanged"
   record "failed" "merge"

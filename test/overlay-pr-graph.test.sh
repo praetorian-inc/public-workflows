@@ -233,6 +233,73 @@ for wf in claude-code.yml codex-code.yml gemini-code.yml grok-code.yml; do
   fi
 done
 
+mkdir -p "$T/badfake"
+cat > "$T/badfake/graphify" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "extract" ]; then
+  out=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--out" ]; then
+      out="$arg"
+    fi
+    prev="$arg"
+  done
+  mkdir -p "$out/graphify-out"
+  printf '%s\n' '{"nodes":[{"id":"abs","label":"abs","source_file":"/tmp/abs.go"}],"edges":[]}' > "$out/graphify-out/graph.json"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$T/badfake/graphify"
+printf '%s\n' '{"nodes":[{"id":"stale","label":"stale","source_file":"pkg/new.go"}],"edges":[]}' > "$T/repo/graphify-out/graph.json"
+printf '%s\n' '{"headSha":"base"}' > "$T/repo/graphify-out/.graphify-provenance.json"
+(
+  cd "$T/repo"
+  PATH="$T/badfake:$PATH" DEST=graphify-out bash "$SCRIPT"
+)
+prov="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("overlay"))' "$T/repo/graphify-out/.graphify-provenance.json")"
+if [ "$prov" = "failed" ] && python3 -I -c 'import json,sys; ids={n["id"] for n in json.load(open(sys.argv[1]))["nodes"]}; assert ids=={"stale"}' "$T/repo/graphify-out/graph.json"; then
+  ok "source_file mismatch leaves the base graph"
+else
+  bad "source_file mismatch leaves the base graph" "overlay=$prov"
+fi
+
+mkdir -p "$T/outside" "$T/linkrepo"
+git -C "$T/linkrepo" init -q
+git -C "$T/linkrepo" config user.email "t@example.com"
+git -C "$T/linkrepo" config user.name "t"
+printf 'package old\n' > "$T/linkrepo/old.go"
+git -C "$T/linkrepo" add old.go
+git -C "$T/linkrepo" commit -q -m base
+printf 'package p\n' > "$T/linkrepo/pkg.go"
+mkdir -p "$T/linkrepo/pkg"
+printf 'package p\n' > "$T/linkrepo/pkg/new.go"
+git -C "$T/linkrepo" add pkg.go pkg/new.go
+git -C "$T/linkrepo" commit -q -m head
+printf '%s\n' '{"nodes":[{"id":"x","label":"x","source_file":"a.go"}],"edges":[]}' > "$T/outside/graph.json"
+printf '%s\n' '{"headSha":"base"}' > "$T/outside/.graphify-provenance.json"
+ln -s "$T/outside" "$T/linkrepo/linkparent"
+mkdir -p "$T/linkrepo/linkparent/nested"
+printf '%s\n' '{"nodes":[{"id":"x","label":"x","source_file":"a.go"}],"edges":[]}' > "$T/linkrepo/linkparent/nested/graph.json"
+printf '%s\n' '{"headSha":"base"}' > "$T/linkrepo/linkparent/nested/.graphify-provenance.json"
+(
+  cd "$T/linkrepo"
+  PATH="$T/bin:$PATH" DEST=linkparent/nested bash "$SCRIPT"
+)
+prov="$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("overlay"))' "$T/outside/nested/.graphify-provenance.json")"
+if [ "$prov" != "applied" ] && ! grep -q new_fn "$T/outside/nested/graph.json"; then
+  ok "symlinked ancestor dest is not written"
+else
+  bad "symlinked ancestor dest is not written" "overlay=$prov"
+fi
+
+if grep -q '\*\.sh|\*\.bash' "$SCRIPT"; then
+  ok "shell sources are extractable"
+else
+  bad "shell sources are extractable" "extension missing"
+fi
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 if [ "$FAIL" -ne 0 ]; then
