@@ -49,6 +49,20 @@ else
   bad "explain uses the changed node id, not the shared label" "notes=$(cat "$T/repo/graphify-out/pr-head-notes.md" 2>/dev/null || echo missing)"
 fi
 
+printf '%s\n' '{"nodes":[{"id":"dup","label":"Dup","source_file":"src/dup.go"},{"id":"dup","label":"Dup","source_file":"src/dup.go"},{"id":"other","label":"Other","source_file":"src/dup.go"}],"edges":[]}' > "$T/repo/graphify-out/graph.json"
+printf '%s\n' "src/dup.go" > "$T/repo/.grok-review/changed-files.txt"
+rm -f "$T/repo/graphify-out/pr-head-notes.md"
+(
+  cd "$T/repo"
+  PATH="$T/bin:$PATH" DEST=graphify-out CHANGED=.grok-review/changed-files.txt bash "$SCRIPT"
+)
+dup_count="$(grep -c 'explains dup' "$T/repo/graphify-out/pr-head-notes.md" || true)"
+if [ "$dup_count" -eq 1 ] && grep -q 'explains other' "$T/repo/graphify-out/pr-head-notes.md"; then
+  ok "duplicate node id is explained once"
+else
+  bad "duplicate node id is explained once" "dup_count=$dup_count"
+fi
+
 mkdir -p "$T/victim"
 printf '%s\n' '{"nodes":[{"id":"kept","label":"keptFn","source_file":"pkg/old.go"}],"edges":[]}' > "$T/victim/graph.json"
 printf 'SECRET\n' > "$T/victim/pr-head-notes.md"

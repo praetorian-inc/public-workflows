@@ -42,6 +42,7 @@ nodes = graph.get("nodes")
 if not isinstance(nodes, list):
     sys.exit(0)
 seen = []
+seen_ids = set()
 for node in nodes:
     if not isinstance(node, dict):
         continue
@@ -54,8 +55,9 @@ for node in nodes:
         continue
     if not isinstance(label, str) or not label or "\n" in label or "\r" in label or "\t" in label:
         label = node_id
-    if node_id in seen:
+    if node_id in seen_ids:
         continue
+    seen_ids.add(node_id)
     seen.append(node_id + "\t" + label)
     if len(seen) == 12:
         break
