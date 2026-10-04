@@ -302,10 +302,32 @@ jobs:
             rm -rf graphify-out
           fi
 
-      - name: Overlay PR changed files onto the review graph
+      - name: Clear _pw before the overlay-script checkout
+        if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
+        run: rm -rf -- _pw
+
+      - name: Checkout overlay script
+        id: checkout-overlay
         if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
         continue-on-error: true
-        uses: ./.github/actions/overlay-pr-graph
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _pw
+          persist-credentials: false
+
+      - name: Overlay PR changed files onto the review graph
+        if: steps.checkout-overlay.outcome == 'success'
+        continue-on-error: true
+        env:
+          DEST: graphify-out
+          REVIEW_EXCLUDE_PATHSPECS: ${{ inputs.review_exclude_pathspecs }}
+        run: bash _pw/.github/actions/overlay-pr-graph/overlay-pr-graph.sh
+
+      - name: Remove overlay script checkout
+        if: always()
+        run: rm -rf _pw
 
       - name: Verify merge-ref parents are present
         run: |
