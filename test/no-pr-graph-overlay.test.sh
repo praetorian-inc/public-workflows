@@ -20,8 +20,10 @@ for wf in claude-code.yml codex-code.yml gemini-code.yml grok-code.yml; do
     bad "$wf does not splice a PR graph" "missing workflow"
     continue
   fi
-  if grep -E -q 'overlay-pr-graph|overlay=applied|pr-head-notes' "$path"; then
+  if grep -E -q 'overlay-pr-graph|overlay=applied' "$path"; then
     bad "$wf does not splice a PR graph" "overlay reference remains"
+  elif [ "$wf" != "grok-code.yml" ] && grep -q 'pr-head-notes' "$path"; then
+    bad "$wf does not splice a PR graph" "notes file is Grok-only"
   elif ! awk '/GRAPH:/ && /default-branch graph only/ { hit=1 } END { exit(hit ? 0 : 1) }' "$path"; then
     bad "$wf does not splice a PR graph" "GRAPH prompt missing default-branch graph only"
   else
