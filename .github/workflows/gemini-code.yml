@@ -324,6 +324,11 @@ jobs:
             rm -rf graphify-out
           fi
 
+      - name: Overlay PR changed files onto the review graph
+        if: needs.fetch-graph.result == 'success' && needs.fetch-graph.outputs.present == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/overlay-pr-graph
+
       - name: Build review context (PR diff + changed files)
         id: context
         env:
@@ -702,13 +707,14 @@ jobs:
           `graphify add`, or `graphify hook`. You cannot modify the repo; produce
           your review as text only.
 
-          GRAPH: If graphify-out/graph.json exists, a CI-published code knowledge
-          graph of the default branch is on disk (provenance:
-          graphify-out/.graphify-provenance.json). Prefer graphify query / explain
-          / path for callers and blast radius over grep_search. Confirm every graph
-          answer at file:line in this PR's tree — the graph is the default branch,
-          not the PR head. grep_search and read_file remain required for hunks and
-          for symbols the graph omits.
+          GRAPH: If graphify-out/graph.json exists, it is the default-branch graph
+          plus a fail-open overlay of this PR's changed source files when
+          graphify-out/.graphify-provenance.json has overlay=applied. Prefer
+          graphify query / explain / path for callers and blast radius over
+          grep_search. Confirm every graph answer at file:line in this PR's tree.
+          If overlay is missing or not applied, the graph omits this PR's new
+          symbols. grep_search and read_file remain required for hunks and for
+          symbols the graph omits.
 
           SCOPE: If `.gemini-review/excluded-paths.txt` exists, the paths listed in it
           are generated artifacts that CI verifies mechanically — they are excluded
