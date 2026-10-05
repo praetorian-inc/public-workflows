@@ -209,6 +209,27 @@ codex_case unused "codex write_stdin finishing a subdirectory session is rejecte
   "$(out c1 $'Chunk ID: a1\nWall time: 10.0 seconds\nProcess running with session ID 7\nOutput:\n')" \
   "$(call c2 write_stdin '{"session_id":7,"chars":""}')" "$(out c2 "$EXITED0")"
 
+# Codex runs cmd under args.shell, so a PR-committed shell binary could exit 0
+# without graphify; only system shells and argument keys that cannot change
+# what runs count.
+codex_case pass "codex exec_command with shell bash counts" "gate rejected the default system shell" "" \
+  "$(call c1 exec_command '{"shell":"bash","cmd":"graphify query callers","yield_time_ms":250}')" "$(out c1 "$EXITED0")"
+codex_case unused "codex exec_command with a workspace shell is rejected" "gate accepted a PR-controlled shell binary" "graphify not used" \
+  "$(call c1 exec_command '{"shell":"./bash","cmd":"graphify query callers"}')" "$(out c1 "$EXITED0")"
+codex_case unused "codex exec_command with an absolute non-system shell is rejected" "gate accepted a shell outside the system set" "graphify not used" \
+  "$(call c1 exec_command '{"shell":"/tmp/sh","cmd":"graphify query callers"}')" "$(out c1 "$EXITED0")"
+codex_case pass "codex non-string shell is skipped, not fatal" "gate crashed or credited a malformed shell argument" "" \
+  "$(call c1 exec_command '{"shell":["bash"],"cmd":"graphify query callers"}')" "$(out c1 "$EXITED0")" \
+  "$(call c2 exec_command '{"cmd":"graphify query callers"}')" "$(out c2 "$EXITED0")"
+codex_case unused "codex non-string shell alone is rejected" "gate credited a malformed shell argument" "graphify not used" \
+  "$(call c1 exec_command '{"shell":{"path":"bash"},"cmd":"graphify query callers"}')" "$(out c1 "$EXITED0")"
+codex_case unused "codex exec_command with environment_id is rejected" "gate accepted a call aimed at another environment" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query callers","environment_id":"remote"}')" "$(out c1 "$EXITED0")"
+codex_case unused "codex shell_command with sandbox_permissions is rejected" "gate accepted an escalated call" "graphify not used" \
+  "$(call c1 shell_command '{"command":"graphify query callers","sandbox_permissions":"require_escalated"}')" "$(out c1 $'Exit code: 0\nWall time: 0.2 seconds\nOutput:\nok')"
+codex_case pass "codex shell_command with login and timeout_ms counts" "gate rejected harmless shell_command arguments" "" \
+  "$(call c1 shell_command '{"command":"graphify query callers","login":false,"timeout_ms":60000}')" "$(out c1 $'Exit code: 0\nWall time: 0.2 seconds\nOutput:\nok')"
+
 # Shell expansion makes the argv graphify runs with differ from the one the
 # checker reads, so $, backticks and unquoted glob/brace/tilde words do not count.
 # shellcheck disable=SC2016  # literal shell text the checker must reject

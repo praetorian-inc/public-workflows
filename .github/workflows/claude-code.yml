@@ -238,12 +238,13 @@ jobs:
     runs-on: ubuntu-24.04
 
     # One review per PR in flight, whatever the caller's own concurrency. The
-    # "Convert to PR review" step matches comments by created_at >=
-    # CLAUDE_REVIEW_STARTED_AT and, on an unused verdict, deletes them, so an
+    # "Convert to PR review" step matches comments by an
+    # ID absent from the list taken before the review (else created_at >=
+    # CLAUDE_REVIEW_STARTED_AT) and, on an unused verdict, deletes them, so an
     # overlapping run could convert or delete this run's comment. Serialized,
-    # a window started from GitHub's clock only holds this run's comments; the
-    # runner-clock fallback (minus 120s) can reach the previous run's, so then
-    # only the newest is deleted. The group differs
+    # the list (or a start from GitHub's clock) only admits this run's
+    # comments; with neither, the runner-clock fallback (minus 120s) can reach
+    # the previous run's, so then only the newest is deleted. The group differs
     # from callers' workflow-level claude-<PR> group so the two cannot collide.
     concurrency:
       group: claude-review-job-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
@@ -604,10 +605,27 @@ jobs:
         if: steps.context.outputs.empty_scope != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/graphify-queries.jsonl"
           rm -f -- "$log"
+          # The Claude Review comments that exist before this run: "Convert to
+          # PR review" leaves them alone and acts only on the ones added since.
+          # An empty file means the listing failed; Convert then falls back to
+          # the start time below.
+          prior="$RUNNER_TEMP/claude-review-prior-ids.json"
+          if ! gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("## Claude Review"))) | .id' \
+            > "$prior.ids" 2>/dev/null; then
+            : > "$prior.ids"
+            echo "::warning::Could not list existing Claude Review comments; Convert to PR review falls back to CLAUDE_REVIEW_STARTED_AT."
+            : > "$prior"
+          else
+            python3 -I -c 'import json,sys; print(json.dumps([int(l) for l in open(sys.argv[1]) if l.strip()]))' "$prior.ids" > "$prior"
+          fi
+          rm -f -- "$prior.ids"
           started_at=""
           fallback=0
           if headers="$(gh api -i rate_limit 2>/dev/null)"; then
@@ -630,6 +648,7 @@ jobs:
             # reach a previous run's comment, so an unused verdict deletes only
             # the newest one.
             echo "CLAUDE_REVIEW_STARTED_AT_FALLBACK=$fallback"
+            echo "CLAUDE_REVIEW_PRIOR_IDS=$prior"
           } >> "$GITHUB_ENV"
 
       - name: Run Claude PR Action
@@ -943,18 +962,28 @@ jobs:
                 }
               );
 
-              // Only comments posted since this run's review started: an older
-              // run's comment (left behind when its Convert step was skipped)
-              // must be neither converted nor deleted by this run.
+              // Only comments this run posted: an older run's comment (left
+              // behind when its Convert step was skipped) must be neither
+              // converted nor deleted by this run. The IDs listed before the
+              // review ran identify them exactly; without that list, fall back
+              // to the start time.
+              let priorIds = null;
+              try {
+                const raw = require('fs').readFileSync(process.env.CLAUDE_REVIEW_PRIOR_IDS || '', 'utf8').trim();
+                const parsed = raw ? JSON.parse(raw) : null;
+                if (Array.isArray(parsed)) priorIds = new Set(parsed);
+              } catch (err) {
+                priorIds = null;
+              }
               const startedAt = Date.parse(process.env.CLAUDE_REVIEW_STARTED_AT || '');
-              if (Number.isNaN(startedAt)) {
-                console.log('CLAUDE_REVIEW_STARTED_AT missing — skipping conversion.');
+              if (!priorIds && Number.isNaN(startedAt)) {
+                console.log('CLAUDE_REVIEW_PRIOR_IDS and CLAUDE_REVIEW_STARTED_AT missing — skipping conversion.');
                 return;
               }
               const ours = comments
                 .filter(c => c.user.login === 'github-actions[bot]')
                 .filter(c => c.body.includes('## Claude Review'))
-                .filter(c => Date.parse(c.created_at) >= startedAt);
+                .filter(c => priorIds ? !priorIds.has(c.id) : Date.parse(c.created_at) >= startedAt);
               const claudeComment = ours[ours.length - 1];
 
               if (!claudeComment) {
@@ -963,9 +992,9 @@ jobs:
               }
 
               if (process.env.GRAPHIFY_VERDICT === 'unused') {
-                // A fallback start time can reach a previous run's comment, so
-                // only the newest is certainly this run's.
-                const doomed = process.env.CLAUDE_REVIEW_STARTED_AT_FALLBACK === '1'
+                // Without the prior-ID list, a fallback start time can reach a
+                // previous run's comment, so only the newest is deleted.
+                const doomed = !priorIds && process.env.CLAUDE_REVIEW_STARTED_AT_FALLBACK === '1'
                   ? [claudeComment]
                   : ours;
                 for (const c of doomed) {

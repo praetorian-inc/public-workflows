@@ -21,7 +21,9 @@
 #   codex    — Codex rollout JSONL directory (TRACE). Passes on one
 #              response_item function_call (exec_command or shell_command)
 #              that runs in the workspace root (no workdir, or one resolving
-#              to the cwd), whose command is a lone graphify query|explain|path
+#              to the cwd) with only argument keys that cannot change what
+#              runs (any shell a system bash or sh), whose command is a lone
+#              graphify query|explain|path
 #              with no shell expansion or redirection other than a whole-word
 #              N>&M, and whose paired function_call_output reports exit
 #              code 0.
@@ -289,6 +291,22 @@ def in_workspace(args):
     root = os.path.realpath(os.getcwd())
     return os.path.realpath(os.path.join(root, workdir)) == root
 
+# The arguments of Codex's exec_command and shell_command tools that cannot
+# change what runs or where. Anything else does not count: an unknown key, the
+# approval keys (sandbox_permissions, prefix_rule, additional_permissions), an
+# environment_id that targets another environment, or a shell binary other
+# than a system shell (a PR-committed "shell" could exit 0 without graphify).
+SAFE_ARGS = {
+    "exec_command": {"cmd", "workdir", "shell", "tty", "yield_time_ms", "max_output_tokens", "login"},
+    "shell_command": {"command", "workdir", "timeout_ms", "timeout", "login"},
+}
+SYSTEM_SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
+
+def safe_args(name, args):
+    if not set(args) <= SAFE_ARGS.get(name, set()):
+        return False
+    return "shell" not in args or (isinstance(args["shell"], str) and args["shell"] in SYSTEM_SHELLS)
+
 def codex_used(path):
     calls, outputs, records = {}, {}, 0
     order = []
@@ -324,7 +342,7 @@ def codex_used(path):
                 return True
             continue
         cmd = args.get("cmd") if name == "exec_command" else args.get("command") if name == "shell_command" else None
-        if not lone_graphify(cmd) or not in_workspace(args):
+        if not lone_graphify(cmd) or not in_workspace(args) or not safe_args(name, args):
             continue
         code = exit_code(text)
         if code == 0:
