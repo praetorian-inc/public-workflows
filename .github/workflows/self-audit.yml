@@ -20,7 +20,6 @@ on:
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
       - 'test/no-pr-graph-overlay.test.sh'
-      - 'test/review-graph-notes.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
       - 'test/check-graphify-use.test.sh'
   push:
@@ -38,7 +37,6 @@ on:
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
       - 'test/no-pr-graph-overlay.test.sh'
-      - 'test/review-graph-notes.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
       - 'test/check-graphify-use.test.sh'
 
@@ -95,9 +93,6 @@ jobs:
 
       - name: Unit-test no PR graph overlay
         run: bash test/no-pr-graph-overlay.test.sh
-
-      - name: Unit-test review graph notes
-        run: bash test/review-graph-notes.test.sh
 
       - name: Grok skill-trace gate
         run: bash test/check-grok-skill-trace.test.sh

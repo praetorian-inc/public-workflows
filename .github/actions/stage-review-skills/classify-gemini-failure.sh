@@ -16,7 +16,7 @@ STDERR="${STDERR:?STDERR is required}"
 DEST="${DEST:?DEST is required}"
 STATUS="${STATUS:?STATUS is required}"
 
-python3 - "$TRACE" "$STDERR" "$DEST" "$STATUS" <<'PY'
+python3 -I - "$TRACE" "$STDERR" "$DEST" "$STATUS" <<'PY'
 import json, os, sys
 
 trace, stderr, dest, status = sys.argv[1:]

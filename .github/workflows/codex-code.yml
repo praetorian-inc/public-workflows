@@ -600,9 +600,10 @@ jobs:
           fi
           cp _trace/.github/actions/stage-review-skills/check-graphify-use.sh "$RUNNER_TEMP/check-graphify-use.sh"
           rm -rf _trace
-          # The checker reports an unstaged trace ("Codex session trace missing
-          # or unstaged") separately from "graphify not used", because the
-          # stage step above is continue-on-error.
+          # The checker exits 1 for "graphify not used" and 2 when it cannot
+          # evaluate, which includes an unstaged trace ("Codex session trace
+          # missing or unstaged") because the stage step above is
+          # continue-on-error. Both fail this step.
           REQUIRED=true FORMAT=codex TRACE=".codex-review/trace" bash "$RUNNER_TEMP/check-graphify-use.sh"
 
       - name: Upload Codex session trace

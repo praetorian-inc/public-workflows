@@ -30,7 +30,7 @@ if [ ! -f "$TRACE" ]; then
   fail "grok trace is missing"
 fi
 
-python3 - "$TRACE" "$STAGED" "$JSON_OUT" <<'PY'
+python3 -I - "$TRACE" "$STAGED" "$JSON_OUT" <<'PY'
 import json, os, sys
 
 trace, staged, json_out = sys.argv[1], sys.argv[2], sys.argv[3]

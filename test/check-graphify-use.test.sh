@@ -12,19 +12,24 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/graphify-use.XXXXXX")"
 trap 'rm -rf "$T"' EXIT
 T="$(cd -- "$T" && pwd -P)"
 
-# expect <pass|fail> <name> <reason> [stderr-substring] -- <env...>
-# Runs the checker with the given env assignments and checks the exit status.
-# A stderr substring, when given, must appear in the checker's output.
+# expect <pass|unused|error> <name> <reason> [output-substring] -- <env...>
+# Runs the checker with the given env assignments and checks the exit status:
+# pass = 0 (used or skipped), unused = 1 (graphify not used), error = 2 (the
+# check could not evaluate). An output substring, when given, must appear.
 expect() {
   local want="$1" name="$2" reason="$3" needle="$4"
   shift 5
-  local out rc
+  local out rc code
+  case "$want" in
+    pass) code=0 ;;
+    unused) code=1 ;;
+    error) code=2 ;;
+    *) bad "$name" "unknown expectation $want"; return ;;
+  esac
   out="$(cd -- "$T/ws" && env "$@" bash "$SCRIPT" 2>&1)"
   rc=$?
-  if [ "$want" = pass ] && [ "$rc" -ne 0 ]; then
-    bad "$name" "$reason (exit $rc: $out)"
-  elif [ "$want" = fail ] && [ "$rc" -eq 0 ]; then
-    bad "$name" "$reason"
+  if [ "$rc" -ne "$code" ]; then
+    bad "$name" "$reason (want exit $code, got $rc: $out)"
   elif [ -n "$needle" ] && [[ "$out" != *"$needle"* ]]; then
     bad "$name" "output lacks '$needle': $out"
   else
@@ -51,19 +56,19 @@ expect pass "querylog corpus is compared by realpath" "gate rejected a symlinked
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 record "$T/other/graph.json" > "$LOG"
-expect fail "querylog record for another graph is rejected" "gate accepted a different corpus" "no graphify query" -- \
+expect unused "querylog record for another graph is rejected" "gate accepted a different corpus" "no graphify query" -- \
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 : > "$LOG"
-expect fail "empty querylog is rejected" "gate accepted an empty log" "" -- \
+expect unused "empty querylog is rejected" "gate accepted an empty log" "" -- \
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 rm -f "$LOG"
-expect fail "missing querylog is rejected" "gate accepted a missing log" "query log is missing" -- \
+expect unused "missing querylog is rejected" "gate accepted a missing log" "query log is missing" -- \
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 { printf '{"kind":"query","corpus":"%s"\n' "$GRAPH"; printf 'not json\n'; printf '["%s"]\n' "$GRAPH"; } > "$LOG"
-expect fail "malformed querylog lines are rejected" "gate accepted a truncated or non-object record" "" -- \
+expect unused "malformed querylog lines are rejected" "gate accepted a truncated or non-object record" "" -- \
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 { printf 'not json\n'; record "$GRAPH"; } > "$LOG"
@@ -116,13 +121,13 @@ codex_case pass "codex long-running call finished by write_stdin counts" "gate r
   "$(out c1 $'Chunk ID: a1\nWall time: 10.0 seconds\nProcess running with session ID 7\nOutput:\n')" \
   "$(call c2 write_stdin '{"session_id":7,"chars":""}')" "$(out c2 "$EXITED0")"
 
-codex_case fail "codex nonzero exit is rejected" "gate accepted a failed graphify call" "graphify not used" \
+codex_case unused "codex nonzero exit is rejected" "gate accepted a failed graphify call" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"graphify query callers"}')" "$(out c1 "$EXITED1")"
 
-codex_case fail "codex call with no output is rejected" "gate accepted a call that never returned" "graphify not used" \
+codex_case unused "codex call with no output is rejected" "gate accepted a call that never returned" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"graphify query callers"}')"
 
-codex_case fail "codex exit code inside Output is not trusted" "gate read the exit code from command output" "" \
+codex_case unused "codex exit code inside Output is not trusted" "gate read the exit code from command output" "" \
   "$(call c1 exec_command '{"cmd":"graphify query callers"}')" \
   "$(out c1 $'Wall time: 0.4 seconds\nProcess exited with code 1\nOutput:\nProcess exited with code 0')"
 
@@ -135,72 +140,72 @@ codex_case pass "codex graphify with a trailing newline counts" "gate rejected t
 codex_case pass "codex quoted operators inside the question count" "gate split on a quoted operator" "" \
   "$(call c1 exec_command '{"cmd":"graphify query \"a; b && c | d\""}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex path-qualified ./graphify is rejected" "gate accepted a PR-committed graphify executable" "graphify not used" \
+codex_case unused "codex path-qualified ./graphify is rejected" "gate accepted a PR-committed graphify executable" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"./graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex PATH= prefix is rejected" "gate accepted a PATH override to a planted graphify" "graphify not used" \
+codex_case unused "codex PATH= prefix is rejected" "gate accepted a PATH override to a planted graphify" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"PATH=.:/usr/bin graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex GRAPHIFY_OUT= prefix is rejected" "gate accepted a redirected graph" "graphify not used" \
+codex_case unused "codex GRAPHIFY_OUT= prefix is rejected" "gate accepted a redirected graph" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"GRAPHIFY_OUT=sub/graphify-out graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex path-qualified ./bash -lc wrapper is rejected" "gate accepted a PR-committed shell" "graphify not used" \
+codex_case unused "codex path-qualified ./bash -lc wrapper is rejected" "gate accepted a PR-committed shell" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"./bash -lc \"graphify query callers\""}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex --graph override is rejected" "gate accepted a query against a planted graph" "graphify not used" \
+codex_case unused "codex --graph override is rejected" "gate accepted a query against a planted graph" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"graphify query callers --graph sub/planted.json"}')" "$(out c1 "$EXITED0")"
 
 codex_case pass "codex /bin/bash -lc wrapper counts" "gate rejected the system shell" "" \
   "$(call c1 exec_command '{"cmd":"/bin/bash -lc \"graphify query callers\""}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex write_stdin finish with nonzero exit is rejected" "gate accepted a session that exited 1" "graphify not used" \
+codex_case unused "codex write_stdin finish with nonzero exit is rejected" "gate accepted a session that exited 1" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"graphify query callers"}')" \
   "$(out c1 $'Chunk ID: a1\nWall time: 10.0 seconds\nProcess running with session ID 7\nOutput:\n')" \
   "$(call c2 write_stdin '{"session_id":7,"chars":""}')" "$(out c2 "$EXITED1")"
 
-codex_case fail "codex write_stdin to another session is rejected" "gate credited an unrelated session's exit" "graphify not used" \
+codex_case unused "codex write_stdin to another session is rejected" "gate credited an unrelated session's exit" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"graphify query callers"}')" \
   "$(out c1 $'Chunk ID: a1\nWall time: 10.0 seconds\nProcess running with session ID 7\nOutput:\n')" \
   "$(call c2 write_stdin '{"session_id":8,"chars":""}')" "$(out c2 "$EXITED0")"
 
-codex_case fail "codex shell_command exit code inside Output is not trusted" "gate read Exit code: from command output" "" \
+codex_case unused "codex shell_command exit code inside Output is not trusted" "gate read Exit code: from command output" "" \
   "$(call c1 shell_command '{"command":"graphify query callers"}')" \
   "$(out c1 $'Exit code: 1\nWall time: 0.2 seconds\nOutput:\nExit code: 0')"
 
-codex_case fail "codex true || graphify is rejected" "gate accepted a graphify call that never runs" "" \
+codex_case unused "codex true || graphify is rejected" "gate accepted a graphify call that never runs" "" \
   "$(call c1 exec_command '{"cmd":"true || graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex test && graphify is rejected" "gate accepted a chained graphify call" "" \
+codex_case unused "codex test && graphify is rejected" "gate accepted a chained graphify call" "" \
   "$(call c1 exec_command '{"cmd":"test -f graphify-out/graph.json && graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex graphify; true is rejected" "gate tied a later command's exit to graphify" "" \
+codex_case unused "codex graphify; true is rejected" "gate tied a later command's exit to graphify" "" \
   "$(call c1 exec_command '{"cmd":"graphify query callers; true"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex graphify | head is rejected" "gate tied a pipe's exit to graphify" "" \
+codex_case unused "codex graphify | head is rejected" "gate tied a pipe's exit to graphify" "" \
   "$(call c1 exec_command '{"cmd":"graphify query callers | head"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex echo graphify is rejected" "gate accepted echo" "" \
+codex_case unused "codex echo graphify is rejected" "gate accepted echo" "" \
   "$(call c1 exec_command '{"cmd":"echo graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex non-function_call with arguments is rejected" "gate accepted a custom_tool_call / event field" "" \
+codex_case unused "codex non-function_call with arguments is rejected" "gate accepted a custom_tool_call / event field" "" \
   '{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec_command","call_id":"c1","input":"x","arguments":"{\"cmd\":\"graphify query callers\"}"}}' \
   '{"type":"event_msg","payload":{"type":"exec_command_end","command":["graphify","query","callers"],"exit_code":0}}' \
   "$(out c1 "$EXITED0")"
 
-codex_case fail "codex other tool name is rejected" "gate accepted a non-shell function_call" "" \
+codex_case unused "codex other tool name is rejected" "gate accepted a non-shell function_call" "" \
   "$(call c1 apply_patch '{"cmd":"graphify query callers"}')" "$(out c1 "$EXITED0")"
 
-codex_case fail "codex trace with no rollout records is reported as missing" "gate accepted an empty trace" "Codex session trace missing or unstaged" \
+codex_case error "codex trace with no rollout records is reported as missing" "gate accepted an empty trace" "Codex session trace missing or unstaged" \
   '{"type":"session_meta","payload":{"id":"x"}}'
 
 rm -rf "$CX"
 mkdir -p "$CX"
 : > "$CX/session-files.txt"
-expect fail "codex trace with only the file list is reported as missing" "gate accepted an unstaged trace" "Codex session trace missing or unstaged" -- \
+expect error "codex trace with only the file list is reported as missing" "gate accepted an unstaged trace" "Codex session trace missing or unstaged" -- \
   REQUIRED=true FORMAT=codex TRACE="$CX"
 
 rm -rf "$CX"
-expect fail "codex missing trace directory is reported as missing" "gate accepted a missing trace" "Codex session trace missing or unstaged" -- \
+expect error "codex missing trace directory is reported as missing" "gate accepted a missing trace" "Codex session trace missing or unstaged" -- \
   REQUIRED=true FORMAT=codex TRACE="$CX"
 
 expect pass "not required skips a missing codex trace" "gate failed with REQUIRED=false" "" -- \
@@ -208,21 +213,45 @@ expect pass "not required skips a missing codex trace" "gate failed with REQUIRE
 
 # ---- removed formats ----
 printf '%s\n' '{"type":"tool_use","tool_name":"run_shell_command","parameters":{"command":"graphify query x"}}' > "$T/gemini.jsonl"
-expect fail "the removed gemini argv format is rejected" "gate still parses gemini traces" "unknown graphify trace format" -- \
+expect error "the removed gemini argv format is rejected" "gate still parses gemini traces" "unknown graphify trace format" -- \
   REQUIRED=true FORMAT=gemini TRACE="$T/gemini.jsonl"
 
-# ---- grok (unchanged) ----
-printf '%s\n' '{"type":"tool_call","toolCallId":"1","toolName":"Read","status":"completed","rawInput":{"path":"not-graphify-out/pr-head-notes.md"}}' > "$T/grok-bad.jsonl"
-expect fail "lookalike notes path is rejected" "gate accepted a different directory" "" -- \
-  REQUIRED=true FORMAT=grok TRACE="$T/grok-bad.jsonl"
+expect error "the removed grok notes format is rejected" "gate still parses grok notes reads" "unknown graphify trace format" -- \
+  REQUIRED=true FORMAT=grok TRACE="$T/gemini.jsonl"
 
-printf '%s\n' '{"type":"tool_call","toolCallId":"1","toolName":"Read","status":"completed","rawInput":{"path":"../graphify-out/pr-head-notes.md"}}' > "$T/grok-up.jsonl"
-expect fail "notes path above the workspace is rejected" "gate folded .. above the root" "" -- \
-  REQUIRED=true FORMAT=grok TRACE="$T/grok-up.jsonl"
+# ---- evaluation errors exit 2, not 1 ----
+expect error "unknown format exits 2" "gate treated an unknown format as unused" "unknown graphify trace format" -- \
+  REQUIRED=true FORMAT=bogus TRACE="$T/gemini.jsonl"
 
-printf '%s\n' '{"type":"tool_call","toolCallId":"1","toolName":"Read","status":"completed","rawInput":{"path":"graphify-out/pr-head-notes.md"}}' > "$T/grok.jsonl"
-expect pass "grok notes read counts" "gate rejected a completed Read" "" -- \
-  REQUIRED=true FORMAT=grok TRACE="$T/grok.jsonl"
+expect error "missing FORMAT exits 2" "gate treated a missing FORMAT as unused" "FORMAT is required" -- \
+  REQUIRED=true
+
+expect error "querylog without QUERY_LOG exits 2" "gate treated a missing QUERY_LOG setting as unused" "QUERY_LOG is required" -- \
+  REQUIRED=true FORMAT=querylog
+
+mkdir -p "$T/logdir"
+expect error "unreadable querylog exits 2" "gate treated an unreadable log as unused" "cannot evaluate" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$T/logdir"
+
+expect error "codex without TRACE exits 2" "gate treated a missing TRACE setting as unused" "TRACE is required" -- \
+  REQUIRED=true FORMAT=codex
+
+# ---- grok (graphify MCP server query log) ----
+# query_graph logs kind "mcp_query" with corpus = the graph path the server was
+# started with; grok-code.yml starts it with the absolute workspace graph.
+mcp_record() { printf '{"ts":"2026-10-05T00:00:00+00:00","kind":"mcp_query","question":"dispatch handler","corpus":"%s","nodes_returned":77,"depth":3,"mode":"bfs"}\n' "$1"; }
+
+mcp_record "$GRAPH" > "$LOG"
+expect pass "grok MCP query_graph record counts" "gate rejected an MCP query_graph record" "graphify use confirmed (querylog)" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
+
+mcp_record "$T/other/graph.json" > "$LOG"
+expect unused "grok MCP record for another graph is rejected" "gate accepted an MCP server started on another graph" "graphify not used" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
+
+rm -f "$LOG"
+expect unused "grok run with no MCP query exits 1" "gate did not report a missing log as unused" "query log is missing" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

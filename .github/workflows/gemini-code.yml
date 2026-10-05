@@ -771,6 +771,8 @@ jobs:
             exit "$status"
           fi
           STAGED="${STAGED:-false}" IDS="$SKILL_IDS" TRACE="$TRACE" REVIEW_OUT="$REVIEW" bash "$script"
+          # The checker exits 1 when graphify was not used and 2 when it cannot
+          # evaluate the query log; set -e fails this step on either.
           if [ -s graphify-out/graph.json ]; then
             REQUIRED=true FORMAT=querylog QUERY_LOG="$GRAPHIFY_QUERY_LOG" bash "$RUNNER_TEMP/check-graphify-use.sh"
           fi
@@ -847,7 +849,7 @@ jobs:
           if [ -z "${GEMINI_API_KEY}" ]; then
             exit 0
           fi
-          if ! python3 -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); k=os.environ["GEMINI_API_KEY"].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace"; then
+          if ! python3 -I -c 'import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); k=os.environ["GEMINI_API_KEY"].encode(); p.write_bytes(p.read_bytes().replace(k, b"[REDACTED]"))' "$trace"; then
             rm -f "$trace"
             echo "::error::gemini trace scrub failed; deleted the trace"
             exit 1

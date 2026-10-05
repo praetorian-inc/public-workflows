@@ -20,12 +20,24 @@ fi
 
 echo "grok-graphify-tools.test.sh"
 
-allows="$(grep -E '^[[:space:]]*--allow ' "$WF" || true)"
-if [ -n "$allows" ]; then
-  bad "no --allow rules" "found: $allows"
+ALLOWED_MCP="query_graph get_node get_neighbors get_community god_nodes graph_stats shortest_path"
+DENIED_MCP="list_prs get_pr_impact triage_prs"
+
+allows="$(grep -E '^[[:space:]]*--allow ' "$WF" | sed -E 's/^[[:space:]]+//; s/[[:space:]]*\\$//' | sort || true)"
+want_allows="$(for t in $ALLOWED_MCP; do printf -- "--allow 'MCPTool(graphify__%s)'\n" "$t"; done | sort)"
+if [ "$allows" = "$want_allows" ]; then
+  ok "only the read-only graphify MCP tools are allowed"
 else
-  ok "no --allow rules"
+  bad "only the read-only graphify MCP tools are allowed" "found: $allows"
 fi
+
+for t in $DENIED_MCP; do
+  if grep -E -q -- "^[[:space:]]*--deny 'MCPTool\(graphify__${t}\)'" "$WF"; then
+    ok "denies gh-backed graphify__${t}"
+  else
+    bad "denies gh-backed graphify__${t}" "missing --deny 'MCPTool(graphify__${t})'"
+  fi
+done
 
 if grep -E -q '^[[:space:]]*--deny Bash([[:space:]]|\\|$)' "$WF"; then
   ok "global --deny Bash"
@@ -45,16 +57,23 @@ else
   bad "neutralize planted graphify-out" "step missing"
 fi
 
-if grep -q 'graphifyy==' "$WF"; then
-  ok "pinned graphifyy install"
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+if grep -F -q 'graphifyy[mcp]==${GRAPHIFY_VERSION}' "$WF" && grep -E -q 'GRAPHIFY_VERSION: "0\.8\.35"' "$WF"; then
+  ok "pinned graphifyy[mcp] install"
 else
-  bad "pinned graphifyy install" "no graphifyy== pin"
+  bad "pinned graphifyy[mcp] install" "no graphifyy[mcp]==0.8.35 pin"
+fi
+
+if grep -E -q 'MCP_VERSION: "[0-9]+\.[0-9]+\.[0-9]+"' "$WF" && grep -F -q -- '--constraint=' "$WF"; then
+  ok "mcp is pinned exactly via a pip constraint"
+else
+  bad "mcp is pinned exactly via a pip constraint" "no MCP_VERSION pin or --constraint"
 fi
 
 if awk '
-  /Install graphify CLI \(pinned, fail-open\)/ { in_step=1 }
+  /Install graphify MCP server \(pinned, fail-open\)/ { in_step=1 }
   in_step && /name: Build review context/ { exit }
-  in_step && /graphify CLI install failed/ { saw_warn=1 }
+  in_step && /graphify MCP server install failed/ { saw_warn=1 }
   in_step && saw_warn && /rm -rf graphify-out/ { found=1 }
   END { exit(found ? 0 : 1) }
 ' "$WF"; then
@@ -73,6 +92,78 @@ if grep -F -q -- '-iname '\''.claude'\''' "$WF" && grep -F -q 'CLAUDE.md' "$WF" 
   ok "purge covers Claude compat + mcp.json"
 else
   bad "purge covers Claude compat + mcp.json" "CLAUDE.md / .claude / .mcp.json missing from purge"
+fi
+
+# Run Grok step body, from its name to the next step.
+run_step="$(awk '/- name: Run Grok PR Review/ { on=1 } on && /- name: Sanitize review output/ { exit } on { print }' "$WF")"
+
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+if printf '%s\n' "$run_step" | grep -F -q '${GROK_HOME}/config.toml' &&
+   printf '%s\n' "$run_step" | grep -F -q 'mcp_servers.graphify' &&
+   printf '%s\n' "$run_step" | grep -F -q 'graphify.serve'; then
+  ok "graphify MCP server registered in GROK_HOME/config.toml"
+else
+  bad "graphify MCP server registered in GROK_HOME/config.toml" "config.toml write missing from Run Grok"
+fi
+
+if printf '%s\n' "$run_step" | grep -F -q 'command = "/usr/bin/env"' &&
+   printf '%s\n' "$run_step" | grep -F -q 'args = ["-i", "PATH=' &&
+   ! printf '%s\n' "$run_step" | grep -F -q 'mcp_servers.graphify.env'; then
+  ok "graphify server starts with a minimal env (env -i)"
+else
+  bad "graphify server starts with a minimal env (env -i)" "Grok servers inherit the parent env, including XAI_API_KEY"
+fi
+
+if printf '%s\n' "$run_step" | awk '
+  /rm -f -- "\$GRAPHIFY_QUERY_LOG"/ { reset=NR }
+  /^[[:space:]]*grok \\$/ { run=NR }
+  END { exit(reset && run && reset < run ? 0 : 1) }'; then
+  ok "query log is reset just before grok runs"
+else
+  bad "query log is reset just before grok runs" "no rm -f of GRAPHIFY_QUERY_LOG before the grok invocation"
+fi
+
+if printf '%s\n' "$run_step" | grep -F -q 'FORMAT=querylog' &&
+   printf '%s\n' "$run_step" | grep -F -q '[ -s graphify-out/graph.json ]'; then
+  ok "querylog gate runs when the graph is present"
+else
+  bad "querylog gate runs when the graph is present" "no FORMAT=querylog gate keyed on graphify-out/graph.json"
+fi
+
+if grep -E -q 'FORMAT=grok|pr-head-notes|review-graph-notes' "$WF"; then
+  bad "Grok notes machinery removed" "FORMAT=grok / pr-head-notes / review-graph-notes still referenced"
+else
+  ok "Grok notes machinery removed"
+fi
+
+if grep -E -q 'GROK_CURSOR_MCPS_ENABLED: "false"' "$WF" && grep -E -q 'GROK_CLAUDE_MCPS_ENABLED: "false"' "$WF"; then
+  ok "compat MCP sources disabled"
+else
+  bad "compat MCP sources disabled" "GROK_CURSOR_MCPS_ENABLED / GROK_CLAUDE_MCPS_ENABLED not false"
+fi
+
+if printf '%s\n' "$run_step" | grep -E 'GRAPH:' | grep -F -q 'query_graph'; then
+  ok "prompt requires query_graph"
+else
+  bad "prompt requires query_graph" "GRAPH prompt does not name query_graph"
+fi
+
+if awk '/- name: Purge PR-supplied agent config/ { p=NR } /- name: Run Grok PR Review/ { r=NR } END { exit(p && r && p < r ? 0 : 1) }' "$WF"; then
+  ok "purge runs before Grok"
+else
+  bad "purge runs before Grok" "Purge step missing or after Run Grok"
+fi
+
+# The workspace is the PR tree: without -I, python puts the cwd first on
+# sys.path, so a PR-planted json.py / graphify/ would run (with XAI_API_KEY
+# in the config writer's env, or as the MCP server itself).
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+if printf '%s\n' "$run_step" | grep -F -q 'python3 -I - "${GROK_HOME}/config.toml"' &&
+   printf '%s\n' "$run_step" | grep -F -q 'py, "-I", "-m", "graphify.serve"' &&
+   grep -F -q '"$py" -I -c '\''import importlib.metadata' "$WF"; then
+  ok "workspace python runs isolated (-I): config writer, server, install check"
+else
+  bad "workspace python runs isolated (-I): config writer, server, install check" "a python invocation in the PR workspace lacks -I"
 fi
 
 echo

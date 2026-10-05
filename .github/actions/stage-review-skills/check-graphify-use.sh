@@ -2,71 +2,97 @@
 # Fail closed when a published graph is on disk and the reviewer never used it.
 # REQUIRED=true is the only failing mode. Prompt text does not count.
 #
+# Exit codes:
+#   0 — graphify was used, or the check was skipped (not required, no graph).
+#   1 — graphify was not used: the query log is missing or empty, or no record
+#       in the log or trace matches.
+#   2 — the check cannot evaluate: a required setting is missing, the format is
+#       unknown, the input is unreadable, the Codex trace is missing or
+#       unstaged (including one with no rollout records), or the check errored.
+#
 # FORMAT:
-#   querylog — graphify's own query log (Claude, Gemini). QUERY_LOG is the
-#              JSONL file graphify appends to when GRAPHIFY_QUERY_LOG points at
-#              it. Passes on one JSON object whose corpus resolves to
-#              GRAPH (default graphify-out/graph.json). Skips when GRAPH is
-#              missing or empty.
+#   querylog — graphify's own query log (Claude, Gemini, Grok). QUERY_LOG is
+#              the JSONL file graphify appends to when GRAPHIFY_QUERY_LOG
+#              points at it: the CLI for Claude and Gemini, the graphify MCP
+#              server's query_graph tool for Grok. Passes on one JSON object
+#              whose corpus resolves to GRAPH (default graphify-out/graph.json).
+#              Skips when GRAPH is missing or empty.
 #   codex    — Codex rollout JSONL directory (TRACE). Passes on one
 #              response_item function_call (exec_command or shell_command)
 #              whose command is a lone graphify query|explain|path and whose
 #              paired function_call_output reports exit code 0.
-#   grok     — completed Read of graphify-out/pr-head-notes.md (TRACE)
 set -euo pipefail
 
-FORMAT="${FORMAT:?FORMAT is required}"
-REQUIRED="${REQUIRED:-false}"
-
-fail() {
+unused() {
   echo "::error::$1"
   exit 1
 }
+
+cannot_evaluate() {
+  echo "::error::$1"
+  exit 2
+}
+
+# An unexpected failure in this script is an evaluation error, not a verdict.
+on_exit() {
+  local rc=$?
+  case "$rc" in
+    0 | 1 | 2) ;;
+    *) exit 2 ;;
+  esac
+}
+trap on_exit EXIT
+
+FORMAT="${FORMAT:-}"
+REQUIRED="${REQUIRED:-false}"
 
 if [ "$REQUIRED" != "true" ]; then
   exit 0
 fi
 
+if [ -z "$FORMAT" ]; then
+  cannot_evaluate "graphify use check: FORMAT is required"
+fi
+
 case "$FORMAT" in
   querylog)
-    QUERY_LOG="${QUERY_LOG:?QUERY_LOG is required for FORMAT=querylog}"
+    QUERY_LOG="${QUERY_LOG:-}"
+    if [ -z "$QUERY_LOG" ]; then
+      cannot_evaluate "graphify use check: QUERY_LOG is required for FORMAT=querylog"
+    fi
     GRAPH="${GRAPH:-graphify-out/graph.json}"
     if [ ! -s "$GRAPH" ]; then
       echo "graphify use check skipped: no graph at $GRAPH"
       exit 0
     fi
     if [ ! -e "$QUERY_LOG" ]; then
-      fail "graphify use check: query log is missing ($QUERY_LOG); no graphify query ran, or GRAPHIFY_QUERY_LOG did not reach the agent's shell"
+      unused "graphify use check: query log is missing ($QUERY_LOG); no graphify query ran, or GRAPHIFY_QUERY_LOG did not reach the graphify process"
     fi
     TRACE="$QUERY_LOG"
     ;;
   codex)
-    TRACE="${TRACE:?TRACE is required}"
-    if [ ! -d "$TRACE" ]; then
-      fail "Codex session trace missing or unstaged ($TRACE): cannot verify graphify use; see the Stage Codex session trace step"
+    TRACE="${TRACE:-}"
+    if [ -z "$TRACE" ]; then
+      cannot_evaluate "graphify use check: TRACE is required for FORMAT=codex"
     fi
-    GRAPH=""
-    ;;
-  grok)
-    TRACE="${TRACE:?TRACE is required}"
-    if [ ! -e "$TRACE" ]; then
-      fail "graphify use check: trace is missing ($FORMAT)"
+    if [ ! -d "$TRACE" ]; then
+      cannot_evaluate "Codex session trace missing or unstaged ($TRACE): cannot verify graphify use; see the Stage Codex session trace step"
     fi
     GRAPH=""
     ;;
   *)
-    fail "unknown graphify trace format: $FORMAT"
+    cannot_evaluate "unknown graphify trace format: $FORMAT"
     ;;
 esac
 
-python3 - "$TRACE" "$FORMAT" "$GRAPH" <<'PY'
+python3 -I - "$TRACE" "$FORMAT" "$GRAPH" <<'PY'
 import json, os, re, sys
 
 trace_path, fmt, graph = sys.argv[1], sys.argv[2], sys.argv[3]
 
-def die(msg):
+def die(msg, code=1):
     print("::error::" + msg, file=sys.stderr)
-    sys.exit(1)
+    sys.exit(code)
 
 def jsonl(path):
     out = []
@@ -218,7 +244,7 @@ def codex_used(path):
             elif item.get("type") == "function_call_output":
                 outputs[call_id] = output_text(item.get("output"))
     if records == 0:
-        die("Codex session trace missing or unstaged (" + path + "): no rollout response_item records; cannot verify graphify use; see the Stage Codex session trace step")
+        die("Codex session trace missing or unstaged (" + path + "): no rollout response_item records; cannot verify graphify use; see the Stage Codex session trace step", 2)
     pending = set()
     for call_id in order:
         name, args = calls[call_id]
@@ -240,90 +266,21 @@ def codex_used(path):
             pending.add(sid)
     return False
 
-# ---- grok -----------------------------------------------------------------
-def load_events(path):
-    events = []
-    if os.path.isdir(path):
-        for file_path in trace_files(path):
-            events.extend(load_events(file_path))
-        return events
-    raw = open(path, encoding="utf-8").read().strip()
-    if not raw:
-        return events
-    if raw[0] in "[{":
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            return [item for item in parsed if isinstance(item, dict)]
-        if isinstance(parsed, dict):
-            return [parsed]
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
+def main():
+    if fmt == "querylog":
+        if not querylog_used(trace_path):
+            die("graphify not used: query log " + trace_path + " has no graphify query record for " + os.path.realpath(graph))
+    elif fmt == "codex":
+        if not codex_used(trace_path):
+            die("graphify not used: Codex trace has no lone graphify query, explain, or path call that exited 0")
+    else:
+        die("unknown graphify trace format: " + fmt, 2)
+    print("graphify use confirmed (" + fmt + ")")
 
-def grok_read(events):
-    reads = {}
-    completed = set()
-    for ev in events:
-        kind = ev.get("type")
-        if kind == "tool_call":
-            call_id = ev.get("toolCallId")
-            raw = ev.get("rawInput") if isinstance(ev.get("rawInput"), dict) else {}
-            path = ""
-            for key in ("path", "target_file"):
-                val = raw.get(key)
-                if isinstance(val, str) and val:
-                    path = val
-                    break
-            if ev.get("toolName") in ("read_file", "Read") and call_id and path:
-                reads[call_id] = path
-                if ev.get("status") == "completed":
-                    completed.add(call_id)
-        elif kind == "tool_call_update" and ev.get("status") == "completed":
-            call_id = ev.get("toolCallId")
-            if call_id:
-                completed.add(call_id)
-    def fold(path):
-        parts = []
-        for part in path.replace("\\", "/").split("/"):
-            if part in ("", "."):
-                continue
-            if part == "..":
-                if not parts:
-                    return None
-                parts.pop()
-                continue
-            parts.append(part)
-        return "/".join(parts)
-
-    workspace = os.environ.get("GITHUB_WORKSPACE", "").rstrip("/")
-    want = "graphify-out/pr-head-notes.md"
-    for call_id, path in reads.items():
-        if call_id not in completed:
-            continue
-        folded = fold(path)
-        if folded == want or (workspace and folded == fold(workspace + "/" + want)):
-            return True
-    return False
-
-if fmt == "querylog":
-    if not querylog_used(trace_path):
-        die("graphify not used: query log " + trace_path + " has no graphify query record for " + os.path.realpath(graph))
-elif fmt == "codex":
-    if not codex_used(trace_path):
-        die("graphify not used: Codex trace has no lone graphify query, explain, or path call that exited 0")
-elif fmt == "grok":
-    if not grok_read(load_events(trace_path)):
-        die("grok trace has no completed Read of graphify-out/pr-head-notes.md")
-print("graphify use confirmed (" + fmt + ")")
+try:
+    main()
+except SystemExit:
+    raise
+except Exception as exc:  # unreadable input or a checker bug: not a verdict
+    die("graphify use check cannot evaluate " + trace_path + ": " + type(exc).__name__ + ": " + str(exc), 2)
 PY

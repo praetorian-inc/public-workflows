@@ -580,17 +580,38 @@ jobs:
       # (base-action/src/parse-sdk-options.ts). graphify 0.8.35 logs by default
       # and reads only GRAPHIFY_QUERY_LOG (path) and GRAPHIFY_QUERY_LOG_DISABLE;
       # GRAPHIFY_QUERY_LOG_ENABLE is set so a future opt-in default still logs.
+      #
+      # CLAUDE_REVIEW_STARTED_AT is GitHub's clock, not the runner's: "Convert
+      # to PR review" compares it with comment created_at, which GitHub
+      # stamps. The Date header of the rate_limit endpoint (which does not
+      # count against the rate limit) supplies it. When that call fails, the
+      # runner clock minus 120s keeps a skewed runner from missing this run's
+      # comment, at the cost of possibly matching a comment posted in the
+      # two minutes before the review started.
       - name: Reset graphify query log
         if: steps.context.outputs.empty_scope != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           log="$RUNNER_TEMP/graphify-queries.jsonl"
           rm -f -- "$log"
+          started_at=""
+          if headers="$(gh api -i rate_limit 2>/dev/null)"; then
+            server_date="$(printf '%s\n' "$headers" | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -n 1)"
+            if [ -n "$server_date" ]; then
+              started_at="$(date -u -d "$server_date" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
+            fi
+          fi
+          if [ -z "$started_at" ]; then
+            started_at="$(date -u -d '-120 seconds' +%Y-%m-%dT%H:%M:%SZ)"
+            echo "::warning::Could not read GitHub's Date header; CLAUDE_REVIEW_STARTED_AT falls back to the runner clock minus 120s ($started_at)."
+          fi
           {
             echo "GRAPHIFY_QUERY_LOG=$log"
             echo "GRAPHIFY_QUERY_LOG_ENABLE=1"
             # Lets "Convert to PR review" touch only comments this run posted.
-            echo "CLAUDE_REVIEW_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "CLAUDE_REVIEW_STARTED_AT=$started_at"
           } >> "$GITHUB_ENV"
 
       - name: Run Claude PR Action
@@ -835,11 +856,11 @@ jobs:
       # deterministic post-processing step converts it. The `event: 'COMMENT'`
       # is hardcoded — there is no path to APPROVE or REQUEST_CHANGES.
       - name: Clear _trace before the graphify-checker checkout
-        if: always() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')
+        if: "!cancelled() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')"
         run: rm -rf -- _trace
 
       - name: Checkout graphify use checker
-        if: always() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')
+        if: "!cancelled() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')"
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           repository: ${{ job.workflow_repository }}
@@ -849,29 +870,48 @@ jobs:
 
       - name: Require graphify use
         id: graphify-use
-        if: always() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')
+        if: "!cancelled() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')"
+        # verdict tells "Convert to PR review" why this step failed: unused
+        # (exit 1) deletes the comment, error (exit 2, or no checker) does not.
+        # Both fail the job.
         run: |
           set -euo pipefail
+          verdict() { echo "verdict=$1" >> "$GITHUB_OUTPUT"; }
           if [ ! -s graphify-out/graph.json ]; then
             rm -rf _trace
+            verdict skipped
             exit 0
           fi
-          cp _trace/.github/actions/stage-review-skills/check-graphify-use.sh "$RUNNER_TEMP/check-graphify-use.sh"
+          checker=_trace/.github/actions/stage-review-skills/check-graphify-use.sh
+          if [ ! -f "$checker" ] || ! cp -- "$checker" "$RUNNER_TEMP/check-graphify-use.sh"; then
+            rm -rf _trace
+            verdict error
+            echo "::error::graphify use checker is missing ($checker); cannot evaluate graphify use"
+            exit 2
+          fi
           rm -rf _trace
-          REQUIRED=true FORMAT=querylog QUERY_LOG="$RUNNER_TEMP/graphify-queries.jsonl" bash "$RUNNER_TEMP/check-graphify-use.sh"
+          rc=0
+          REQUIRED=true FORMAT=querylog QUERY_LOG="$RUNNER_TEMP/graphify-queries.jsonl" bash "$RUNNER_TEMP/check-graphify-use.sh" || rc=$?
+          case "$rc" in
+            0) verdict used ;;
+            1) verdict unused ;;
+            *) verdict error ;;
+          esac
+          exit "$rc"
 
-      # One lookup serves both outcomes. A passing (or skipped) graphify gate
-      # converts Claude's comment to a PR review; a failing gate deletes the
-      # comment Claude already posted, so an unverified review is not left on
-      # the PR. The job still fails on the gate step.
+      # One lookup serves both outcomes. Only verdict unused (graphify was not
+      # used) deletes the comment Claude already posted, so an unverified
+      # review is not left on the PR. Every other verdict — used, skipped,
+      # error (the gate could not evaluate), or none written — converts
+      # normally; the job still fails on the gate step for unused and error.
       - name: Convert to PR review
         if: >-
-          always() &&
+          !cancelled() &&
           (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success') &&
           (steps.graphify-use.outcome == 'success' || steps.graphify-use.outcome == 'skipped' || steps.graphify-use.outcome == 'failure')
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
-          GRAPHIFY_GATE: ${{ steps.graphify-use.outcome }}
+          GRAPHIFY_VERDICT: ${{ steps.graphify-use.outputs.verdict }}
         with:
           script: |
             try {
@@ -904,14 +944,14 @@ jobs:
                 return;
               }
 
-              if (process.env.GRAPHIFY_GATE === 'failure') {
+              if (process.env.GRAPHIFY_VERDICT === 'unused') {
                 for (const c of ours) {
                   await github.rest.issues.deleteComment({
                     owner: context.repo.owner,
                     repo: context.repo.repo,
                     comment_id: c.id,
                   });
-                  console.log(`graphify gate failed: deleted Claude issue comment ${c.id} without converting it.`);
+                  console.log(`graphify not used: deleted Claude issue comment ${c.id} without converting it.`);
                 }
                 return;
               }

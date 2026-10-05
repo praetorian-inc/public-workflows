@@ -14,6 +14,12 @@ else
   ok "overlay action is absent"
 fi
 
+if [ -e "$REPO_ROOT/.github/actions/review-graph-notes" ]; then
+  bad "notes action is absent" "directory still present"
+else
+  ok "notes action is absent"
+fi
+
 for wf in claude-code.yml codex-code.yml gemini-code.yml grok-code.yml; do
   path="$REPO_ROOT/.github/workflows/$wf"
   if [ ! -f "$path" ]; then
@@ -22,8 +28,8 @@ for wf in claude-code.yml codex-code.yml gemini-code.yml grok-code.yml; do
   fi
   if grep -E -q 'overlay-pr-graph|overlay=applied' "$path"; then
     bad "$wf does not splice a PR graph" "overlay reference remains"
-  elif [ "$wf" != "grok-code.yml" ] && grep -q 'pr-head-notes' "$path"; then
-    bad "$wf does not splice a PR graph" "notes file is Grok-only"
+  elif grep -q 'pr-head-notes' "$path"; then
+    bad "$wf does not splice a PR graph" "pr-head-notes reference remains"
   elif ! awk '/GRAPH:/ && /default-branch graph only/ { hit=1 } END { exit(hit ? 0 : 1) }' "$path"; then
     bad "$wf does not splice a PR graph" "GRAPH prompt missing default-branch graph only"
   else
