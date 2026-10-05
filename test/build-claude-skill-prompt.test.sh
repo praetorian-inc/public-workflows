@@ -321,6 +321,19 @@ check "primary prompt uses the inlined bodies" "claude-code.yml" \
 check "Skill is denied" "claude-code.yml" \
   grep -F -q 'MultiEdit,Skill' "$WF"
 
+section "18. vendored allowlist fits the inline cap"
+T="$WORKDIR/t18"
+mkdir -p "$T"
+: > "$T/github_output"
+STAGED=true DEST="$REPO_ROOT/.github/actions/stage-review-skills/allowlist" \
+  GITHUB_OUTPUT="$T/github_output" PROMPT_OUT="$T/prompt.txt" \
+  bash "$SCRIPT" >"$T/log" 2>&1
+echo "$?" > "$T/rc"
+check "vendored allowlist assembles under the cap" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" = "0" ]
+check "vendored prompt inlines calibrating-time-estimates" "prompt=$(cat "$T/prompt.txt")" \
+  grep -F -q '## skill: calibrating-time-estimates' "$T/prompt.txt"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 [ "$FAIL" -eq 0 ]

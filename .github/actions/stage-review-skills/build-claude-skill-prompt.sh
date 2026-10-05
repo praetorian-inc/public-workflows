@@ -19,8 +19,9 @@ set -euo pipefail
 DEST="${DEST:-.claude/skills}"
 STAGED="${STAGED:-false}"
 # The action receives this string plus the caller prompt as one environment
-# entry. Linux MAX_ARG_STRLEN is 131072. 110000 leaves room for that prompt.
-MAX_BYTES=110000
+# entry. Linux MAX_ARG_STRLEN is 131072. The verify step rejects a combined
+# prompt over 120000. 116000 leaves about 4KB for the caller prompt.
+MAX_BYTES=116000
 
 no_skills='No curated skills were staged. Review without them.'
 
