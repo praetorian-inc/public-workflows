@@ -577,6 +577,10 @@ jobs:
             echo "::error::staged=true but no session files were copied from ${HOME}/.codex/sessions"
             exit 1
           fi
+      - name: Clear _trace before the graphify-checker checkout
+        if: steps.run_codex.outcome == 'success' && steps.context.outputs.empty_scope != 'true'
+        run: rm -rf -- _trace
+
       - name: Checkout graphify use checker
         if: steps.run_codex.outcome == 'success' && steps.context.outputs.empty_scope != 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

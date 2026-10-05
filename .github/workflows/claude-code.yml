@@ -806,6 +806,10 @@ jobs:
       # Claude still posts via `gh pr comment` (issue comment), then this
       # deterministic post-processing step converts it. The `event: 'COMMENT'`
       # is hardcoded — there is no path to APPROVE or REQUEST_CHANGES.
+      - name: Clear _trace before the graphify-checker checkout
+        if: steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success'
+        run: rm -rf -- _trace
+
       - name: Checkout graphify use checker
         if: steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -816,6 +820,7 @@ jobs:
           persist-credentials: false
 
       - name: Require graphify use
+        id: graphify-use
         if: steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success'
         env:
           EXEC_FILE: ${{ steps.claude-review-retry.outputs.execution_file || steps.claude-review.outputs.execution_file }}
@@ -831,7 +836,7 @@ jobs:
           REQUIRED=true FORMAT=claude TRACE="$TRACE" bash "$RUNNER_TEMP/check-graphify-use.sh"
 
       - name: Convert to PR review
-        if: always() && (steps.claude-review.outcome == 'success' || steps.claude-review-retry.outcome == 'success')
+        if: steps.graphify-use.outcome == 'success'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           script: |

@@ -55,12 +55,104 @@ def argv(value):
         words.append("".join(buf))
     return words
 
+def split_segments(value):
+    parts = []
+    buf = []
+    quote = ""
+    heredoc = ""
+    i = 0
+    while i < len(value):
+        ch = value[i]
+        if heredoc:
+            if ch == "\n":
+                line = "".join(buf).strip()
+                buf = []
+                i += 1
+                if line == heredoc:
+                    heredoc = ""
+                continue
+            buf.append(ch)
+            i += 1
+            continue
+        if quote:
+            if ch == "\\" and quote == '"' and i + 1 < len(value):
+                buf.append(ch)
+                buf.append(value[i + 1])
+                i += 2
+                continue
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(value) and value[i + 1] == "\n":
+            n = 1
+            j = i - 1
+            while j >= 0 and value[j] == "\\":
+                n += 1
+                j -= 1
+            if n % 2 == 1:
+                i += 2
+                continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if value.startswith("<<", i):
+            rest = value[i + 2:]
+            if rest.startswith("'") or rest.startswith('"'):
+                q = rest[0]
+                end = rest.find(q, 1)
+                word = rest[1:end] if end > 1 else ""
+                i += 2 + end + 1
+            else:
+                word = ""
+                j = i + 2
+                if value.startswith("<<-", i):
+                    j = i + 3
+                while j < len(value) and not value[j].isspace():
+                    word += value[j]
+                    j += 1
+                i = j
+            heredoc = word
+            buf = []
+            continue
+        if value.startswith("&&", i) or ch in (";", "|", "\n"):
+            parts.append("".join(buf))
+            buf = []
+            i += 2 if value.startswith("&&", i) else 1
+            continue
+        buf.append(ch)
+        i += 1
+    if buf and not heredoc:
+        parts.append("".join(buf))
+    return parts
+
 def is_cmd(value):
-    words = argv(value)
-    if len(words) < 2:
+    if isinstance(value, list):
+        if not value or not isinstance(value[0], str):
+            return False
+        program = value[0].replace("\\", "/").rsplit("/", 1)[-1]
+        if program in ("bash", "sh") and len(value) >= 3 and value[1] in ("-lc", "-c"):
+            return is_cmd(value[2])
+        return program == "graphify" and len(value) >= 2 and value[1] in ("query", "explain", "path")
+    if not isinstance(value, str):
         return False
-    program = words[0].replace("\\", "/").rsplit("/", 1)[-1]
-    return program == "graphify" and words[1] in ("query", "explain", "path")
+    for segment in split_segments(value):
+        words = argv(segment)
+        while words and "=" in words[0] and not words[0].startswith("="):
+            words = words[1:]
+        if not words:
+            continue
+        program = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+        if program in ("bash", "sh") and len(words) >= 3 and words[1] in ("-lc", "-c"):
+            if is_cmd(" ".join(words[2:])):
+                return True
+            continue
+        if program == "graphify" and len(words) >= 2 and words[1] in ("query", "explain", "path"):
+            return True
+    return False
 
 def load_events(path):
     events = []
@@ -98,11 +190,22 @@ def load_events(path):
             events.append(parsed)
     return events
 
+def consider(value, found):
+    if is_cmd(value):
+        found.append(value)
+        return
+    if isinstance(value, str) and value[:1] in "{[":
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return
+        walk_commands(parsed, found)
+
 def walk_commands(node, found):
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in ("command", "cmd") and is_cmd(value):
-                found.append(value)
+            if key in ("command", "cmd", "arguments"):
+                consider(value, found)
             else:
                 walk_commands(value, found)
     elif isinstance(node, list):

@@ -53,6 +53,37 @@ else
   ok "echo graphify is not a graphify command"
 fi
 rm -f "$T/codex/echo.jsonl"
+printf '%s\n' '{"type":"response_item","payload":{"type":"function_call","arguments":"{\"command\":[\"bash\",\"-lc\",\"graphify query callers of dispatch\"]}"}}' > "$T/codex/rollout.jsonl"
+if REQUIRED=true FORMAT=codex TRACE="$T/codex" bash "$SCRIPT" >/dev/null; then
+  ok "codex rollout arguments count"
+else
+  bad "codex rollout arguments count" "gate rejected a function_call arguments string"
+fi
+rm -f "$T/codex/rollout.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"echo foo\\\\\ngraphify query callers"}}]}}' > "$T/escaped.json"
+if REQUIRED=true FORMAT=claude TRACE="$T/escaped.json" bash "$SCRIPT" >/dev/null; then
+  ok "escaped backslash does not swallow the next command"
+else
+  bad "escaped backslash does not swallow the next command" "gate joined a real newline"
+fi
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cat <<EOF\ngraphify query callers\nEOF"}}]}}' > "$T/heredoc.json"
+if REQUIRED=true FORMAT=claude TRACE="$T/heredoc.json" bash "$SCRIPT" >/dev/null; then
+  bad "heredoc body is not a graphify command" "gate accepted heredoc data"
+else
+  ok "heredoc body is not a graphify command"
+fi
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd guard-platform/guard-core\ngraphify query \"callers of dispatch\""}}]}}' > "$T/newline.json"
+if REQUIRED=true FORMAT=claude TRACE="$T/newline.json" bash "$SCRIPT" >/dev/null; then
+  ok "newline-separated graphify command counts"
+else
+  bad "newline-separated graphify command counts" "gate rejected a following line"
+fi
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"test -f graphify-out/graph.json && graphify query callers"}}]}}' > "$T/wrapped.json"
+if REQUIRED=true FORMAT=claude TRACE="$T/wrapped.json" bash "$SCRIPT" >/dev/null; then
+  ok "wrapped graphify command counts"
+else
+  bad "wrapped graphify command counts" "gate rejected cd/test && graphify"
+fi
 printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"graphify path A B"}}' > "$T/codex/session.jsonl"
 if REQUIRED=true FORMAT=codex TRACE="$T/codex" bash "$SCRIPT" >/dev/null; then
   ok "codex command field counts"
