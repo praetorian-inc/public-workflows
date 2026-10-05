@@ -7,8 +7,8 @@ name: Gemini PR Assistant (Callable)
 # the previous single-shot google-genai API call. Like the Claude and Codex reviewers,
 # Gemini now runs a tool loop and can read past the diff — opening the surrounding code
 # (definitions, callers, sibling modules) for real context. It also loads Praetorian's
-# review-bot-skills allowlist (root-level skill dirs, staged into `.gemini/skills/`)
-# on private/internal callers that supply the App creds.
+# review-bot-skills allowlist (root-level skill dirs vendored in this repo, staged
+# into `.gemini/skills/`).
 #
 # Security posture (hardcoded — callers cannot widen the attack surface):
 #   - Two-job split, mirroring codex-code.yml's defense-in-depth: the agent runs in a
@@ -116,10 +116,10 @@ on:
         description: "Google AI Studio API key for Gemini"
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL and private/internal only. A public repository stages the vendored allowlist and must not set this secret."
+        description: "DEPRECATED and ignored. Curated skills always stage from the allowlist vendored in this repo. Kept only so existing callers that still pass it do not fail; remove it from callers (ENG-8852)."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
-        description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
+        description: "DEPRECATED and ignored. Curated skills always stage from the allowlist vendored in this repo. Kept only so existing callers that still pass it do not fail; remove it from callers (ENG-8852)."
         required: false
 
 permissions:
@@ -209,14 +209,9 @@ jobs:
 
   # Gemini review: run the Gemini CLI as a read-only agent via run-gemini-cli.
   #
-  # The job has `contents: read` only — no PR write access. The only GitHub credential
-  # it can hold is a short-lived GitHub App token, minted ONLY when a private/internal
-  # caller supplies the App creds, scoped to review-bot-skills read, and consumed solely
-  # by the shared stage script (handed to git per-command, never written to .git/config).
-  # That script revokes it before copying any skill and stages skills only after the
-  # revoke is confirmed (one retry); if the revoke fails twice the review runs without
-  # skills and the mint action's post-job revoke is the backstop. The token is never in
-  # the agent's env, and the depth-2 merge-ref checkout brings the diff's parents locally
+  # The job has `contents: read` only — no PR write access — and mints no GitHub token:
+  # curated skills are copied from the allowlist vendored in this repo, with no fetch.
+  # The agent's env holds no GitHub credential, and the depth-2 merge-ref checkout brings the diff's parents locally
   # so "Build review context" computes the diff fully offline. So even if the agent is
   # compromised by prompt injection it has no GitHub credential in its env to exfiltrate
   # and no path to write to the PR.
@@ -259,15 +254,6 @@ jobs:
       review_output: ${{ steps.sanitize.outputs.review }}
       empty_scope: ${{ steps.context.outputs.empty_scope }}
       failure_kind: ${{ steps.failclass.outputs.kind }}
-
-    # Mapped from the secret so the optional review-bot-skills token step can be gated in `if:`
-    # (a step `if:` cannot read `secrets.*` directly).
-    env:
-      PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
-      # Presence-only boolean (NOT the key itself) so the mint step can require BOTH
-      # creds in `if:` — a caller passing the App ID without the PEM then degrades to
-      # "run without curated skills" instead of hard-failing the job at token minting.
-      PALATINE_KEY_SET: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}
 
     steps:
       - name: Harden Runner
@@ -330,14 +316,13 @@ jobs:
           REVIEW_EXCLUDE_PATHSPECS: ${{ inputs.review_exclude_pathspecs }}
         run: |
           set -euo pipefail
-          # Runs immediately after checkout, BEFORE any token is minted and before
-          # any other setup: no token and no network here — the depth-2 merge-ref
+          # Runs immediately after checkout, before any other setup: no token and no network here — the depth-2 merge-ref
           # checkout already has the merge commit and both parents locally, so the
           # commit-to-commit diff is fully deterministic and offline (the agent
           # step that follows holds zero credentials, mirroring codex-code.yml's
           # tokenless sandbox). Running first also lets an empty-scope PR
           # (every changed file caller-excluded) short-circuit the fallible setup
-          # below — purge, token mint, skills checkout — via empty_scope gates,
+          # below — purge, stage-script checkout, skills staging — via empty_scope gates,
           # so such PRs always reach the deterministic skip notice instead of
           # dying in setup. The later purge only mutates the working tree, which
           # cannot affect this commit-to-commit diff.
@@ -402,9 +387,9 @@ jobs:
       #   - .geminiignore (recursive): would silently blind glob/list_directory.
       #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this cwd; a
       #     PR-supplied registry override is a supply-chain vector.
-      # This runs BEFORE the review-bot-skills stage (which fetches into RUNNER_TEMP, outside
-      # the workspace, and then writes .gemini/skills), so the sweep is UNCONDITIONAL — there
-      # is no carve-out. If staging is skipped (no secrets / any stage failure)
+      # This runs BEFORE the review-bot-skills stage (which copies the vendored allowlist
+      # into .gemini/skills), so the sweep is UNCONDITIONAL — there
+      # is no carve-out. If staging is skipped (any stage failure)
       # nothing trusted is staged and Gemini reviews with no agent config at all — never the
       # attacker's. Settings + skills then come ONLY from the action input and, when
       # staged, the SHA-pinned review-bot-skills allowlist.
@@ -477,15 +462,14 @@ jobs:
           echo "Turn cap ${t} for ${n} changed file(s)"
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
-      # The allowlist ships in this repo next to the stage script (tree 480aaf29).
-      # No App key is required. A public repo stages that copy and never mints.
-      # A private or internal repo that supplies the App secrets still fetches the
-      # same pin from praetorian-inc/review-bot-skills. Skill bodies will be in a
+      # The allowlist is vendored in this repo next to the stage script; its
+      # allowlist/SOURCE records the review-bot-skills commit it was copied from.
+      # No token, no fetch, no App secrets. Skill bodies will be in a
       # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized
       # either way. The shared stage script is the only stager: any failure leaves
-      # .gemini/skills absent and staged=false. Pinned to a commit SHA — callers cannot
-      # point this elsewhere.
+      # .gemini/skills absent and staged=false. The set is whatever this reusable's own
+      # SHA vendors — callers cannot point this elsewhere.
       # The PR merge ref sits at the workspace root, so a PR could plant its own
       # _pw/.github/actions/stage-review-skills/stage-review-skills.sh. Clear it
       # before the trusted checkout; the stage step also requires that checkout
@@ -505,33 +489,12 @@ jobs:
           path: _pw
           persist-credentials: false
 
-      # Token: contents:read on review-bot-skills only, the same content staged on
-      # disk. Passed only to the stage script, never to the agent's env. Skills
-      # are staged only after that script confirms the revoke (one retry); if
-      # the revoke fails twice the review runs without skills and this action's
-      # post-job revoke is the backstop. On the normal path that post-job
-      # revoke logs a benign "Token revocation failed" warning.
-      - name: Mint review-bot-skills read token
-        id: skills-token
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
-          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
-          owner: praetorian-inc
-          repositories: review-bot-skills
-          permission-contents: read
-
       # Fail-open, always exits 0. The agent step keys only on outputs.staged.
       # _pw is removed afterwards so the reviewer never sees this repo's tree.
       - name: Stage curated skills
         id: stage-skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.checkout-pw.outcome == 'success' }}
         env:
-          SKILLS_TOKEN: ${{ steps.skills-token.outputs.token }}
-          SKILLS_REPO: praetorian-inc/review-bot-skills
-          SKILLS_REF: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
           SKILLS_HARNESS: gemini
           DEST: .gemini/skills
         run: |
@@ -771,9 +734,8 @@ jobs:
       # GEMINI_API_KEY is in this job's env, so a coerced agent could read its own
       # environment (/proc/self/environ) and emit the key in the review text, which
       # post-feedback would post to the PR (bypassing Actions log masking). The key
-      # is the ONLY live secret in the agent's env (no GITHUB_TOKEN; the
-      # review-bot-skills App token is never passed to the agent, and skills are
-      # staged only after the stage script confirms its revoke), so strip its exact
+      # is the ONLY live secret in the agent's env (no GITHUB_TOKEN, and curated
+      # skills are staged from the vendored allowlist with no token), so strip its exact
       # value from the captured output before it can leave
       # the read-only job.
       # Second responsibility (LAB-4839): reject the Gemini CLI's diagnostic error

@@ -98,10 +98,10 @@ on:
         description: "Anthropic API key for Claude"
         required: true
       PALATINE_SKILLS_APP_ID:
-        description: "GitHub App ID for an App with contents:read on praetorian-inc/review-bot-skills. OPTIONAL and private/internal only. A public repository stages the vendored allowlist and must not set this secret."
+        description: "DEPRECATED and ignored. Curated skills always stage from the allowlist vendored in this repo. Kept only so existing callers that still pass it do not fail; remove it from callers (ENG-8852)."
         required: false
       PALATINE_SKILLS_PRIVATE_KEY:
-        description: "Private key (PEM) for the App in PALATINE_SKILLS_APP_ID. Required only when PALATINE_SKILLS_APP_ID is set."
+        description: "DEPRECATED and ignored. Curated skills always stage from the allowlist vendored in this repo. Kept only so existing callers that still pass it do not fail; remove it from callers (ENG-8852)."
         required: false
 
 permissions:
@@ -259,21 +259,7 @@ jobs:
     # drift. CODEOWNERS requires AppSec (security-engineering) review on any
     # change here — see the primary step's design-note comments for the full
     # rationale behind each line.
-    #
-    # PALATINE_APP_ID / PALATINE_KEY_SET: mapped from the secrets so the optional
-    # review-bot-skills steps can be gated in `if:` (a step `if:` cannot read
-    # `secrets.*` directly). KEY_SET is presence-only, never the key itself.
-    #
-    # The skills-repo token is minted in THIS job (the agent can Read the runner
-    # and post a PR comment). The stage script revokes it before copying any
-    # skill and stages skills only after that revoke is confirmed (one retry),
-    # so whenever skills are staged a token recovered from step outputs or the
-    # runner's file-command files is already dead. If the revoke fails twice the
-    # review runs without skills and the mint action's post-job revoke is the
-    # backstop; the token is never in the agent's env either way.
     env:
-      PALATINE_APP_ID: ${{ secrets.PALATINE_SKILLS_APP_ID }}
-      PALATINE_KEY_SET: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY != '' }}
       CLAUDE_HARDENED_ARGS: |
         --allowedTools "Bash(gh pr comment:*),Bash(gh pr view:*),Bash(graphify query:*),Bash(graphify explain:*),Bash(graphify path:*),Read,Grep,Glob"
         --disallowedTools "Bash(curl:*),Bash(wget:*),Bash(gh api:*),Bash(gh auth:*),Bash(gh pr diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git rm:*),Write,Edit,MultiEdit,Skill"
@@ -446,15 +432,14 @@ jobs:
       # the base branch before the CLI starts, so a slash command or the Skill
       # tool cannot load them. The build step inlines each SKILL.md into the
       # prompt, which is the load. Skill is not in allowedTools.
-      # The allowlist ships in this repo next to the stage script (tree 480aaf29).
-      # No App key is required. A public repo stages that copy and never mints.
-      # A private or internal repo that supplies the App secrets still fetches the
-      # same pin from praetorian-inc/review-bot-skills. Skill bodies will be in a
+      # The allowlist is vendored in this repo next to the stage script; its
+      # allowlist/SOURCE records the review-bot-skills commit it was copied from.
+      # No token, no fetch, no App secrets. Skill bodies will be in a
       # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized
       # either way. The shared stage script is the only stager: any failure leaves
-      # .claude/skills absent and staged=false. Pinned to a commit SHA — callers cannot
-      # point this elsewhere.
+      # .claude/skills absent and staged=false. The set is whatever this reusable's own
+      # SHA vendors — callers cannot point this elsewhere.
       # The PR merge ref sits at the workspace root, so a PR could plant its own
       # _pw/.github/actions/stage-review-skills/stage-review-skills.sh. Clear it
       # before the trusted checkout; the stage step also requires that checkout
@@ -474,33 +459,12 @@ jobs:
           path: _pw
           persist-credentials: false
 
-      # Token: contents:read on review-bot-skills only, the same content staged on
-      # disk. Passed only to the stage script, never to the agent's env. Skills
-      # are staged only after that script confirms the revoke (one retry); if
-      # the revoke fails twice the review runs without skills and this action's
-      # post-job revoke is the backstop. On the normal path that post-job
-      # revoke logs a benign "Token revocation failed" warning.
-      - name: Mint review-bot-skills read token
-        id: skills-token
-        if: ${{ steps.context.outputs.empty_scope != 'true' && env.PALATINE_APP_ID != '' && env.PALATINE_KEY_SET == 'true' && (github.event.repository.visibility == 'private' || github.event.repository.visibility == 'internal') && steps.checkout-pw.outcome == 'success' }}
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          app-id: ${{ secrets.PALATINE_SKILLS_APP_ID }}
-          private-key: ${{ secrets.PALATINE_SKILLS_PRIVATE_KEY }}
-          owner: praetorian-inc
-          repositories: review-bot-skills
-          permission-contents: read
-
       # Fail-open, always exits 0. The agent step keys only on outputs.staged.
       # _pw is removed afterwards so the reviewer never sees this repo's tree.
       - name: Stage curated skills
         id: stage-skills
         if: ${{ steps.context.outputs.empty_scope != 'true' && steps.checkout-pw.outcome == 'success' }}
         env:
-          SKILLS_TOKEN: ${{ steps.skills-token.outputs.token }}
-          SKILLS_REPO: praetorian-inc/review-bot-skills
-          SKILLS_REF: 480aaf29f6656477f2fb6d34dae57f3e03889344  # ENG-8614 allowlist
           SKILLS_HARNESS: claude
           DEST: .claude/skills
         run: |
