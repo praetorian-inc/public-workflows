@@ -327,7 +327,7 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Custom review prompt. Do not point it at the PR's `.claude/skills`; that tree is purged and replaced by the CI allowlist when App credentials are set. |
+| `prompt` | Built-in 3-section review template | Custom review prompt. Do not point it at the PR's `.claude/skills`; that tree is purged and replaced by the vendored CI allowlist. |
 | `model` | `claude-opus-5-5` | Primary model passed to `--model`. Single model ID, strictly validated (`^[A-Za-z0-9][A-Za-z0-9._-]*$` — no commas, no spaces, no flags). An explicit caller `model` overrides this default; repinning the reusable does not clear that override. Applies to automatic reviews and `@claude` re-reviews alike when omitted. |
 | `fallback_model` | `claude-opus-4-8` | Comma-separated fallback chain (no spaces — `a, b` fails validation). **Omitting this input inherits `claude-opus-4-8` even when `model` is set.** That is intentional: a cyber-guardrail refusal of the primary retries once on Opus 4.8. Pass `""` to keep the old fail-closed behavior. Elements equal to the primary are dropped before `--fallback-model`. `--fallback-model` itself does not cover refusals (`stop_reason: refusal`); this workflow detects that and re-runs once on the first remaining chain element. A refusal with an empty chain still fails the job. |
 | `require_tests` | `true` | When `true`, fails the workflow if Claude's output indicates "significant changes without automated tests". (Dead code under the default prompt — only matters for custom prompts that emit the `**Has ... :** Yes/No` markers.) |
