@@ -29,7 +29,7 @@ if [ ! -f "$TRACE" ]; then
   fail "gemini trace is missing"
 fi
 
-python3 - "$TRACE" "$STAGED" "${REVIEW_OUT:-}" <<'PY'
+python3 -I - "$TRACE" "$STAGED" "${REVIEW_OUT:-}" <<'PY'
 import json, os, sys
 
 trace, staged, review_out = sys.argv[1], sys.argv[2], sys.argv[3]
