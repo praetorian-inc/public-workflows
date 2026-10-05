@@ -19,6 +19,8 @@ on:
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
+      - 'test/no-pr-graph-overlay.test.sh'
+      - 'test/review-graph-notes.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
   push:
     branches: [main]
@@ -34,6 +36,8 @@ on:
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
       - 'test/grok-graphify-tools.test.sh'
+      - 'test/no-pr-graph-overlay.test.sh'
+      - 'test/review-graph-notes.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
 
 permissions:
@@ -86,6 +90,12 @@ jobs:
 
       - name: Unit-test Grok graphify tool allowlist (ENG-8335)
         run: bash test/grok-graphify-tools.test.sh
+
+      - name: Unit-test no PR graph overlay
+        run: bash test/no-pr-graph-overlay.test.sh
+
+      - name: Unit-test review graph notes
+        run: bash test/review-graph-notes.test.sh
 
       - name: Grok skill-trace gate
         run: bash test/check-grok-skill-trace.test.sh

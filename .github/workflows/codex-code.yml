@@ -539,11 +539,7 @@ jobs:
             that skill. Ground every finding in a specific file and line.
             ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
 
-            GRAPH: If graphify-out/graph.json exists, a CI-published code knowledge graph
-            of the default branch is on disk (provenance: graphify-out/.graphify-provenance.json).
-            Prefer `graphify query` / `graphify explain` / `graphify path` for callers and
-            blast radius over grep. Confirm every graph answer at file:line in this PR's
-            tree — the graph is the default branch, not the PR head. Codex project-doc
+            GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. Prefer `graphify query` / `graphify explain` / `graphify path` for callers of unchanged code over grep. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. Codex project-doc
             truncation does not apply to this wrapper; do not rely on AGENTS.md for this.
 
             ${{ inputs.prompt }}
