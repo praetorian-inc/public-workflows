@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# ENG-8648: inline staged SKILL.md bodies into the Claude review prompt.
+# ENG-8648: assemble staged SKILL.md bodies into one review prompt.
 #
 # claude-code-action deletes .claude and restores the PR base branch before
 # the CLI starts, so a slash command or the Skill tool cannot load files
 # staged into .claude/skills. The string written here is the load.
+#
+# The pinned wrapper has no prompt_file input. A `prompt:` value is copied
+# into PROMPT and ALL_INPUTS, one environment string each, and Linux rejects
+# a single string over 131072 bytes. EMIT_PROMPT=false writes the body only
+# to PROMPT_OUT so the workflow can point the action at that file. The
+# inline cap applies only when the body is emitted as a step output.
 #
 # STAGED=true is fail-closed: missing bodies, a body with no sentence, a
 # symlink, or an unsafe id exits non-zero. Anything else writes a no-skills
@@ -14,13 +20,13 @@
 #   DEST          — staged skill dir (default .claude/skills)
 #   GITHUB_OUTPUT — receives prompt (multiline, random delimiter)
 #   PROMPT_OUT    — optional path; the same string is written here
+#   EMIT_PROMPT   — false skips GITHUB_OUTPUT and the inline byte cap
 set -euo pipefail
 
 DEST="${DEST:-.claude/skills}"
 STAGED="${STAGED:-false}"
-# The action receives this string plus the caller prompt as one environment
-# entry. Linux MAX_ARG_STRLEN is 131072. The verify step rejects a combined
-# prompt over 120000. 116000 leaves about 4KB for the caller prompt.
+# Inline path only. Linux MAX_ARG_STRLEN is 131072. 116000 leaves room for
+# the caller prompt in the same environment entry. The file path skips this.
 MAX_BYTES=116000
 
 no_skills='No curated skills were staged. Review without them.'
@@ -35,7 +41,7 @@ write_prompt() {
   if [ -n "${PROMPT_OUT:-}" ]; then
     printf '%s\n' "$text" > "$PROMPT_OUT"
   fi
-  if [ -z "${GITHUB_OUTPUT:-}" ]; then
+  if [ "${EMIT_PROMPT:-true}" = "false" ] || [ -z "${GITHUB_OUTPUT:-}" ]; then
     return 0
   fi
   local delim
@@ -193,9 +199,11 @@ if [ "$found" -eq 0 ]; then
   fail "staged=true but no SKILL.md bodies were found"
 fi
 
-bytes=$(printf '%s' "$prompt" | wc -c | tr -d ' ')
-if [ "$bytes" -gt "$MAX_BYTES" ]; then
-  fail "assembled skill prompt is ${bytes} bytes, over the ${MAX_BYTES} byte cap"
+if [ "${EMIT_PROMPT:-true}" != "false" ]; then
+  bytes=$(printf '%s' "$prompt" | wc -c | tr -d ' ')
+  if [ "$bytes" -gt "$MAX_BYTES" ]; then
+    fail "assembled skill prompt is ${bytes} bytes, over the ${MAX_BYTES} byte cap"
+  fi
 fi
 
 write_prompt "$prompt"

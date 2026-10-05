@@ -316,8 +316,10 @@ check "workflow does not tell the model to call the Skill tool" "claude-code.yml
   absent 'load each skill with the Skill tool' "$WF"
 check "workflow does not say the Skill tool is the invocation" "claude-code.yml" \
   absent 'the Skill tool is the invocation' "$WF"
-check "primary prompt uses the inlined bodies" "claude-code.yml" \
-  grep -F -q 'steps.skill-prompt.outputs.prompt' "$WF"
+check "workflow does not interpolate skill bodies into the action prompt" "claude-code.yml" \
+  absent 'steps.skill-prompt.outputs.prompt' "$WF"
+check "workflow points Claude at the skill prompt file" "claude-code.yml" \
+  grep -F -q '.claude-review/skill-prompt.txt' "$WF"
 check "Skill is denied" "claude-code.yml" \
   grep -F -q 'MultiEdit,Skill' "$WF"
 
@@ -333,6 +335,21 @@ check "vendored allowlist assembles under the cap" "rc=$(cat "$T/rc") log=$(cat 
   [ "$(cat "$T/rc")" = "0" ]
 check "vendored prompt inlines calibrating-time-estimates" "prompt=$(cat "$T/prompt.txt")" \
   grep -F -q '## skill: calibrating-time-estimates' "$T/prompt.txt"
+
+section "19. file load skips the inline cap and does not emit the body"
+T="$WORKDIR/t19"
+mkdir -p "$T"
+: > "$T/github_output"
+STAGED=true EMIT_PROMPT=false DEST="$REPO_ROOT/.github/actions/stage-review-skills/allowlist" \
+  GITHUB_OUTPUT="$T/github_output" PROMPT_OUT="$T/prompt.txt" \
+  bash "$SCRIPT" >"$T/log" 2>&1
+echo "$?" > "$T/rc"
+check "file load exits 0" "rc=$(cat "$T/rc") log=$(cat "$T/log")" \
+  [ "$(cat "$T/rc")" = "0" ]
+check "file load writes the body" "prompt=$(cat "$T/prompt.txt")" \
+  grep -F -q '## skill: calibrating-time-estimates' "$T/prompt.txt"
+check "file load does not emit the body" "out=$(cat "$T/github_output")" \
+  absent '## skill: calibrating-time-estimates' "$T/github_output"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"
