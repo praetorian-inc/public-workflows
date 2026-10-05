@@ -539,7 +539,7 @@ jobs:
             that skill. Ground every finding in a specific file and line.
             ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
 
-            GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. Prefer `graphify query` / `graphify explain` / `graphify path` for callers of unchanged code over grep. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. Codex project-doc
+            GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. You must run `graphify query`, `graphify explain`, or `graphify path` once before findings. The job fails if that command is missing from the trace. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. Codex project-doc
             truncation does not apply to this wrapper; do not rely on AGENTS.md for this.
 
             ${{ inputs.prompt }}
@@ -577,6 +577,26 @@ jobs:
             echo "::error::staged=true but no session files were copied from ${HOME}/.codex/sessions"
             exit 1
           fi
+      - name: Checkout graphify use checker
+        if: steps.run_codex.outcome == 'success' && steps.context.outputs.empty_scope != 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _trace
+          persist-credentials: false
+
+      - name: Require graphify use
+        if: steps.run_codex.outcome == 'success' && steps.context.outputs.empty_scope != 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -s graphify-out/graph.json ]; then
+            rm -rf _trace
+            exit 0
+          fi
+          cp _trace/.github/actions/stage-review-skills/check-graphify-use.sh "$RUNNER_TEMP/check-graphify-use.sh"
+          rm -rf _trace
+          REQUIRED=true FORMAT=codex TRACE=".codex-review/trace" bash "$RUNNER_TEMP/check-graphify-use.sh"
 
       - name: Upload Codex session trace
         if: always() && steps.run_codex.outcome != 'skipped' && steps.context.outputs.empty_scope != 'true'

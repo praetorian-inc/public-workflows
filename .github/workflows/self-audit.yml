@@ -22,6 +22,7 @@ on:
       - 'test/no-pr-graph-overlay.test.sh'
       - 'test/review-graph-notes.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
+      - 'test/check-graphify-use.test.sh'
   push:
     branches: [main]
     paths:
@@ -39,6 +40,7 @@ on:
       - 'test/no-pr-graph-overlay.test.sh'
       - 'test/review-graph-notes.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
+      - 'test/check-graphify-use.test.sh'
 
 permissions:
   contents: read
@@ -99,6 +101,9 @@ jobs:
 
       - name: Grok skill-trace gate
         run: bash test/check-grok-skill-trace.test.sh
+
+      - name: Graphify use gate
+        run: bash test/check-graphify-use.test.sh
 
       - name: Install zizmor
         env:

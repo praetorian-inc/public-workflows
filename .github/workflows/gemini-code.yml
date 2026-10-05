@@ -641,6 +641,7 @@ jobs:
         run: |
           set -euo pipefail
           cp _trace/.github/actions/stage-review-skills/check-gemini-skill-trace.sh "$RUNNER_TEMP/check-gemini-skill-trace.sh"
+          cp _trace/.github/actions/stage-review-skills/check-graphify-use.sh "$RUNNER_TEMP/check-graphify-use.sh"
           cp _trace/.github/actions/stage-review-skills/classify-gemini-failure.sh "$RUNNER_TEMP/classify-gemini-failure.sh"
           rm -rf _trace
 
@@ -702,7 +703,7 @@ jobs:
           `graphify add`, or `graphify hook`. You cannot modify the repo; produce
           your review as text only.
 
-          GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. Prefer graphify query / explain / path for callers of unchanged code over grep_search. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. grep_search and read_file remain required for hunks and for symbols the graph omits.
+          GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. You must run graphify query, graphify explain, or graphify path once before findings. The job fails if that command is missing from the trace. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. grep_search and read_file remain required for hunks and for symbols the graph omits.
 
           SCOPE: If `.gemini-review/excluded-paths.txt` exists, the paths listed in it
           are generated artifacts that CI verifies mechanically — they are excluded
@@ -760,6 +761,9 @@ jobs:
             exit "$status"
           fi
           STAGED="${STAGED:-false}" IDS="$SKILL_IDS" TRACE="$TRACE" REVIEW_OUT="$REVIEW" bash "$script"
+          if [ -s graphify-out/graph.json ]; then
+            REQUIRED=true FORMAT=gemini TRACE="$TRACE" bash "$RUNNER_TEMP/check-graphify-use.sh"
+          fi
           delim="GEMINI_REVIEW_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
             echo "summary<<${delim}"
