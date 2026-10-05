@@ -668,13 +668,23 @@ jobs:
           gemini_key="${GEMINI_API_KEY}"
           unset GEMINI_API_KEY
           npm install --silent --no-audit --prefer-offline --global @google/gemini-cli@0.58.0
+          # Proof of graphify use is graphify's own query log. gemini-cli
+          # 0.58.0 strips every non-allowlisted variable from shell-tool
+          # children when GITHUB_SHA is set (environmentSanitization.ts strict
+          # mode), so the two names are allowlisted in settings below.
+          export GRAPHIFY_QUERY_LOG="${RUNNER_TEMP}/graphify-queries.jsonl"
+          export GRAPHIFY_QUERY_LOG_ENABLE=1
+          rm -f -- "$GRAPHIFY_QUERY_LOG"
           mkdir -p .gemini
           cat > .gemini/settings.json <<'SETTINGS_EOF'
           {
             "model": { "maxSessionTurns": ${{ steps.turns.outputs.n }} },
             "telemetry": { "enabled": false },
             "mcpServers": {},
-            "security": { "folderTrust": { "enabled": false } },
+            "security": {
+              "folderTrust": { "enabled": false },
+              "environmentVariableRedaction": { "allowed": ["GRAPHIFY_QUERY_LOG", "GRAPHIFY_QUERY_LOG_ENABLE"] }
+            },
             "tools": {
               "core": ["read_file", "read_many_files", "glob", "grep_search", "list_directory", "activate_skill", "run_shell_command(graphify query)", "run_shell_command(graphify explain)", "run_shell_command(graphify path)"],
               "exclude": ["write_file", "replace", "web_fetch", "google_web_search", "save_memory"]
@@ -703,7 +713,7 @@ jobs:
           `graphify add`, or `graphify hook`. You cannot modify the repo; produce
           your review as text only.
 
-          GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. You must run graphify query, graphify explain, or graphify path once before findings. The job fails if that command is missing from the trace. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. grep_search and read_file remain required for hunks and for symbols the graph omits.
+          GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. You must run at least one graphify query before findings. The job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged. A graphify explain of a symbol the graph lacks, and a graphify path that finds no path, are not logged and do not count. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. grep_search and read_file remain required for hunks and for symbols the graph omits.
 
           SCOPE: If `.gemini-review/excluded-paths.txt` exists, the paths listed in it
           are generated artifacts that CI verifies mechanically — they are excluded
@@ -762,7 +772,7 @@ jobs:
           fi
           STAGED="${STAGED:-false}" IDS="$SKILL_IDS" TRACE="$TRACE" REVIEW_OUT="$REVIEW" bash "$script"
           if [ -s graphify-out/graph.json ]; then
-            REQUIRED=true FORMAT=gemini TRACE="$TRACE" bash "$RUNNER_TEMP/check-graphify-use.sh"
+            REQUIRED=true FORMAT=querylog QUERY_LOG="$GRAPHIFY_QUERY_LOG" bash "$RUNNER_TEMP/check-graphify-use.sh"
           fi
           delim="GEMINI_REVIEW_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
           {
