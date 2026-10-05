@@ -75,6 +75,25 @@ else
   bad "pinned graphifyy install" "no graphifyy== pin"
 fi
 
+# Gemini redacts env vars from run_shell_command children unless allowed; the
+# query log only reaches graphify when both GRAPHIFY_QUERY_LOG vars pass.
+ALLOWED="$(grep -oE '"environmentVariableRedaction": \{ "allowed": \[[^]]*\]' "$WF" | head -1 || true)"
+for var in GRAPHIFY_QUERY_LOG GRAPHIFY_QUERY_LOG_ENABLE; do
+  if printf '%s\n' "$ALLOWED" | grep -F -q "\"$var\""; then
+    ok "redaction allowlist passes $var"
+  else
+    bad "redaction allowlist passes $var" "allowed=$ALLOWED"
+  fi
+done
+
+run_step="$(awk '/- name: Run Gemini PR Review/ { on=1; print; next } on && /- name: / { exit } on { print }' "$WF")"
+if printf '%s\n' "$run_step" | grep -F -q 'FORMAT=querylog' &&
+   printf '%s\n' "$run_step" | grep -F -q '[ -s graphify-out/graph.json ]'; then
+  ok "querylog gate runs when the graph is present"
+else
+  bad "querylog gate runs when the graph is present" "no FORMAT=querylog gate keyed on graphify-out/graph.json"
+fi
+
 # Install-failure path must drop the restored graph so the prompt cannot
 # send the agent at a missing binary (ENG-7654 / CodeRabbit).
 if awk '

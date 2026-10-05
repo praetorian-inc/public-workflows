@@ -237,6 +237,16 @@ jobs:
 
     runs-on: ubuntu-24.04
 
+    # One review per PR in flight, whatever the caller's own concurrency. The
+    # "Convert to PR review" step matches comments by created_at >=
+    # CLAUDE_REVIEW_STARTED_AT and deletes them all on an unused verdict, so an
+    # overlapping run could convert or delete this run's comment. Serialized,
+    # that time window only ever holds this run's comment. The group differs
+    # from callers' workflow-level claude-<PR> group so the two cannot collide.
+    concurrency:
+      group: claude-review-job-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
+
     # Wall-clock ceiling on the Claude review job. `--max-turns` (the
     # `max_turns` input, default 30) caps the number of tool-call turns, but
     # NOT wall time (a long-running tool call or a slow Opus response can

@@ -15,12 +15,16 @@
 #              the JSONL file graphify appends to when GRAPHIFY_QUERY_LOG
 #              points at it: the CLI for Claude and Gemini, the graphify MCP
 #              server's query_graph tool for Grok. Passes on one JSON object
-#              whose corpus resolves to GRAPH (default graphify-out/graph.json).
-#              Skips when GRAPH is missing or empty.
+#              whose kind is a graph query (query, explain, path, mcp_query)
+#              and whose corpus resolves to GRAPH (default
+#              graphify-out/graph.json). Skips when GRAPH is missing or empty.
 #   codex    — Codex rollout JSONL directory (TRACE). Passes on one
 #              response_item function_call (exec_command or shell_command)
-#              whose command is a lone graphify query|explain|path and whose
-#              paired function_call_output reports exit code 0.
+#              that runs in the workspace root (no workdir, or one resolving
+#              to the cwd), whose command is a lone graphify query|explain|path
+#              with no shell expansion or redirection other than a whole-word
+#              N>&M, and whose paired function_call_output reports exit
+#              code 0.
 set -euo pipefail
 
 unused() {
@@ -120,9 +124,15 @@ def trace_files(path):
     return sorted(files)
 
 # ---- querylog -------------------------------------------------------------
+# The kinds graphify's querylog.log_query writes for a graph query: the CLI's
+# query, explain and path, and the MCP server's query_graph (mcp_query).
+QUERY_KINDS = ("query", "explain", "path", "mcp_query")
+
 def querylog_used(path):
     want = os.path.realpath(graph)
     for rec in jsonl(path):
+        if rec.get("kind") not in QUERY_KINDS:
+            continue
         corpus = rec.get("corpus")
         if isinstance(corpus, str) and corpus and os.path.realpath(corpus) == want:
             return True
@@ -169,15 +179,61 @@ def has_operator(value):
             continue
         elif ch in ("'", '"'):
             quote = ch
-        elif ch == "&" and (
-            (i > 0 and value[i - 1] in "<>") or value[i + 1:i + 2] == ">"
-        ):
-            # A redirection such as 2>&1, >&2 or &>file, not a control operator.
+        elif ch == "&" and i > 0 and value[i - 1] == ">":
+            # The >& of a 2>&1 or >&2 redirection, not a control operator;
+            # has_redirection admits only that whole-word form.
             pass
         elif ch in (";", "&", "|", "\n"):
             return True
         i += 1
     return bool(quote)
+
+def has_expansion(value):
+    # The checker reads words literally, so anything the shell would rewrite
+    # first ($, backticks, backslash escapes, and unquoted glob, brace or tilde
+    # characters) could hand graphify an argv the checker never saw, such as
+    # $(echo --graph) or a --gr* glob. Single-quoted text is literal.
+    quote = ""
+    for ch in value:
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            continue
+        if ch in ("$", "`", "\\"):
+            return True
+        if quote == '"':
+            if ch == '"':
+                quote = ""
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch in "*?[{~":
+            return True
+    return False
+
+DUP_REDIRECT = re.compile(r"[0-9]*>&[0-9]+")
+
+def has_redirection(value):
+    # Bash ends a word at an unquoted < > ( or ), so --graph</dev/null runs as
+    # --graph plus the next word while argv() sees one word. Only a whole-word
+    # descriptor duplication (2>&1, >&2) is allowed; quoted text is literal.
+    quote, word, special = "", [], False
+    for ch in value + " ":
+        if quote:
+            if ch == quote:
+                quote = ""
+            word.append(ch)
+            continue
+        if ch.isspace():
+            if special and not DUP_REDIRECT.fullmatch("".join(word)):
+                return True
+            word, special = [], False
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        elif ch in "<>()":
+            special = True
+        word.append(ch)
+    return False
 
 SHELLS = ("bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh")
 
@@ -185,7 +241,7 @@ def lone_graphify(value):
     if not isinstance(value, str):
         return False
     value = value.strip()
-    if has_operator(value):
+    if has_operator(value) or has_expansion(value) or has_redirection(value):
         return False
     words = argv(value)
     # A leading assignment (PATH=., GRAPHIFY_OUT=...) or a path-qualified
@@ -220,6 +276,18 @@ def exit_code(text):
 def session_id(text):
     m = re.search(r"(?m)^Process running with session ID (-?\d+)$", header(text))
     return int(m.group(1)) if m else None
+
+def in_workspace(args):
+    # graphify reads graphify-out/graph.json relative to its cwd, and only the
+    # workspace root's graphify-out is neutralized, so a call run from any
+    # other workdir could read a PR-committed graph.
+    workdir = args.get("workdir")
+    if workdir is None or workdir == "":
+        return True
+    if not isinstance(workdir, str):
+        return False
+    root = os.path.realpath(os.getcwd())
+    return os.path.realpath(os.path.join(root, workdir)) == root
 
 def codex_used(path):
     calls, outputs, records = {}, {}, 0
@@ -256,7 +324,7 @@ def codex_used(path):
                 return True
             continue
         cmd = args.get("cmd") if name == "exec_command" else args.get("command") if name == "shell_command" else None
-        if not lone_graphify(cmd):
+        if not lone_graphify(cmd) or not in_workspace(args):
             continue
         code = exit_code(text)
         if code == 0:

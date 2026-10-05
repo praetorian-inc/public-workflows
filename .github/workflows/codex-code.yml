@@ -539,7 +539,7 @@ jobs:
             that skill. Ground every finding in a specific file and line.
             ${{ steps.stage-skills.outputs.staged == 'true' && steps.stage-skills.outputs.invocations || '' }}
 
-            GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. You must run `graphify query`, `graphify explain`, or `graphify path` before findings, as one command on its own: no `;`, `&&`, `||`, `|`, or newline, and use the tool's workdir instead of `cd`. Only a lone graphify call that exits 0 counts. The job fails if the session trace has none. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. Codex project-doc
+            GRAPH: If graphify-out/graph.json exists, it is the default-branch graph only. It does not include symbols this PR added. Symbols this PR changed or deleted may still appear as they were on the default branch. You must run `graphify query`, `graphify explain`, or `graphify path` before findings, as one command on its own: no `;`, `&&`, `||`, `|`, or newline, and no `cd`. Do not pass `--graph` (graphify reads graphify-out/graph.json by default), leave workdir unset or set to the workspace root, and single-quote the question (no `$`, backticks, or unquoted `* ? [ { ~`). Only a lone graphify call that exits 0 counts. The job fails if the session trace has none. Confirm every graph answer at file:line in this PR's tree. For changed files, use the diff, not the graph. Codex project-doc
             truncation does not apply to this wrapper; do not rely on AGENTS.md for this.
 
             ${{ inputs.prompt }}

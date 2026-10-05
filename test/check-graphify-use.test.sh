@@ -8,9 +8,11 @@ FAIL=0
 ok()  { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; FAIL=$((FAIL + 1)); }
 
-T="$(mktemp -d "${TMPDIR:-/tmp}/graphify-use.XXXXXX")"
-trap 'rm -rf "$T"' EXIT
-T="$(cd -- "$T" && pwd -P)"
+T="$(mktemp -d "${TMPDIR:-/tmp}/graphify-use.XXXXXX")" || { echo "ERROR: mktemp failed" >&2; exit 2; }
+# Remove only the directory mktemp made: never an empty or unrelated path.
+trap 'T="${T:-}"; case "${T##*/}" in graphify-use.?*) rm -rf -- "$T" ;; esac' EXIT
+T_REAL="$(cd -- "$T" && pwd -P)" || { echo "ERROR: cannot resolve $T" >&2; exit 2; }
+T="$T_REAL"
 
 # expect <pass|unused|error> <name> <reason> [output-substring] -- <env...>
 # Runs the checker with the given env assignments and checks the exit status:
@@ -69,6 +71,14 @@ expect unused "missing querylog is rejected" "gate accepted a missing log" "quer
 
 { printf '{"kind":"query","corpus":"%s"\n' "$GRAPH"; printf 'not json\n'; printf '["%s"]\n' "$GRAPH"; } > "$LOG"
 expect unused "malformed querylog lines are rejected" "gate accepted a truncated or non-object record" "" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
+
+printf '{"ts":"2026-10-05T00:00:00+00:00","kind":"mcp_get_node","label":"dispatch","corpus":"%s"}\n' "$GRAPH" > "$LOG"
+expect unused "querylog record of another kind is rejected" "gate accepted a non-query record kind" "no graphify query" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
+
+printf '{"ts":"2026-10-05T00:00:00+00:00","question":"callers","corpus":"%s"}\n' "$GRAPH" > "$LOG"
+expect unused "querylog record without a kind is rejected" "gate accepted a record with no kind" "no graphify query" -- \
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
 { printf 'not json\n'; record "$GRAPH"; } > "$LOG"
@@ -134,6 +144,29 @@ codex_case unused "codex exit code inside Output is not trusted" "gate read the 
 codex_case pass "codex graphify with 2>&1 counts" "gate read a redirection as a control operator" "" \
   "$(call c1 exec_command '{"cmd":"graphify query callers 2>&1"}')" "$(out c1 "$EXITED0")"
 
+# Bash ends a word at an unquoted < > ( or ), so --graph</dev/null runs as
+# --graph followed by the next word; only a whole-word N>&M redirection counts.
+codex_case unused "codex --graph</dev/null is rejected" "gate read --graph</dev/null as one word" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x --graph</dev/null sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex --graph>&2 is rejected" "gate read --graph>&2 as one word" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x --graph>&2 sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex --graph>/dev/null is rejected" "gate read --graph>/dev/null as one word" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x --graph>/dev/null sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex <(true) process substitution is rejected" "gate accepted a process substitution word" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x <(true)"}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex plain output redirection is rejected" "gate accepted >out" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x >out"}')" "$(out c1 "$EXITED0")"
+
+codex_case pass "codex bare >&2 word counts" "gate rejected a whole-word >&2" "" \
+  "$(call c1 exec_command '{"cmd":"graphify query callers >&2"}')" "$(out c1 "$EXITED0")"
+
+codex_case pass "codex < and > inside single quotes count" "gate rejected literal quoted angle brackets" "" \
+  "$(call c1 exec_command "{\"cmd\":\"graphify query 'a<b>(c)'\"}")" "$(out c1 "$EXITED0")"
+
 codex_case pass "codex graphify with a trailing newline counts" "gate rejected trailing whitespace" "" \
   "$(call c1 exec_command '{"cmd":"graphify query callers\n"}')" "$(out c1 "$EXITED0")"
 
@@ -154,6 +187,69 @@ codex_case unused "codex path-qualified ./bash -lc wrapper is rejected" "gate ac
 
 codex_case unused "codex --graph override is rejected" "gate accepted a query against a planted graph" "graphify not used" \
   "$(call c1 exec_command '{"cmd":"graphify query callers --graph sub/planted.json"}')" "$(out c1 "$EXITED0")"
+
+# graphify reads graphify-out/graph.json from its cwd; only the workspace root's
+# graph is neutralized and checked, so a workdir elsewhere does not count.
+mkdir -p "$T/ws/sub/graphify-out"
+codex_case unused "codex workdir in a PR subdirectory is rejected" "gate accepted a query against a subdirectory's planted graph" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query callers","workdir":"sub"}')" "$(out c1 "$EXITED0")"
+
+ABS_ARGS="$(printf '{"cmd":"graphify query callers","workdir":"%s"}' "$T/ws")"
+codex_case pass "codex workdir equal to the absolute workspace counts" "gate rejected the workspace root spelled absolutely" "" \
+  "$(call c1 exec_command "$ABS_ARGS")" "$(out c1 "$EXITED0")"
+
+codex_case pass "codex workdir . counts" "gate rejected the workspace root spelled ." "" \
+  "$(call c1 shell_command '{"command":"graphify query callers","workdir":"."}')" "$(out c1 $'Exit code: 0\nWall time: 0.2 seconds\nOutput:\nok')"
+
+codex_case unused "codex non-string workdir is rejected" "gate accepted a workdir it cannot resolve" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query callers","workdir":["sub"]}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex write_stdin finishing a subdirectory session is rejected" "gate credited a session started outside the workspace root" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query callers","workdir":"sub"}')" \
+  "$(out c1 $'Chunk ID: a1\nWall time: 10.0 seconds\nProcess running with session ID 7\nOutput:\n')" \
+  "$(call c2 write_stdin '{"session_id":7,"chars":""}')" "$(out c2 "$EXITED0")"
+
+# Shell expansion makes the argv graphify runs with differ from the one the
+# checker reads, so $, backticks and unquoted glob/brace/tilde words do not count.
+# shellcheck disable=SC2016  # literal shell text the checker must reject
+codex_case unused "codex \$(...) expansion is rejected" "gate accepted a substitution that can expand to --graph" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x $(echo --graph) sub/graphify-out/graph.json"}')" "$(out c1 "$EXITED0")"
+
+# shellcheck disable=SC2016  # literal shell text the checker must reject
+codex_case unused "codex backtick substitution is rejected" "gate accepted a backtick substitution" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x `echo --graph` sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+# shellcheck disable=SC2016  # literal shell text the checker must reject
+codex_case unused "codex \$VAR expansion is rejected" "gate accepted a variable expansion" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x $G sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+# shellcheck disable=SC2016  # literal shell text the checker must reject
+codex_case unused "codex \${X} expansion is rejected" "gate accepted a braced variable expansion" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x ${G} sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+# shellcheck disable=SC2016  # literal shell text the checker must reject
+codex_case unused "codex \$(...) inside double quotes is rejected" "gate treated double quotes as literal" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query \"$(echo x)\""}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex unquoted glob is rejected" "gate accepted a glob that can match a PR file named --graph" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x --gr* sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+# Built outside $(...): bash 3.2 brace-expands words inside a quoted $(...).
+BRACE_ARGS='{"cmd":"graphify query x {--graph,sub/g.json}"}'
+codex_case unused "codex brace expansion is rejected" "gate accepted a brace expansion" "graphify not used" \
+  "$(call c1 exec_command "$BRACE_ARGS")" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex unquoted tilde is rejected" "gate accepted a tilde expansion" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x ~"}')" "$(out c1 "$EXITED0")"
+
+codex_case unused "codex backslash-escaped --graph is rejected" "gate read --gr\\aph as a different word than the shell does" "graphify not used" \
+  "$(call c1 exec_command '{"cmd":"graphify query x --gr\\aph sub/g.json"}')" "$(out c1 "$EXITED0")"
+
+codex_case pass "codex \$(...) inside single quotes counts" "gate rejected literal single-quoted text" "" \
+  "$(call c1 exec_command "{\"cmd\":\"graphify query '\$(literal) \`x\` \$G *'\"}")" "$(out c1 "$EXITED0")"
+
+codex_case pass "codex glob characters inside double quotes count" "gate rejected a quoted question mark" "" \
+  "$(call c1 exec_command '{"cmd":"graphify query \"who calls dispatch?\""}')" "$(out c1 "$EXITED0")"
 
 codex_case pass "codex /bin/bash -lc wrapper counts" "gate rejected the system shell" "" \
   "$(call c1 exec_command '{"cmd":"/bin/bash -lc \"graphify query callers\""}')" "$(out c1 "$EXITED0")"
