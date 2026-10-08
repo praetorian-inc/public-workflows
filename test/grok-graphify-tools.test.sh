@@ -130,6 +130,21 @@ else
   bad "querylog gate runs when the graph is present" "no FORMAT=querylog gate keyed on graphify-out/graph.json"
 fi
 
+# ENG-8892: the gate applies the warranted rule to the pre-agent list copies.
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+if printf '%s\n' "$run_step" | grep -F 'REQUIRED=true FORMAT=querylog' | grep -F -q 'CHANGED_FILES="$RUNNER_TEMP/graphify-changed-files.txt" ADDED_FILES="$RUNNER_TEMP/graphify-added-files.txt"'; then
+  ok "querylog gate passes the changed and added lists"
+else
+  bad "querylog gate passes the changed and added lists" "gate does not pass CHANGED_FILES/ADDED_FILES"
+fi
+
+move_step="$(awk '/- name: Move Grok trace checker out of the review tree/ { on=1; print; next } on && /- name: / { exit } on { print }' "$WF")"
+if printf '%s\n' "$move_step" | grep -F -q 'DECIDE_ONLY=true'; then
+  ok "graphify decision is logged before the review"
+else
+  bad "graphify decision is logged before the review" "no DECIDE_ONLY=true in the pre-agent checker step"
+fi
+
 if grep -E -q 'FORMAT=grok|pr-head-notes|review-graph-notes' "$WF"; then
   bad "Grok notes machinery removed" "FORMAT=grok / pr-head-notes / review-graph-notes still referenced"
 else

@@ -332,6 +332,12 @@ jobs:
           fi
           git -c core.quotePath=false diff --no-color HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .codex-review/pr.diff
           git -c core.quotePath=false diff --name-only HEAD^1 HEAD -- . "${EXCLUDES[@]}" > .codex-review/changed-files.txt
+          # The graphify gate decides from its own lists outside the review
+          # tree, written before the agent runs (ENG-8892). --no-renames lists
+          # a renamed file's old path as changed and its new path as added;
+          # -z writes paths NUL-delimited and unquoted.
+          git diff -z --no-renames --name-only HEAD^1 HEAD -- . "${EXCLUDES[@]}" > "$RUNNER_TEMP/graphify-changed-files.txt"
+          git diff -z --no-renames --name-only --diff-filter=A HEAD^1 HEAD -- . "${EXCLUDES[@]}" > "$RUNNER_TEMP/graphify-added-files.txt"
           # Empty-scope skip: if the scoped diff is empty while the PR itself is
           # not, every changed file is a caller-declared generated artifact. The
           # caller has explicitly marked those paths reviewless (their CI verifies
@@ -422,6 +428,20 @@ jobs:
           else
             echo "::warning::stage script checkout failed; reviewing without curated skills"
             echo "staged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ENG-8892: log, before the review, whether this PR warrants graphify.
+      # The checker comes from the _pw checkout (this reusable's own SHA),
+      # which exists only before the agent runs, so the post-review _trace
+      # gate stays as it is. That gate recomputes the decision from the same
+      # $RUNNER_TEMP lists, so this step is advisory and cannot fail the job.
+      - name: Log graphify decision
+        if: steps.context.outputs.empty_scope != 'true' && steps.checkout-pw.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [ -s graphify-out/graph.json ]; then
+            DECIDE_ONLY=true CHANGED_FILES="$RUNNER_TEMP/graphify-changed-files.txt" ADDED_FILES="$RUNNER_TEMP/graphify-added-files.txt" bash _pw/.github/actions/stage-review-skills/check-graphify-use.sh
           fi
 
       # Its own step so a partial checkout is removed even when checkout-pw
@@ -573,7 +593,7 @@ jobs:
           # evaluate, which includes an unstaged trace ("Codex session trace
           # missing or unstaged") because the stage step above is
           # continue-on-error. Both fail this step.
-          REQUIRED=true FORMAT=codex TRACE=".codex-review/trace" bash "$RUNNER_TEMP/check-graphify-use.sh"
+          REQUIRED=true FORMAT=codex TRACE=".codex-review/trace" CHANGED_FILES="$RUNNER_TEMP/graphify-changed-files.txt" ADDED_FILES="$RUNNER_TEMP/graphify-added-files.txt" bash "$RUNNER_TEMP/check-graphify-use.sh"
 
       - name: Upload Codex session trace
         if: always() && steps.run_codex.outcome != 'skipped' && steps.context.outputs.empty_scope != 'true'
