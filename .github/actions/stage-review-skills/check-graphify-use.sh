@@ -34,7 +34,8 @@
 # otherwise one path per line. --no-renames lists a renamed file's old path
 # as changed and its new path as added. When CHANGED_FILES is set and the graph is
 # present, graphify is required only when a changed path is a non-empty
-# .nodes[].source_file of the graph, or an added path ends in .go, .ts, .tsx,
+# .nodes[].source_file of the graph or ends in "/" plus one (a graph extracted
+# from a subdirectory), or an added path ends in .go, .ts, .tsx,
 # .js, .mjs, .sh or .py. Otherwise the check logs "graphify not required" and
 # exits 0 before reading the log or trace. An unreadable list or graph exits
 # 2. When CHANGED_FILES is unset, every run with a graph is required, as
@@ -87,6 +88,20 @@ def paths(name):
     return [p for p in data.split("\0" if "\0" in data else "\n") if p]
 
 
+def is_graphed(path, graphed):
+    # Exact match, or the path ends in "/" + a source_file: a graph built with
+    # graphify extract <subdir> records paths relative to <subdir>. One set
+    # lookup per path component keeps this linear in the changed list.
+    if path in graphed:
+        return True
+    i = path.find("/")
+    while i != -1:
+        if path[i + 1:] in graphed:
+            return True
+        i = path.find("/", i + 1)
+    return False
+
+
 def display(path):
     # One prompt line per path, whatever characters the path holds.
     return path.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
@@ -105,7 +120,7 @@ try:
         for n in nodes
         if isinstance(n, dict) and isinstance(n.get("source_file"), str) and n["source_file"]
     }
-    hits = [p for p in changed_paths if p in graphed]
+    hits = [p for p in changed_paths if is_graphed(p, graphed)]
     new_code = [p for p in added_paths if p.endswith(CODE_EXT)]
     if graphed_out:
         with open(graphed_out, "w", encoding="utf-8", errors="surrogateescape") as f:

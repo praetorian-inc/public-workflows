@@ -504,6 +504,28 @@ else
   bad "GRAPHED_OUT keeps one display line per path" "got: $(cat "$T/graphed.txt" 2>&1)"
 fi
 
+# Subdirectory graphs: graphify extract <path> writes source_file relative to
+# <path> (measured with 0.8.35: hello.go, cmd/minimal/main.go), while the
+# changed list is repo-relative. A changed path that ends in "/" + a
+# source_file counts as graphed; over-requiring is the safe direction.
+printf '%s\n' '{"nodes":[{"id":"h","source_file":"hello.go"},{"id":"m","source_file":"cmd/minimal/main.go"}]}' > "$T/gw/sub.json"
+printf '_test-fixtures/go-minimal/hello.go\0docs/x.md\0_test-fixtures/go-minimal/cmd/minimal/main.go\0' > "$CF"; : > "$AF"
+expect pass "changed path ending in /source_file is graphed" "decide mode missed a subdirectory graph" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF" GRAPHED_OUT="$T/graphed.txt"
+if [ "$(cat "$T/graphed.txt" 2>/dev/null)" = "$(printf '_test-fixtures/go-minimal/hello.go\n_test-fixtures/go-minimal/cmd/minimal/main.go')" ]; then
+  ok "GRAPHED_OUT lists suffix-matched changed paths"
+else
+  bad "GRAPHED_OUT lists suffix-matched changed paths" "got: $(cat "$T/graphed.txt" 2>&1)"
+fi
+
+printf 'pkg/xhello.go\0minimal/main.go\0' > "$CF"; : > "$AF"
+expect pass "suffix match needs a path-component boundary" "decide mode matched a partial name or a shorter path" "required=false" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'hello.go\0' > "$CF"; : > "$AF"
+expect pass "exact source_file match still counts" "decide mode lost the exact match" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
 # Renames (end to end): each bot's own graphify list commands, run against a
 # real rename of a graphed file, must list the old path as changed. Without
 # --no-renames git lists only the new path. The new path is not a code file,
@@ -589,6 +611,38 @@ for bot in claude codex; do
     bad "$bot logs the graphify decision before the review" "no DECIDE_ONLY step from _pw before Remove stage-script checkout"
   fi
 done
+
+# The gate passes PRs that touch no graphed code, so no prompt may claim the
+# job always fails without graphify. The run instruction stays unconditional:
+# the bots are not told which files are graphed, so a conditional instruction
+# invites a skipped query and a red job (ENG-8892).
+COND='When this PR changes a file that is in the graph, or adds a code file (go, ts, tsx, js, mjs, sh, py),'
+check_graphify_prompt() {
+  local bot="$1" run="$2" fail="$3" oldfail="$4"
+  local wf="$REPO_ROOT/.github/workflows/$bot-code.yml"
+  if grep -F -q -- "$run" "$wf" &&
+     grep -F -q -- "$COND $fail" "$wf" &&
+     ! grep -F -q -- "$oldfail" "$wf" &&
+     ! grep -F -q 'graphify is optional' "$wf" &&
+     ! grep -F -q 'When graphify is required' "$wf"; then
+    ok "$bot prompt keeps the run instruction unconditional and the failure claim conditional"
+  else
+    bad "$bot prompt keeps the run instruction unconditional and the failure claim conditional" "run instruction or conditional failure clause missing, or unconditional failure / optional wording present"
+  fi
+}
+check_graphify_prompt claude \
+  'Run at least one graphify query before findings.' \
+  "the job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged." \
+  "The job reads graphify's own query log"
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+check_graphify_prompt codex \
+  'Run `graphify query`, `graphify explain`, or `graphify path` at least once before findings.' \
+  'the job fails if the session trace has none.' \
+  'The job fails if the session trace has none.'
+check_graphify_prompt grok \
+  'Call the graphify MCP tool query_graph at least once before findings, for the code this PR touches.' \
+  'the job fails if no query_graph call reached the graph.' \
+  'The job fails if no query_graph call reached the graph.'
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

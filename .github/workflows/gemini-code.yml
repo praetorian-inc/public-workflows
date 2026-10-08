@@ -48,8 +48,9 @@ on:
           This is PR #${{ github.event.pull_request.number }} in this repository.
 
           The PR's full diff is in `.gemini-review/pr.diff` and the list of changed
-          files is in `.gemini-review/changed-files.txt`. Read the diff FIRST, then use
-          your tools (read_file, read_many_files, glob, grep_search, list_directory,
+          files is in `.gemini-review/changed-files.txt`. Read the diff first; when the
+          instructions above say GRAPHIFY FIRST, run that graphify query before
+          reading the diff. Then use your tools (read_file, read_many_files, glob, grep_search, list_directory,
           and graphify query/explain/path when graphify-out/graph.json exists) to open
           the surrounding code in this repository for context — the definitions,
           callers, and sibling modules the change touches. Review ONLY the changes
@@ -709,7 +710,7 @@ jobs:
           EOF
             if [ "$graphify_required" = "true" ]; then
               cat <<'EOF'
-          GRAPHIFY FIRST: This PR changes graphed code, so graphify is required. Your FIRST tool call must be a `graphify query` about a symbol in one of the changed files listed below (for a new file, a symbol the new code calls), before any read_file, read_many_files, glob, grep_search, list_directory, or activate_skill call and before reading the diff. This overrides any other instruction to read the diff first. The job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged.
+          GRAPHIFY FIRST: This PR changes graphed code, so graphify is required. Your FIRST tool call must be a `graphify query` about a symbol in one of the changed files listed below (for a new file, a symbol the new code calls), before any read_file, read_many_files, glob, grep_search, list_directory, or activate_skill call and before reading the diff. The job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged.
           Changed files that are in the graph:
           EOF
               if [ -s "$GRAPHED" ]; then

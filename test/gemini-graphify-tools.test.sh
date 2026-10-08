@@ -113,11 +113,19 @@ fi
 
 # shellcheck disable=SC2016  # literal workflow text, not an expansion
 if grep -F -q 'Your FIRST tool call must be a `graphify query`' <<<"$run_step" &&
-   grep -F -q 'This overrides any other instruction to read the diff first.' <<<"$run_step" &&
    ! grep -F -q 'You must run at least one graphify query before findings.' <<<"$run_step"; then
   ok "prompt requires graphify as the first tool call when warranted"
 else
   bad "prompt requires graphify as the first tool call when warranted" "GRAPHIFY FIRST block missing or old must-run sentence still present"
+fi
+
+# Override phrasing reads as prompt injection to other reviewers, so the
+# default prompt orders graphify before the diff in place instead.
+if ! grep -E -i -q 'overrides? any other instruction|ignore (any|all )?other instructions' "$WF" &&
+   tr -s ' \n' '  ' < "$WF" | grep -F -q 'when the instructions above say GRAPHIFY FIRST, run that graphify query before reading the diff'; then
+  ok "default prompt orders graphify first without override phrasing"
+else
+  bad "default prompt orders graphify first without override phrasing" "override phrasing present, or default prompt lacks the GRAPHIFY FIRST ordering"
 fi
 
 # shellcheck disable=SC2016  # literal workflow text, not an expansion
