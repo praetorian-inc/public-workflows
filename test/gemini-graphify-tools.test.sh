@@ -119,6 +119,70 @@ else
   bad "prompt requires graphify as the first tool call when warranted" "GRAPHIFY FIRST block missing or old must-run sentence still present"
 fi
 
+# Run the workflow's own GRAPHIFY FIRST block (dedented out of the YAML run
+# script) for both branches: graphed files listed, and none listed.
+graphify_first_block() {
+  printf '%s\n' "$run_step" | awk '
+    /if \[ "\$graphify_required" = "true" \]; then/ { on=1 }
+    on && /elif \[ -s graphify-out\/graph.json \]; then/ { print "          fi"; exit }
+    on { print }' | sed 's/^          //'
+}
+GF_TMP="$(mktemp -d "${TMPDIR:-/tmp}/gemini-graphify.XXXXXX")" || { echo "ERROR: mktemp failed" >&2; exit 2; }
+trap 'GF_TMP="${GF_TMP:-}"; case "${GF_TMP##*/}" in gemini-graphify.?*) rm -rf -- "$GF_TMP" ;; esac' EXIT
+graphify_first_block > "$GF_TMP/block.sh"
+printf 'pkg/a.go\n' > "$GF_TMP/listed.txt"
+: > "$GF_TMP/none.txt"
+listed_out="$(graphify_required=true GRAPHED="$GF_TMP/listed.txt" bash "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
+none_out="$(graphify_required=true GRAPHED="$GF_TMP/none.txt" bash "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
+
+# shellcheck disable=SC2016  # literal prompt text, not an expansion
+if grep -F -q 'a `graphify query` about a symbol in one of the changed files listed below' <<<"$listed_out" &&
+   grep -F -q -- '- pkg/a.go' <<<"$listed_out"; then
+  ok "listed branch asks for a symbol in a listed graphed file"
+else
+  bad "listed branch asks for a symbol in a listed graphed file" "got: $listed_out"
+fi
+
+# With no graphed file listed, Gemini cannot name a symbol before reading the
+# diff, so any graphify query about the existing code must satisfy the gate.
+# shellcheck disable=SC2016  # literal prompt text, not an expansion
+if grep -F -q 'any `graphify query` about the existing code satisfies this' <<<"$none_out" &&
+   grep -F -q 'Your FIRST tool call must be a `graphify query`' <<<"$none_out" &&
+   ! grep -F -q 'listed below' <<<"$none_out" &&
+   ! grep -F -q 'a symbol the new code calls' <<<"$none_out" &&
+   ! grep -E -i -q 'overrides?|ignore (any|all )?other' <<<"$none_out"; then
+  ok "none-listed branch accepts any graphify query about the existing code"
+else
+  bad "none-listed branch accepts any graphify query about the existing code" "got: $none_out"
+fi
+
+# Added paths are PR-chosen text; the prompt block never prints them. Run
+# both branches with a canary added path reachable every way the block could
+# read one: the RUNNER_TEMP list (NUL-delimited, as the workflow writes it),
+# the ADDED_FILES/ADDED_LIST variables, and a stub git on PATH that answers
+# any `git diff` with it. The canary must not appear in the prompt text.
+CANARY='canary-added-7f3e/evil.go'
+mkdir -p "$GF_TMP/rt" "$GF_TMP/bin"
+printf '%s\0' "$CANARY" > "$GF_TMP/rt/graphify-added-files.txt"
+printf '#!/bin/sh\nprintf "%%s\\n" "%s"\n' "$CANARY" > "$GF_TMP/bin/git"
+chmod +x "$GF_TMP/bin/git"
+for branch in listed none; do
+  canary_out="$(PATH="$GF_TMP/bin:$PATH" RUNNER_TEMP="$GF_TMP/rt" \
+    ADDED_FILES="$GF_TMP/rt/graphify-added-files.txt" ADDED_LIST="$CANARY" \
+    graphify_required=true GRAPHED="$GF_TMP/$branch.txt" bash "$GF_TMP/block.sh" 2>&1)"
+  if [ -n "$canary_out" ] && ! grep -F -q "$CANARY" <<<"$canary_out"; then
+    ok "$branch branch prints no added path"
+  else
+    bad "$branch branch prints no added path" "got: $canary_out"
+  fi
+done
+
+if ! grep -F -q 'added-files' "$GF_TMP/block.sh"; then
+  ok "GRAPHIFY FIRST block prints no added path"
+else
+  bad "GRAPHIFY FIRST block prints no added path" "block reads the added-files list"
+fi
+
 # Override phrasing reads as prompt injection to other reviewers, so the
 # default prompt orders graphify before the diff in place instead.
 if ! grep -E -i -q 'overrides? any other instruction|ignore (any|all )?other instructions' "$WF" &&
@@ -154,7 +218,15 @@ decide_block="$(printf '%s\n' "$run_step" | awk '
   on { print }
   on && /^          fi$/ { exit }' | sed 's/^          //')"
 DT="$(mktemp -d "${TMPDIR:-/tmp}/gemini-decide.XXXXXX")" || { echo "ERROR: mktemp failed" >&2; exit 2; }
-trap 'DT="${DT:-}"; case "${DT##*/}" in gemini-decide.?*) rm -rf -- "$DT" ;; esac' EXIT
+# One EXIT trap for both temp dirs: a second `trap ... EXIT` replaces the first.
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+cleanup_tmp() {
+  local d
+  for d in "${GF_TMP:-}" "${DT:-}"; do
+    case "${d##*/}" in gemini-graphify.?*|gemini-decide.?*) rm -rf -- "$d" ;; esac
+  done
+}
+trap cleanup_tmp EXIT
 mkdir -p "$DT/ws/graphify-out" "$DT/rt"
 printf '{"nodes":[]}\n' > "$DT/ws/graphify-out/graph.json"
 for stub_rc in 2 1; do

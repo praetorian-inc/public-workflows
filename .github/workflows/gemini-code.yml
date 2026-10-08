@@ -709,14 +709,18 @@ jobs:
 
           EOF
             if [ "$graphify_required" = "true" ]; then
-              cat <<'EOF'
-          GRAPHIFY FIRST: This PR changes graphed code, so graphify is required. Your FIRST tool call must be a `graphify query` about a symbol in one of the changed files listed below (for a new file, a symbol the new code calls), before any read_file, read_many_files, glob, grep_search, list_directory, or activate_skill call and before reading the diff. The job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged.
+              # GRAPHED holds graph source_file text only; added paths are PR-chosen
+              # and never reach this block.
+              if [ -s "$GRAPHED" ]; then
+                cat <<'EOF'
+          GRAPHIFY FIRST: This PR changes graphed code, so graphify is required. Your FIRST tool call must be a `graphify query` about a symbol in one of the changed files listed below, before any read_file, read_many_files, glob, grep_search, list_directory, or activate_skill call and before reading the diff. The job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged.
           Changed files that are in the graph:
           EOF
-              if [ -s "$GRAPHED" ]; then
                 head -n 20 "$GRAPHED" | sed 's/^/- /'
               else
-                echo "- (none; the PR adds new code files)"
+                cat <<'EOF'
+          GRAPHIFY FIRST: This PR adds new code files, so graphify is required. No changed file is in the graph, so any `graphify query` about the existing code satisfies this. Your FIRST tool call must be a `graphify query`, before any read_file, read_many_files, glob, grep_search, list_directory, or activate_skill call and before reading the diff. The job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged.
+          EOF
               fi
               echo
             elif [ -s graphify-out/graph.json ]; then
