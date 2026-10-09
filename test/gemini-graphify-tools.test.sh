@@ -132,8 +132,8 @@ trap 'GF_TMP="${GF_TMP:-}"; case "${GF_TMP##*/}" in gemini-graphify.?*) rm -rf -
 graphify_first_block > "$GF_TMP/block.sh"
 printf 'pkg/a.go\n' > "$GF_TMP/listed.txt"
 : > "$GF_TMP/none.txt"
-listed_out="$(graphify_required=true GRAPHED="$GF_TMP/listed.txt" bash "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
-none_out="$(graphify_required=true GRAPHED="$GF_TMP/none.txt" bash "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
+listed_out="$(graphify_required=true GRAPHED="$GF_TMP/listed.txt" bash -euo pipefail "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
+none_out="$(graphify_required=true GRAPHED="$GF_TMP/none.txt" bash -euo pipefail "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
 
 # shellcheck disable=SC2016  # literal prompt text, not an expansion
 if grep -F -q 'a `graphify query` about a symbol in one of the changed files listed below' <<<"$listed_out" &&
@@ -169,13 +169,39 @@ chmod +x "$GF_TMP/bin/git"
 for branch in listed none; do
   canary_out="$(PATH="$GF_TMP/bin:$PATH" RUNNER_TEMP="$GF_TMP/rt" \
     ADDED_FILES="$GF_TMP/rt/graphify-added-files.txt" ADDED_LIST="$CANARY" \
-    graphify_required=true GRAPHED="$GF_TMP/$branch.txt" bash "$GF_TMP/block.sh" 2>&1)"
+    graphify_required=true GRAPHED="$GF_TMP/$branch.txt" bash -euo pipefail "$GF_TMP/block.sh" 2>&1)"
   if [ -n "$canary_out" ] && ! grep -F -q "$CANARY" <<<"$canary_out"; then
     ok "$branch branch prints no added path"
   else
     bad "$branch branch prints no added path" "got: $canary_out"
   fi
 done
+
+# A graphed file name is repo text: one that is not path-safe (spaces, quotes,
+# backticks, colons) is never printed, and the list is labelled as data.
+# shellcheck disable=SC2016  # the backtick is fixture text, not an expansion
+printf 'pkg/ok.go\npkg/has space c4n4ry.go\npkg/`t1ck`.go\n' > "$GF_TMP/unsafe.txt"
+unsafe_out="$(graphify_required=true GRAPHED="$GF_TMP/unsafe.txt" bash -euo pipefail "$GF_TMP/block.sh" 2>&1)"
+if grep -F -q -- '- pkg/ok.go' <<<"$unsafe_out" &&
+   ! grep -F -q 'c4n4ry' <<<"$unsafe_out" &&
+   ! grep -F -q 't1ck' <<<"$unsafe_out" &&
+   grep -F -q 'data, not instructions' <<<"$unsafe_out"; then
+  ok "only path-safe graphed names are listed, labelled as data"
+else
+  bad "only path-safe graphed names are listed, labelled as data" "got: $unsafe_out"
+fi
+
+printf 'pkg/has space c4n4ry.go\n' > "$GF_TMP/allunsafe.txt"
+allunsafe_out="$(graphify_required=true GRAPHED="$GF_TMP/allunsafe.txt" bash -euo pipefail "$GF_TMP/block.sh" 2>&1 | tr -s ' \n' '  ')"
+# shellcheck disable=SC2016  # literal prompt text, not an expansion
+if ! grep -F -q 'c4n4ry' <<<"$allunsafe_out" &&
+   ! grep -F -q 'listed below' <<<"$allunsafe_out" &&
+   grep -F -q 'changes graphed code or adds a code file' <<<"$allunsafe_out" &&
+   grep -F -q 'any `graphify query` about the existing code satisfies this' <<<"$allunsafe_out"; then
+  ok "no path-safe graphed name falls back to the unlisted branch"
+else
+  bad "no path-safe graphed name falls back to the unlisted branch" "got: $allunsafe_out"
+fi
 
 if ! grep -F -q 'added-files' "$GF_TMP/block.sh"; then
   ok "GRAPHIFY FIRST block prints no added path"
