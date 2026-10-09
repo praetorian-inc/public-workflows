@@ -995,7 +995,7 @@ jobs:
             const notices = {
               turn_limit: `⚠️ Gemini review did not complete — session turn limit reached (FatalTurnLimitedError). See the [run logs](${process.env.RUN_URL}). Retrying the same PR is likely unhelpful; split the PR or wait for a turn-cap change.`,
               graphify_unused: `⚠️ Gemini review did not complete — graphify not used: this PR changes graphed code or adds a code file, and the review logged no graphify query. See the [run logs](${process.env.RUN_URL}).\n${retry}`,
-              graphify_unreadable: `⚠️ Gemini review did not complete — graphify query log unreadable: the job could not evaluate graphify use. See the [run logs](${process.env.RUN_URL}).\n${retry}`,
+              graphify_unreadable: `⚠️ Gemini review did not complete — graphify gate could not evaluate: the graph, a changed-file list, or the query log was unreadable. See the [run logs](${process.env.RUN_URL}).\n${retry}`,
             };
             const lines = [
               '## Gemini Review',

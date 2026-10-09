@@ -254,10 +254,10 @@ fi
 
 notice="$(awk '/- name: Post failure notice/ { on=1; print; next } on && /- name: / { exit } on { print }' "$WF")"
 if grep -F 'graphify_unused:' <<<"$notice" | grep -F -q 'graphify not used' &&
-   grep -F 'graphify_unreadable:' <<<"$notice" | grep -F -q 'graphify query log unreadable'; then
+   grep -F 'graphify_unreadable:' <<<"$notice" | grep -F -q 'graphify gate could not evaluate'; then
   ok "failure notice names the graphify reason"
 else
-  bad "failure notice names the graphify reason" "notice lacks the graphify not used / query log unreadable texts"
+  bad "failure notice names the graphify reason" "notice lacks the graphify not used / gate could not evaluate texts"
 fi
 
 # Install-failure path must drop the restored graph so the prompt cannot
