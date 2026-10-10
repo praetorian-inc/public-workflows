@@ -27,10 +27,32 @@
 #              with no shell expansion or redirection other than a whole-word
 #              N>&M, and whose paired function_call_output reports exit
 #              code 0.
+#
+# Warranted rule (ENG-8892). CHANGED_FILES and ADDED_FILES name path lists
+# from git diff -z --no-renames --name-only (ADDED_FILES with
+# --diff-filter=A, optional): NUL-delimited when the file holds a NUL,
+# otherwise one path per line. --no-renames lists a renamed file's old path
+# as changed and its new path as added. When CHANGED_FILES is set and the graph is
+# present, graphify is required only when a changed path is a non-empty
+# .nodes[].source_file of the graph or ends in "/" plus one (a graph extracted
+# from a subdirectory), or an added path ends in .go, .ts, .tsx,
+# .js, .mjs, .sh or .py. Otherwise the check logs "graphify not required" and
+# exits 0 before reading the log or trace. An unreadable list or graph exits
+# 2. When CHANGED_FILES is unset, every run with a graph is required, as
+# before. FORMAT=codex reads the graph at graphify-out/graph.json.
+#
+# DECIDE_ONLY=true prints the decision line and required=true|false, then
+# exits 0 (2 on an error). It needs CHANGED_FILES, reads GRAPH (default
+# graphify-out/graph.json), and ignores REQUIRED, FORMAT, QUERY_LOG and TRACE.
+# GRAPHED_OUT, when set, receives the graph source_file each graphed changed
+# path matched, deduplicated, one per line, with backslash, newline, CR and tab
+# written as \\, \n, \r, \t. It holds graph text only, never a changed path:
+# a PR picks its own paths, and GRAPHED_OUT reaches a reviewer prompt.
 set -euo pipefail
 
 unused() {
   echo "::error::$1"
+  VERDICT=1
   exit 1
 }
 
@@ -40,19 +62,132 @@ cannot_evaluate() {
 }
 
 # An unexpected failure in this script is an evaluation error, not a verdict.
+# Every deliberate exit 0 or exit 1 sets VERDICT first, so an exit 0 without it
+# (a bash parse error can end the script with status 0) also exits 2.
+VERDICT=""
 on_exit() {
   local rc=$?
   case "$rc" in
-    0 | 1 | 2) ;;
+    0) if [ -z "$VERDICT" ]; then exit 2; fi ;;
+    1 | 2) ;;
     *) exit 2 ;;
   esac
 }
 trap on_exit EXIT
 
+# decide_py <graph> <changed> <added> <graphed_out>: prints true or false,
+# then the decision line; exits 2 when the rule cannot be applied. The heredoc
+# stays outside $( ): bash 3.2 scans a heredoc inside $( ) for quotes, so an
+# apostrophe in a comment here would be a parse error.
+decide_py() {
+  python3 -I - "$@" <<'PY'
+import json, sys
+
+graph, changed, added, graphed_out = sys.argv[1:5]
+CODE_EXT = (".go", ".ts", ".tsx", ".js", ".mjs", ".sh", ".py")
+
+
+def paths(name):
+    # git diff -z lists are NUL-delimited and unquoted; a list with no NUL is
+    # read one path per line.
+    with open(name, "rb") as f:
+        data = f.read().decode("utf-8", errors="surrogateescape")
+    return [p for p in data.split("\0" if "\0" in data else "\n") if p]
+
+
+def graphed_source(path, graphed):
+    # The source_file a changed path matches, or None. Exact match, or the
+    # path ends in "/" + a source_file: a graph built with graphify extract
+    # <subdir> records paths relative to <subdir>. One set lookup per path
+    # component keeps this linear in the changed list.
+    if path in graphed:
+        return path
+    i = path.find("/")
+    while i != -1:
+        if path[i + 1:] in graphed:
+            return path[i + 1:]
+        i = path.find("/", i + 1)
+    return None
+
+
+def display(path):
+    # One prompt line per path, whatever characters the path holds.
+    return path.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+
+
+try:
+    changed_paths = paths(changed)
+    added_paths = paths(added) if added else []
+    with open(graph, encoding="utf-8") as f:
+        doc = json.load(f)
+    nodes = doc.get("nodes") if isinstance(doc, dict) else None
+    if not isinstance(nodes, list):
+        raise ValueError("graph nodes is not a list")
+    graphed = {
+        n["source_file"]
+        for n in nodes
+        if isinstance(n, dict) and isinstance(n.get("source_file"), str) and n["source_file"]
+    }
+    # dict.fromkeys dedupes and keeps first-match order. Each key is the
+    # source_file from the graph, so no PR-chosen prefix reaches GRAPHED_OUT.
+    matched = [s for s in (graphed_source(p, graphed) for p in changed_paths) if s is not None]
+    hits = list(dict.fromkeys(matched))
+    new_code = [p for p in added_paths if p.endswith(CODE_EXT)]
+    if graphed_out:
+        with open(graphed_out, "w", encoding="utf-8", errors="surrogateescape") as f:
+            f.write("".join(display(p) + "\n" for p in hits))
+except Exception as e:  # any failure here means the rule cannot be applied
+    print(f"graphify use check cannot evaluate the changed files: {type(e).__name__}: {e}")
+    sys.exit(2)
+
+if matched or new_code:
+    print("true")
+    print(f"graphify required: {len(matched)} changed file(s) in the graph, {len(new_code)} new code file(s)")
+else:
+    print("false")
+    print(f"graphify not required: none of {len(changed_paths)} changed file(s) is graphed code or a new code file")
+PY
+}
+
+# decide_warranted <graph>: applies the warranted rule to CHANGED_FILES and
+# ADDED_FILES, prints the decision line, and sets WARRANTED to true or false.
+WARRANTED=""
+decide_warranted() {
+  local result rc=0
+  result="$(decide_py "$1" "$CHANGED_FILES" "${ADDED_FILES:-}" "${GRAPHED_OUT:-}" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    cannot_evaluate "${result:-graphify use check cannot evaluate the changed files}"
+  fi
+  WARRANTED="${result%%$'\n'*}"
+  case "$WARRANTED" in
+    true | false) ;;
+    *) cannot_evaluate "graphify use check cannot evaluate the changed files: no decision" ;;
+  esac
+  echo "${result#*$'\n'}"
+}
+
+if [ "${DECIDE_ONLY:-false}" = "true" ]; then
+  if [ -z "${CHANGED_FILES:-}" ]; then
+    cannot_evaluate "graphify use check: CHANGED_FILES is required for DECIDE_ONLY=true"
+  fi
+  GRAPH="${GRAPH:-graphify-out/graph.json}"
+  if [ ! -s "$GRAPH" ]; then
+    echo "graphify not required: no graph at $GRAPH"
+    echo "required=false"
+    VERDICT=1
+    exit 0
+  fi
+  decide_warranted "$GRAPH"
+  echo "required=$WARRANTED"
+  VERDICT=1
+  exit 0
+fi
+
 FORMAT="${FORMAT:-}"
 REQUIRED="${REQUIRED:-false}"
 
 if [ "$REQUIRED" != "true" ]; then
+  VERDICT=1
   exit 0
 fi
 
@@ -69,7 +204,15 @@ case "$FORMAT" in
     GRAPH="${GRAPH:-graphify-out/graph.json}"
     if [ ! -s "$GRAPH" ]; then
       echo "graphify use check skipped: no graph at $GRAPH"
+      VERDICT=1
       exit 0
+    fi
+    if [ -n "${CHANGED_FILES:-}" ]; then
+      decide_warranted "$GRAPH"
+      if [ "$WARRANTED" != "true" ]; then
+        VERDICT=1
+        exit 0
+      fi
     fi
     if [ ! -e "$QUERY_LOG" ]; then
       unused "graphify use check: query log is missing ($QUERY_LOG); no graphify query ran, or GRAPHIFY_QUERY_LOG did not reach the graphify process"
@@ -81,6 +224,13 @@ case "$FORMAT" in
     if [ -z "$TRACE" ]; then
       cannot_evaluate "graphify use check: TRACE is required for FORMAT=codex"
     fi
+    if [ -n "${CHANGED_FILES:-}" ] && [ -s graphify-out/graph.json ]; then
+      decide_warranted graphify-out/graph.json
+      if [ "$WARRANTED" != "true" ]; then
+        VERDICT=1
+        exit 0
+      fi
+    fi
     if [ ! -d "$TRACE" ]; then
       cannot_evaluate "Codex session trace missing or unstaged ($TRACE): cannot verify graphify use; see the Stage Codex session trace step"
     fi
@@ -91,6 +241,7 @@ case "$FORMAT" in
     ;;
 esac
 
+# errexit ends the script with the checker's own status when it fails.
 python3 -I - "$TRACE" "$FORMAT" "$GRAPH" <<'PY'
 import json, os, re, sys
 
@@ -370,3 +521,4 @@ except SystemExit:
 except Exception as exc:  # unreadable input or a checker bug: not a verdict
     die("graphify use check cannot evaluate " + trace_path + ": " + type(exc).__name__ + ": " + str(exc), 2)
 PY
+VERDICT=1

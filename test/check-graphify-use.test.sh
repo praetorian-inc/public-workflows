@@ -370,6 +370,312 @@ rm -f "$LOG"
 expect unused "grok run with no MCP query exits 1" "gate did not report a missing log as unused" "query log is missing" -- \
   REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG"
 
+# ---- warranted rule (ENG-8892) ----
+# CHANGED_FILES / ADDED_FILES name newline-separated path lists. A change
+# warrants graphify when a changed path is a graph node's source_file, or an
+# ADDED file has a code extension. Otherwise the gate passes with
+# "graphify not required", even with no query log.
+mkdir -p "$T/gw"
+printf '%s\n' '{"nodes":[{"id":"a","source_file":"pkg/a.go"},{"id":"b","source_file":""},{"id":"c"}]}' > "$T/gw/graph.json"
+GW="$T/gw/graph.json"
+CF="$T/changed.txt"
+AF="$T/added.txt"
+rm -f "$LOG"
+
+printf 'AGENTS.md\ndocs/x.md\n' > "$CF"; : > "$AF"
+expect pass "non-graphed change with no log is not required" "gate failed a docs-only PR" "graphify not required" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+expect pass "ADDED_FILES unset is treated as empty" "gate required an added-files list" "graphify not required" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF"
+
+printf 'pkg/a.go\nREADME.md\n' > "$CF"; : > "$AF"
+expect unused "graphed .go change with no log is unused" "gate skipped a graphed code change" "query log is missing" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'pkg/new.go\n' > "$CF"; printf 'pkg/new.go\n' > "$AF"
+expect unused "new .go file with no log is unused" "gate skipped a new code file" "query log is missing" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+for ext in ts tsx js mjs sh py; do
+  printf 'x/new.%s\n' "$ext" > "$CF"; printf 'x/new.%s\n' "$ext" > "$AF"
+  expect unused "new .$ext file is warranted" "gate skipped a new .$ext file" "" -- \
+    REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+done
+
+printf 'notes/new.md\n' > "$CF"; printf 'notes/new.md\n' > "$AF"
+expect pass "new non-code file is not warranted" "gate required graphify for a new doc" "graphify not required" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'tools/old.go\nscripts/old.sh\n' > "$CF"; : > "$AF"
+expect pass "edited code-extension file absent from the graph is not warranted" "gate keyed edits on extension" "graphify not required" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+: > "$CF"; : > "$AF"
+expect pass "empty changed list is not required" "gate required graphify for no changes" "graphify not required" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'pkg/a.go\n' > "$CF"; : > "$AF"
+record "$GW" > "$LOG"
+expect pass "graphed change with a real query counts" "gate rejected a used query when warranted" "graphify use confirmed (querylog)" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+rm -f "$LOG"
+
+printf '{"nodes":' > "$T/gw/bad.json"
+printf 'AGENTS.md\n' > "$CF"
+expect error "malformed graph with a changed list exits 2" "gate skipped on a graph it could not parse" "cannot evaluate" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$T/gw/bad.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf '{"nodes":{"a":1}}\n' > "$T/gw/notlist.json"
+expect error "graph whose nodes is not a list exits 2" "gate skipped on a non-list nodes field" "cannot evaluate" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$T/gw/notlist.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+expect error "unreadable changed list exits 2" "gate skipped on a missing changed list" "cannot evaluate" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$T/nope.txt" ADDED_FILES="$AF"
+
+expect error "unreadable added list exits 2" "gate skipped on a missing added list" "cannot evaluate" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$T/logdir"
+
+expect unused "CHANGED_FILES unset keeps today's behavior" "gate skipped without a changed list" "query log is missing" -- \
+  REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW"
+
+# Codex: the workspace graph ($T/ws/graphify-out/graph.json) is the default.
+cp "$GW" "$T/ws/graphify-out/graph.json"
+mkdir -p "$T/codex-empty"
+printf 'AGENTS.md\n' > "$CF"; : > "$AF"
+expect pass "codex format, not warranted, passes without a trace hit" "codex gate failed a docs-only PR" "graphify not required" -- \
+  REQUIRED=true FORMAT=codex TRACE="$T/codex-empty" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'pkg/a.go\n' > "$CF"
+rm -rf "$CX"; mkdir -p "$CX/2026/10/05"
+printf '%s\n' "$(call c1 exec_command '{"cmd":"ls"}')" "$(out c1 "$EXITED0")" > "$CX/2026/10/05/rollout.jsonl"
+find "$CX" -type f -print > "$CX/session-files.txt"
+expect unused "codex format, warranted, with no graphify call is unused" "codex gate skipped a graphed change" "graphify not used" -- \
+  REQUIRED=true FORMAT=codex TRACE="$CX" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+printf '{"nodes":[]}\n' > "$T/ws/graphify-out/graph.json"
+
+# Decide mode: prints the decision and required=..., needs no log or trace.
+printf 'AGENTS.md\n' > "$CF"; : > "$AF"
+expect pass "decide mode, not warranted" "decide mode failed" "required=false" -- \
+  DECIDE_ONLY=true GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+expect pass "decide mode logs the not-required line" "decide mode lacks the log line" "graphify not required" -- \
+  DECIDE_ONLY=true GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'pkg/a.go\n' > "$CF"
+expect pass "decide mode, warranted" "decide mode failed on a warranted change" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF" GRAPHED_OUT="$T/graphed.txt"
+
+if [ "$(cat "$T/graphed.txt" 2>/dev/null)" = "pkg/a.go" ]; then
+  ok "decide mode writes graphed changed paths to GRAPHED_OUT"
+else
+  bad "decide mode writes graphed changed paths to GRAPHED_OUT" "got: $(cat "$T/graphed.txt" 2>&1)"
+fi
+
+expect pass "decide mode with no graph is not required" "decide mode failed without a graph" "required=false" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/absent.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+expect error "decide mode without CHANGED_FILES exits 2" "decide mode guessed without a list" "CHANGED_FILES is required" -- \
+  DECIDE_ONLY=true GRAPH="$GW"
+
+expect error "decide mode with a malformed graph exits 2" "decide mode skipped on a bad graph" "cannot evaluate" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/bad.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+# NUL-delimited lists (git diff -z). A list holding a NUL is split on NUL, so
+# paths with a newline, tab, quote or backslash arrive unquoted and whole.
+printf '%s\n' '{"nodes":[{"id":"q","source_file":"pkg/q\"x.go"},{"id":"n","source_file":"pkg/n\nl.go"},{"id":"a","source_file":"pkg/a.go"}]}' > "$T/gw/odd.json"
+printf 'docs/x.md\0pkg/a.go\0' > "$CF"; : > "$AF"
+expect pass "NUL-delimited changed list is split on NUL" "decide mode read a NUL list as one path" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/odd.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'docs/x.md\0' > "$CF"; printf 'docs/x.md\0x/new.go\0' > "$AF"
+expect pass "NUL-delimited added list is split on NUL" "decide mode read a NUL added list as one path" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/odd.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'pkg/q"x.go\0' > "$CF"; : > "$AF"
+expect pass "graphed path with a double quote matches unquoted" "decide mode missed a quoted-char path" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/odd.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'pkg/n\nl.go\0' > "$CF"; : > "$AF"
+expect pass "graphed path with a newline matches in a NUL list" "decide mode split a path on its newline" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/odd.json" CHANGED_FILES="$CF" ADDED_FILES="$AF" GRAPHED_OUT="$T/graphed.txt"
+if [ "$(wc -l < "$T/graphed.txt" | tr -d ' ')" = "1" ] && [ "$(cat "$T/graphed.txt")" = 'pkg/n\nl.go' ]; then
+  ok "GRAPHED_OUT keeps one display line per path"
+else
+  bad "GRAPHED_OUT keeps one display line per path" "got: $(cat "$T/graphed.txt" 2>&1)"
+fi
+
+# Subdirectory graphs: graphify extract <path> writes source_file relative to
+# <path> (measured with 0.8.35: hello.go, cmd/minimal/main.go), while the
+# changed list is repo-relative. A changed path that ends in "/" + a
+# source_file counts as graphed; over-requiring is the safe direction.
+printf '%s\n' '{"nodes":[{"id":"h","source_file":"hello.go"},{"id":"m","source_file":"cmd/minimal/main.go"}]}' > "$T/gw/sub.json"
+printf '_test-fixtures/go-minimal/hello.go\0docs/x.md\0_test-fixtures/go-minimal/cmd/minimal/main.go\0' > "$CF"; : > "$AF"
+expect pass "changed path ending in /source_file is graphed" "decide mode missed a subdirectory graph" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF" GRAPHED_OUT="$T/graphed.txt"
+# GRAPHED_OUT reaches Gemini's trusted prompt, so it carries the graph's own
+# source_file (default-branch text), never the PR-chosen changed path.
+if [ "$(cat "$T/graphed.txt" 2>/dev/null)" = "$(printf 'hello.go\ncmd/minimal/main.go')" ]; then
+  ok "GRAPHED_OUT lists the matched source_file, not the changed path"
+else
+  bad "GRAPHED_OUT lists the matched source_file, not the changed path" "got: $(cat "$T/graphed.txt" 2>&1)"
+fi
+
+# A PR chooses its path prefixes, so a prefix could carry arbitrary text; only
+# the matched source_file may reach GRAPHED_OUT, once, however many paths hit it.
+printf 'pr-chosen-prefix-c4n4ry/hello.go\0other/hello.go\0hello.go\0' > "$CF"; : > "$AF"
+expect pass "PR-chosen path prefix still matches the graph" "decide mode missed a suffix-matched path" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF" GRAPHED_OUT="$T/graphed.txt"
+if [ "$(cat "$T/graphed.txt" 2>/dev/null)" = "hello.go" ] && ! grep -F -q 'c4n4ry' "$T/graphed.txt"; then
+  ok "GRAPHED_OUT holds no PR path prefix and dedupes source_file"
+else
+  bad "GRAPHED_OUT holds no PR path prefix and dedupes source_file" "got: $(cat "$T/graphed.txt" 2>&1)"
+fi
+
+printf 'pkg/xhello.go\0minimal/main.go\0' > "$CF"; : > "$AF"
+expect pass "suffix match needs a path-component boundary" "decide mode matched a partial name or a shorter path" "required=false" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+printf 'hello.go\0' > "$CF"; : > "$AF"
+expect pass "exact source_file match still counts" "decide mode lost the exact match" "required=true" -- \
+  DECIDE_ONLY=true GRAPH="$T/gw/sub.json" CHANGED_FILES="$CF" ADDED_FILES="$AF"
+
+# Renames (end to end): each bot's own graphify list commands, run against a
+# real rename of a graphed file, must list the old path as changed. Without
+# --no-renames git lists only the new path. The new path is not a code file,
+# so only the graphed old path can make graphify required.
+make_rename_repo() {
+  local repo="$1"
+  rm -rf "$repo"; mkdir -p "$repo/pkg"
+  git -C "$repo" init -q
+  printf 'package pkg\n\nfunc A() {}\n' > "$repo/pkg/a.go"
+  printf 'package pkg\n' > "$repo/pkg/q\"x.go"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.name=t -c user.email=t@t commit -q -m base
+  git -C "$repo" mv pkg/a.go pkg/a.go.orig
+  printf 'package pkg\n\nfunc Q() {}\n' > "$repo/pkg/q\"x.go"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.name=t -c user.email=t@t commit -q -m rename
+}
+printf '%s\n' '{"nodes":[{"id":"a","source_file":"pkg/a.go"}]}' > "$T/gw/rename.json"
+printf '%s\n' '{"nodes":[{"id":"q","source_file":"pkg/q\"x.go"}]}' > "$T/gw/quote.json"
+for bot in claude codex gemini grok; do
+  wf="$REPO_ROOT/.github/workflows/$bot-code.yml"
+  # shellcheck disable=SC2016  # literal workflow text, not an expansion
+  lists="$(grep -E '^ *git .*> "\$RUNNER_TEMP/graphify-(changed|added)-files\.txt"$' "$wf" | sed 's/^ *//')"
+  repo="$T/rename-$bot"
+  make_rename_repo "$repo"
+  rt="$T/rt-$bot"; rm -rf "$rt"; mkdir -p "$rt"
+  if [ "$(printf '%s\n' "$lists" | grep -c 'graphify-')" != "2" ]; then
+    bad "$bot graphify lists catch a rename of a graphed file" "context step does not write both graphify lists with git diff: $lists"
+    bad "$bot graphify lists carry a quoted-char path unquoted" "context step does not write both graphify lists with git diff"
+    continue
+  fi
+  # The lines are this repo's own workflow text, run with no excludes; eval
+  # reads EXCLUDES and RUNNER_TEMP.
+  # shellcheck disable=SC2034
+  (cd -- "$repo" && set +u && EXCLUDES=() && RUNNER_TEMP="$rt" && eval "$lists") >/dev/null 2>&1
+  out="$(cd -- "$repo" && DECIDE_ONLY=true GRAPH="$T/gw/rename.json" CHANGED_FILES="$rt/graphify-changed-files.txt" ADDED_FILES="$rt/graphify-added-files.txt" bash "$SCRIPT" 2>&1)"
+  if [[ "$out" == *"1 changed file(s) in the graph"* && "$out" == *"required=true"* ]]; then
+    ok "$bot graphify lists catch a rename of a graphed file"
+  else
+    bad "$bot graphify lists catch a rename of a graphed file" "$out"
+  fi
+  out="$(cd -- "$repo" && DECIDE_ONLY=true GRAPH="$T/gw/quote.json" CHANGED_FILES="$rt/graphify-changed-files.txt" ADDED_FILES="$rt/graphify-added-files.txt" bash "$SCRIPT" 2>&1)"
+  if [[ "$out" == *"1 changed file(s) in the graph"* && "$out" == *"required=true"* ]]; then
+    ok "$bot graphify lists carry a quoted-char path unquoted"
+  else
+    bad "$bot graphify lists carry a quoted-char path unquoted" "$out"
+  fi
+done
+
+# An apostrophe in a decision-body comment must not make the gate fail open.
+# bash 3.2 (macOS /bin/bash) parses a heredoc inside $( ) for quotes, so an
+# unbalanced ' there was a parse error the EXIT trap saw as exit 0. The copy
+# runs under the bash running this suite: run it with /bin/bash to cover 3.2.
+mkdir -p "$T/apos"
+sed "s/# git diff -z lists are/# git diff's -z lists are/" "$SCRIPT" > "$T/apos/check.sh"
+if ! grep -F -q "# git diff's -z lists are" "$T/apos/check.sh"; then
+  bad "apostrophe in the decision body fails closed" "sed found no comment to inject into"
+else
+  printf 'pkg/a.go\n' > "$CF"; : > "$AF"; rm -f "$LOG"
+  out="$(cd -- "$T/ws" && env REQUIRED=true FORMAT=querylog QUERY_LOG="$LOG" GRAPH="$GW" CHANGED_FILES="$CF" ADDED_FILES="$AF" "${BASH:-bash}" "$T/apos/check.sh" 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    ok "apostrophe in the decision body fails closed"
+  else
+    bad "apostrophe in the decision body fails closed" "gate exited 0 under ${BASH:-bash}: $out"
+  fi
+fi
+
+# ---- workflow wiring (ENG-8892) ----
+# Every bot writes NUL-delimited, rename-free graphify lists outside the
+# review tree before the agent runs, leaves the agent-facing changed-files.txt
+# as it was, and passes the lists to its gate.
+for bot in claude codex gemini grok; do
+  wf="$REPO_ROOT/.github/workflows/$bot-code.yml"
+  if grep -F -q -- "git diff -z --no-renames --name-only HEAD^1 HEAD -- . \"\${EXCLUDES[@]}\" > \"\$RUNNER_TEMP/graphify-changed-files.txt\"" "$wf" &&
+     grep -F -q -- "git diff -z --no-renames --name-only --diff-filter=A HEAD^1 HEAD -- . \"\${EXCLUDES[@]}\" > \"\$RUNNER_TEMP/graphify-added-files.txt\"" "$wf" &&
+     grep -F -q -- "git -c core.quotePath=false diff --name-only HEAD^1 HEAD -- . \"\${EXCLUDES[@]}\" > .$bot-review/changed-files.txt" "$wf" &&
+     ! grep -F -q "$bot-review/added-files.txt" "$wf"; then
+    ok "$bot context writes the graphify lists with -z --no-renames"
+  else
+    bad "$bot context writes the graphify lists with -z --no-renames" "graphify lists not written with git diff -z --no-renames, or agent-facing lists changed"
+  fi
+  # shellcheck disable=SC2016  # literal workflow text, not an expansion
+  if grep -F 'REQUIRED=true FORMAT=' "$wf" | grep -F -q 'CHANGED_FILES="$RUNNER_TEMP/graphify-changed-files.txt" ADDED_FILES="$RUNNER_TEMP/graphify-added-files.txt"'; then
+    ok "$bot gate passes the graphify lists"
+  else
+    bad "$bot gate passes the graphify lists" "gate does not pass CHANGED_FILES/ADDED_FILES"
+  fi
+done
+
+# Claude and Codex log the decision from the pre-agent _pw checkout, before
+# "Remove stage-script checkout"; the post-agent _trace gate is unchanged.
+for bot in claude codex; do
+  wf="$REPO_ROOT/.github/workflows/$bot-code.yml"
+  if awk '
+    /- name: Log graphify decision/ { step = NR }
+    step && !decide && /DECIDE_ONLY=true .*bash _pw\/\.github\/actions\/stage-review-skills\/check-graphify-use\.sh/ { decide = NR }
+    /- name: Remove stage-script checkout/ { remove = NR }
+    END { exit(step && decide && remove && decide < remove ? 0 : 1) }' "$wf"; then
+    ok "$bot logs the graphify decision before the review"
+  else
+    bad "$bot logs the graphify decision before the review" "no DECIDE_ONLY step from _pw before Remove stage-script checkout"
+  fi
+done
+
+# The gate passes PRs that touch no graphed code, so no prompt may claim the
+# job always fails without graphify. The run instruction stays unconditional:
+# the bots are not told which files are graphed, so a conditional instruction
+# invites a skipped query and a red job (ENG-8892).
+COND='When this PR changes a file that is in the graph, or adds a code file (go, ts, tsx, js, mjs, sh, py),'
+check_graphify_prompt() {
+  local bot="$1" run="$2" fail="$3" oldfail="$4"
+  local wf="$REPO_ROOT/.github/workflows/$bot-code.yml"
+  if grep -F -q -- "$run" "$wf" &&
+     grep -F -q -- "$COND $fail" "$wf" &&
+     ! grep -F -q -- "$oldfail" "$wf" &&
+     ! grep -F -q 'graphify is optional' "$wf" &&
+     ! grep -F -q 'When graphify is required' "$wf"; then
+    ok "$bot prompt keeps the run instruction unconditional and the failure claim conditional"
+  else
+    bad "$bot prompt keeps the run instruction unconditional and the failure claim conditional" "run instruction or conditional failure clause missing, or unconditional failure / optional wording present"
+  fi
+}
+check_graphify_prompt claude \
+  'Run at least one graphify query before findings.' \
+  "the job reads graphify's own query log and fails if no graphify query against graphify-out/graph.json was logged." \
+  "The job reads graphify's own query log"
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+check_graphify_prompt codex \
+  'Run `graphify query`, `graphify explain`, or `graphify path` at least once before findings.' \
+  'the job fails if the session trace has none.' \
+  'The job fails if the session trace has none.'
+check_graphify_prompt grok \
+  'Call the graphify MCP tool query_graph at least once before findings, for the code this PR touches.' \
+  'the job fails if no query_graph call reached the graph.' \
+  'The job fails if no query_graph call reached the graph.'
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 if [ "$FAIL" -ne 0 ]; then

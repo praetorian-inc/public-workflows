@@ -130,6 +130,39 @@ else
   bad "querylog gate runs when the graph is present" "no FORMAT=querylog gate keyed on graphify-out/graph.json"
 fi
 
+# ENG-8892: the gate applies the warranted rule to the pre-agent list copies.
+# shellcheck disable=SC2016  # literal workflow text, not an expansion
+if printf '%s\n' "$run_step" | grep -F 'REQUIRED=true FORMAT=querylog' | grep -F -q 'CHANGED_FILES="$RUNNER_TEMP/graphify-changed-files.txt" ADDED_FILES="$RUNNER_TEMP/graphify-added-files.txt"'; then
+  ok "querylog gate passes the changed and added lists"
+else
+  bad "querylog gate passes the changed and added lists" "gate does not pass CHANGED_FILES/ADDED_FILES"
+fi
+
+move_step="$(awk '/- name: Move Grok trace checker out of the review tree/ { on=1; print; next } on && /- name: / { exit } on { print }' "$WF")"
+if printf '%s\n' "$move_step" | grep -F -q 'DECIDE_ONLY=true'; then
+  ok "graphify decision is logged before the review"
+else
+  bad "graphify decision is logged before the review" "no DECIDE_ONLY=true in the pre-agent checker step"
+fi
+
+# The decision log is advisory (the gate after the review decides), so a
+# checker exit 2 there must not fail the job. Run the step's decision block
+# under the step's own strict mode against a stub checker that exits 2.
+decide_block="$(printf '%s\n' "$move_step" | awk '/# ENG-8892: log/ { on=1 } on { print } on && /^[[:space:]]*fi$/ { exit }' | sed 's/^[[:space:]]*//')"
+dt="$(mktemp -d)"
+mkdir -p "$dt/graphify-out"
+printf '{"nodes":[]}\n' > "$dt/graphify-out/graph.json"
+printf '#!/usr/bin/env bash\necho "::error::stub cannot evaluate"\nexit 2\n' > "$dt/check-graphify-use.sh"
+decide_out="$(cd -- "$dt" && RUNNER_TEMP="$dt" bash -c "set -euo pipefail
+$decide_block" 2>&1)"
+decide_rc=$?
+rm -rf -- "$dt"
+if [ -n "$decide_block" ] && [ "$decide_rc" -eq 0 ] && grep -F -q '::warning::' <<<"$decide_out"; then
+  ok "decision log failure is non-fatal"
+else
+  bad "decision log failure is non-fatal" "rc=$decide_rc out=$decide_out"
+fi
+
 if grep -E -q 'FORMAT=grok|pr-head-notes|review-graph-notes' "$WF"; then
   bad "Grok notes machinery removed" "FORMAT=grok / pr-head-notes / review-graph-notes still referenced"
 else
