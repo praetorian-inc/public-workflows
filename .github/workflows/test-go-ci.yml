@@ -55,3 +55,16 @@ jobs:
     with:
       working-directory: _test-fixtures/go-minimal
       enable-build: false
+
+  call-go-ci-test-disabled:
+    name: Call go-ci (test disabled)
+    uses: ./.github/workflows/go-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: _test-fixtures/go-minimal
+      enable-test: false
+      build-cmd-path: ./cmd/minimal
+      build-binary-name: minimal
+      build-matrix-os: '["linux"]'
+      build-matrix-arch: '["amd64"]'
