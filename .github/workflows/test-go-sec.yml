@@ -1,9 +1,9 @@
 name: Test go-sec.yml (self-test)
 # Self-test harness for the go-sec.yml reusable workflow.
-# On every PR that touches go-sec.yml or the test fixture, this workflow
-# invokes go-sec.yml locally against _test-fixtures/go-minimal and
-# confirms gosec + govulncheck paths run. This catches regressions before
-# consumers pull a new SHA.
+# Pull requests run the focused toolchain contract; the three live reusable
+# calls are skipped because a workflow-only PR has no Go changes. Non-main
+# branch pushes on the same relevant paths and manual dispatches invoke
+# go-sec.yml locally against _test-fixtures/go-minimal.
 #
 # SARIF upload is disabled in self-test to keep the harness stateless — we
 # don't want self-test findings polluting public-workflows's own Security tab.
@@ -15,6 +15,15 @@ on:
     paths:
       - '.github/workflows/go-sec.yml'
       - '.github/workflows/test-go-sec.yml'
+      - 'test/go-sec-toolchain-contract.test.sh'
+      - '_test-fixtures/go-minimal/**'
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - '.github/workflows/go-sec.yml'
+      - '.github/workflows/test-go-sec.yml'
+      - 'test/go-sec-toolchain-contract.test.sh'
       - '_test-fixtures/go-minimal/**'
   workflow_dispatch:
 
@@ -26,7 +35,37 @@ permissions:
   contents: read
 
 jobs:
+  toolchain-contract:
+    name: Caller Go toolchain contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install YAML parser
+        run: python3 -m pip install --disable-pip-version-check --no-input "PyYAML==6.0.2"
+
+      - name: Test caller Go toolchain contract
+        run: bash test/go-sec-toolchain-contract.test.sh
+
   call-go-sec-defaults:
+    if: ${{ github.event_name != 'pull_request' }}
     name: Call go-sec (defaults, SARIF off)
     uses: ./.github/workflows/go-sec.yml
     permissions:
@@ -38,6 +77,7 @@ jobs:
       upload-sarif: false
 
   call-go-sec-gosec-only:
+    if: ${{ github.event_name != 'pull_request' }}
     name: Call go-sec (gosec only)
     uses: ./.github/workflows/go-sec.yml
     permissions:
@@ -50,6 +90,7 @@ jobs:
       upload-sarif: false
 
   call-go-sec-govulncheck-only:
+    if: ${{ github.event_name != 'pull_request' }}
     name: Call go-sec (govulncheck only)
     uses: ./.github/workflows/go-sec.yml
     permissions:
