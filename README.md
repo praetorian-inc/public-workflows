@@ -52,7 +52,7 @@ jobs:
 | `working-directory` | `.` | Working dir for multi-module repos |
 | `go-version-file` | `go.mod` | Path to go.mod (relative to `working-directory`) |
 | `enable-lint` | `true` | Run golangci-lint |
-| `golangci-lint-version` | `v2.12.2` | Pinned golangci-lint binary version (never `latest`) |
+| `golangci-lint-version` | `v2.14.0` | Pinned golangci-lint binary version (never `latest`) |
 | `golangci-lint-timeout` | `5m` | Lint timeout |
 | `enable-test` | `true` | Run `go test` |
 | `test-flags` | `-race -coverprofile=coverage.out -covermode=atomic` | Flags for `go test` |
