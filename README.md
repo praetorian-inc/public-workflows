@@ -18,7 +18,7 @@ This setting bypasses the org-level "Selected actions" allowlist for same-org re
 
 One-stop reusable workflow for Go repositories. Provides:
 - **Module integrity** (`go mod verify` + `go mod tidy -diff` drift check)
-- **Lint** (golangci-lint)
+- **Lint** (golangci-lint; pull requests use `--new-from-merge-base` so only issues new versus the PR base fail; push/main still lints the full module. The lint job runs `go mod download` before golangci-lint so setup-go's module/build cache is populated.)
 - **Test** (`go test -race` with coverage)
 - **Cross-platform build matrix** (GOOS × GOARCH)
 - **StepSecurity Harden-Runner** runtime CI EDR (enabled by default, audit mode)
