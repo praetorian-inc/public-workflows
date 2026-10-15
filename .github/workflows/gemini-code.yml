@@ -380,48 +380,6 @@ jobs:
           rm -f .gemini-review/pr.full.diff
           echo "PR diff: $(wc -c < .gemini-review/pr.diff) bytes across $(wc -l < .gemini-review/changed-files.txt) file(s)"
 
-      - name: Extract PR Scope section
-        # LAB-7197: copy the PR body's `## Scope` section next to pr.diff so the
-        # reviewer can tag each finding IN-SCOPE / OUT-OF-SCOPE / HYPOTHETICAL.
-        # The body is untrusted: it enters only through env (never inline in
-        # run) and is written to a file as data. It comes from the event
-        # payload, so this step holds no token. The run block is
-        # byte-identical across the four reviewer workflows
-        # (test/review-scope-tags.test.sh checks that).
-        if: steps.context.outputs.empty_scope != 'true'
-        env:
-          PR_BODY: ${{ github.event.pull_request.body }}
-          DEST: .gemini-review/scope.md
-        run: |
-          set -euo pipefail
-          rm -f -- "$DEST" "$DEST.tmp"
-          # perl on raw bytes (perl-base is Essential on ubuntu-24.04): mawk
-          # cannot match the zero-width/bidi code points, and byte matching
-          # never fails on invalid UTF-8. Hidden content is stripped BEFORE the
-          # heading match, so a commented-out heading is not a Scope section.
-          printf '%s\n' "${PR_BODY:-}" | perl -0777 -ne '
-            s/\r\n?/\n/g;
-            # Comments are stripped twice. The first pass ends a comment only at a literal
-            # "-->", as GitHub does; the second catches a "<!--" rebuilt by removing an
-            # invisible character from inside it.
-            s/<!--.*?(?:-->|\z)//gs;
-            s/[\x00-\x08\x0B-\x1F\x7F]|\xC2[\x80-\x9F]//g;
-            s/\xE2\x80[\x8B-\x8F\xAA-\xAE]|\xE2\x81[\xA0-\xA4\xA6-\xA9]|\xEF\xBB\xBF|\xEF\xB8[\x80-\x8F]//g;
-            s/\xD8\x9C|\xC2\xAD|\xF3\xA0[\x80-\x81\x84-\x87][\x80-\xBF]//g;
-            s/<!--.*?(?:-->|\z)//gs;
-            my ($grab, @out) = (0);
-            for (split /\n/, $_, -1) {
-              if ($grab) { last if /^ {0,3}#{1,2}(?:[ \t]|\z)/; push @out, $_; next }
-              $grab = 1 if /^ {0,3}##[ \t]+scope[ \t]*(?:\([^)]*\))?[ \t]*:?[ \t]*\z/i;
-            }
-            print join("\n", @out), "\n" if grep { /\S/ } @out;
-          ' > "$DEST.tmp"
-          if [ -s "$DEST.tmp" ]; then
-            mv -- "$DEST.tmp" "$DEST"
-          else
-            rm -f -- "$DEST.tmp"
-          fi
-
       # Neutralize PR-supplied agent config BEFORE anything trusted is staged. The merged
       # tree is untrusted PR content and workspace trust is enabled (see
       # GEMINI_CLI_TRUST_WORKSPACE below), so gemini-cli would honor any agent-control
@@ -537,6 +495,32 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: _pw
           persist-credentials: false
+
+      - name: Extract PR Scope section
+        # LAB-7197: copy the PR body's `## Scope` section next to pr.diff so the
+        # reviewer can tag each finding IN-SCOPE / OUT-OF-SCOPE / HYPOTHETICAL.
+        # The body is untrusted: it enters only through env (never inline in
+        # run) and is written to a file as data. It comes from the event
+        # payload, so this step holds no token. The extractor is the shared
+        # _pw/.github/actions/extract-pr-scope/extract-pr-scope.sh from this
+        # reusable's own SHA, so it runs here, while the _pw checkout exists.
+        # Only a successful trusted checkout may supply it (a PR can plant _pw/
+        # when that checkout is skipped); without it the review runs as if the
+        # body had no Scope section.
+        if: steps.context.outputs.empty_scope != 'true'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          DEST: .gemini-review/scope.md
+          CHECKOUT_OK: ${{ steps.checkout-pw.outcome }}
+        run: |
+          set -euo pipefail
+          script=_pw/.github/actions/extract-pr-scope/extract-pr-scope.sh
+          if [ "${CHECKOUT_OK:-}" = "success" ] && [ -f "$script" ]; then
+            bash "$script"
+          else
+            echo "::warning::scope-extract script checkout failed; reviewing as if the PR body had no Scope section"
+            rm -f -- "$DEST" "$DEST.tmp"
+          fi
 
       # Fail-open, always exits 0. The agent step keys only on outputs.staged.
       # _pw is removed afterwards so the reviewer never sees this repo's tree.
@@ -749,7 +733,11 @@ jobs:
           problem or it sits in a Scope In surface; [OUT-OF-SCOPE] when the problem
           predates this PR and sits outside Scope In; [HYPOTHETICAL] when it can
           only happen in a data state you have no evidence exists (this tag wins
-          over the other two). Placeholder lines like None., No security concerns
+          over the other two). End every [OUT-OF-SCOPE] finding with: Recommend
+          filing this as a separate Linear ticket, not fixing it in this PR. End
+          every [HYPOTHETICAL] finding with: Recommend filing this as a Theoretical:
+          Linear ticket. In both, the tag stays first and the recommendation goes at
+          the end of the bullet. Placeholder lines like None., No security concerns
           flagged. or No suggestions., and the LGTM line, are not findings and take
           no tag. Keep reading callers and sibling modules for context; the tags
           label findings, they never limit what you read or report.

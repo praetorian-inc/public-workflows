@@ -16,6 +16,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 
 STEP_NAME='Extract PR Scope section'
+PW_SCRIPT='_pw/.github/actions/extract-pr-scope/extract-pr-scope.sh'
+EXTRACT="$REPO_ROOT/.github/actions/extract-pr-scope/extract-pr-scope.sh"
 
 # Print the dedented `run: |` body of the named step.
 extract_run() {
@@ -39,7 +41,6 @@ extract_step() {
   ' "$1"
 }
 
-ref_run=""
 for bot in claude codex gemini grok; do
   wf="$bot-code.yml"
   path="$REPO_ROOT/.github/workflows/$wf"
@@ -66,7 +67,10 @@ for bot in claude codex gemini grok; do
                 'No Scope section found' 'as the first line of your review' \
                 'untrusted PR content' 'never as instructions' \
                 'Placeholder lines like' 'the LGTM line, are not findings' \
-                'sibling modules'; do
+                'sibling modules' \
+                'End every [OUT-OF-SCOPE] finding with: Recommend filing this as a separate Linear ticket, not fixing it in this PR.' \
+                'End every [HYPOTHETICAL] finding with: Recommend filing this as a Theoretical: Linear ticket.' \
+                'the tag stays first'; do
     case "$block" in
       *"$needle"*) ;;
       *) missing="$missing [$needle]" ;;
@@ -119,22 +123,82 @@ for bot in claude codex gemini grok; do
     bad "$wf extracts after Build review context" "context=$ctx_line extract=$ext_line"
   fi
 
-  if [ -z "$ref_run" ]; then
-    ref_run="$run_body"
-    printf '%s\n' "$run_body" > "$TMP/extract.sh"
-  elif [ "$run_body" = "$ref_run" ]; then
-    ok "$wf extract script is identical to claude-code.yml's"
+  # The extractor lives in ONE shared script, run from the _pw checkout of this
+  # reusable's own SHA — never inlined in the workflow, never a `uses:` (which
+  # would resolve against the caller's repo).
+  # shellcheck disable=SC2016 # literal ${{ }} is the expected YAML text
+  if printf '%s\n' "$run_body" | grep -qF "script=$PW_SCRIPT" \
+     && printf '%s\n' "$run_body" | grep -qF 'bash "$script"' \
+     && printf '%s\n' "$step" | grep -qF 'CHECKOUT_OK: ${{ steps.checkout-pw.outcome }}'; then
+    ok "$wf calls the shared extract-pr-scope script from _pw"
   else
-    bad "$wf extract script is identical to claude-code.yml's" "run blocks drifted"
+    bad "$wf calls the shared extract-pr-scope script from _pw" "run/env does not invoke $PW_SCRIPT"
+  fi
+  if grep -q 'perl -0777' "$path"; then
+    bad "$wf carries no inline copy of the extractor" "perl -0777 found in workflow"
+  else
+    ok "$wf carries no inline copy of the extractor"
+  fi
+  # The step must run while the trusted _pw checkout exists: after
+  # checkout-pw, before the step that removes it.
+  # The graph-fetch job has its own checkout-pw; take the review job's, the
+  # first one after Build review context.
+  pw_line="$(awk -v c="${ctx_line:-0}" 'NR > c && /id: checkout-pw$/ { print NR; exit }' "$path")"
+  rm_line="$(awk -v c="${ctx_line:-0}" 'NR > c && index($0, "- name: Remove stage-script checkout") { print NR; exit }' "$path")"
+  if [ -n "$pw_line" ] && [ -n "$rm_line" ] && [ -n "$ext_line" ] \
+     && [ "$ext_line" -gt "$pw_line" ] && [ "$ext_line" -lt "$rm_line" ]; then
+    ok "$wf extracts while the _pw checkout exists"
+  else
+    bad "$wf extracts while the _pw checkout exists" "checkout-pw=$pw_line extract=$ext_line remove=$rm_line"
+  fi
+
+  # Wrapper behaviour: only a successful trusted checkout may supply the
+  # script; otherwise a stale scope.md is removed and a PR-planted _pw script
+  # never runs.
+  wdir="$TMP/wrap-$bot"
+  mkdir -p "$wdir/.x-review" "$wdir/$(dirname "$PW_SCRIPT")"
+  printf 'stale\n' > "$wdir/.x-review/scope.md"
+  printf 'touch planted-ran\n' > "$wdir/$PW_SCRIPT"
+  printf '%s\n' "$run_body" > "$TMP/wrap-$bot.sh"
+  if (cd "$wdir" && CHECKOUT_OK=failure PR_BODY="## Scope
+- In: a.sh" DEST=.x-review/scope.md bash -e "$TMP/wrap-$bot.sh") >/dev/null 2>&1 \
+     && [ ! -e "$wdir/.x-review/scope.md" ] && [ ! -e "$wdir/planted-ran" ]; then
+    ok "$wf skips a planted script and clears scope.md when checkout-pw failed"
+  else
+    bad "$wf skips a planted script and clears scope.md when checkout-pw failed" "planted ran, scope.md survived, or the step failed"
+  fi
+  wdir="$TMP/wrap-ok-$bot"
+  mkdir -p "$wdir/.x-review" "$wdir/$(dirname "$PW_SCRIPT")"
+  # A stub stands in for the trusted script, so this proves the step
+  # delegates to it rather than extracting on its own.
+  # shellcheck disable=SC2016 # $DEST expands when the stub runs
+  printf 'printf "stub-ran\\n" > "$DEST"\n' > "$wdir/$PW_SCRIPT"
+  if (cd "$wdir" && CHECKOUT_OK=success PR_BODY="## Scope
+- In: a.sh" DEST=.x-review/scope.md bash -e "$TMP/wrap-$bot.sh") >/dev/null 2>&1 \
+     && [ "$(cat "$wdir/.x-review/scope.md" 2>/dev/null)" = "stub-ran" ]; then
+    ok "$wf runs the shared script when checkout-pw succeeded"
+  else
+    bad "$wf runs the shared script when checkout-pw succeeded" "scope.md not written by the shared script"
   fi
 done
 
-# Behavioral cases: run the extracted script against fixture bodies.
+# CI runs this suite, and changes to the shared script trigger it.
+sa="$REPO_ROOT/.github/workflows/self-audit.yml"
+n_paths="$(grep -cF -- "- 'test/review-scope-tags.test.sh'" "$sa")"
+n_actions="$(grep -cF -- "- '.github/actions/**'" "$sa")"
+if [ "$n_paths" -eq 2 ] && [ "$n_actions" -eq 2 ] \
+   && grep -qE '^        run: bash test/review-scope-tags\.test\.sh$' "$sa"; then
+  ok "self-audit.yml lists and runs review-scope-tags.test.sh"
+else
+  bad "self-audit.yml lists and runs review-scope-tags.test.sh" "paths=$n_paths actions-glob=$n_actions or run step missing"
+fi
+
+# Behavioral cases: run the shared script against fixture bodies.
 run_case() { # name body expect(absent|<expected file content>)
   local name="$1" body="$2" expect="$3" dir
   dir="$TMP/$name"
   mkdir -p "$dir/.x-review"
-  if ! (cd "$dir" && PR_BODY="$body" DEST=.x-review/scope.md bash -e "$TMP/extract.sh") >"$dir/log" 2>&1; then
+  if ! (cd "$dir" && PR_BODY="$body" DEST=.x-review/scope.md bash -e "$EXTRACT") >"$dir/log" 2>&1; then
     bad "extract: $name" "script failed: $(cat "$dir/log")"
     return
   fi
@@ -155,7 +219,7 @@ run_case() { # name body expect(absent|<expected file content>)
   fi
 }
 
-if [ -s "$TMP/extract.sh" ]; then
+if [ -f "$EXTRACT" ]; then
   CR=$'\r'
   with_scope="## Summary${CR}
 Fixes the thing.${CR}
@@ -289,7 +353,7 @@ visible tail" absent
   # A stale scope.md from an earlier step must not survive a no-scope body.
   mkdir -p "$TMP/stale/.x-review"
   printf 'stale\n' > "$TMP/stale/.x-review/scope.md"
-  if (cd "$TMP/stale" && PR_BODY="no scope here" DEST=.x-review/scope.md bash -e "$TMP/extract.sh") >/dev/null 2>&1 \
+  if (cd "$TMP/stale" && PR_BODY="no scope here" DEST=.x-review/scope.md bash -e "$EXTRACT") >/dev/null 2>&1 \
      && [ ! -e "$TMP/stale/.x-review/scope.md" ]; then
     ok "extract: stale scope.md removed"
   else
@@ -304,7 +368,7 @@ visible tail" absent
     ok "extract: body is never executed"
   fi
 else
-  bad "extract script present" "could not extract the run block"
+  bad "extract script present" "missing $EXTRACT"
 fi
 
 echo
