@@ -58,6 +58,7 @@ jobs:
 | `test-flags` | `-race -coverprofile=coverage.out -covermode=atomic` | Flags for `go test` |
 | `test-packages` | `./...` | Package selector for `go test` |
 | `enable-build` | `true` | Run cross-platform build matrix (requires `build-cmd-path`) |
+| `build-wait-for-test` | `true` | If true, Build waits for Test. Set false to start Build after preflight in parallel with Test. |
 | `build-matrix-os` | `["linux","darwin","windows"]` | GOOS matrix (JSON) |
 | `build-matrix-arch` | `["amd64","arm64"]` | GOARCH matrix (JSON) |
 | `build-cmd-path` | `""` | Go package path to build (e.g. `./cmd/augustus`). Build job skipped if empty. |

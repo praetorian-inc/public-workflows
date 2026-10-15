@@ -64,6 +64,7 @@ jobs:
     with:
       working-directory: _test-fixtures/go-minimal
       enable-test: false
+      build-wait-for-test: false
       build-cmd-path: ./cmd/minimal
       build-binary-name: minimal
       build-matrix-os: '["linux"]'

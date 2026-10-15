@@ -74,6 +74,12 @@ on:
         type: boolean
         default: true
 
+      build-wait-for-test:
+        description: "If true (default), Build waits for Test (fail-fast: the matrix does not start when tests fail). If false, Build starts after preflight in parallel with Test. Opt-in; default preserves existing caller behavior."
+        required: false
+        type: boolean
+        default: true
+
       build-matrix-os:
         description: "JSON array of GOOS values for the build matrix."
         required: false
@@ -343,8 +349,66 @@ jobs:
 
   build:
     name: Build
-    needs: preflight
-    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-build && inputs.build-cmd-path != ''
+    needs: [preflight, test]
+    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-build && inputs.build-cmd-path != '' && inputs.build-wait-for-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: ${{ fromJSON(inputs.build-matrix-os) }}
+        goarch: ${{ fromJSON(inputs.build-matrix-arch) }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/${{ inputs.go-version-file }}
+          cache-dependency-path: ${{ inputs.working-directory }}/go.sum
+
+      - name: Determine binary name
+        id: binary
+        env:
+          BUILD_BINARY_NAME: ${{ inputs.build-binary-name }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          if [ -n "$BUILD_BINARY_NAME" ]; then
+            echo "name=$BUILD_BINARY_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=$REPO_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ inputs.build-cgo-enabled }}
+          BINARY_NAME: ${{ steps.binary.outputs.name }}
+          BUILD_CMD_PATH: ${{ inputs.build-cmd-path }}
+        run: |
+          go build -trimpath -ldflags="-s -w" \
+            -o "${BINARY_NAME}-${GOOS}-${GOARCH}" \
+            "$BUILD_CMD_PATH"
+
+  build-no-wait:
+    name: Build
+    needs: [preflight]
+    if: needs.preflight.outputs.has_go == 'true' && inputs.enable-build && inputs.build-cmd-path != '' && !inputs.build-wait-for-test
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
