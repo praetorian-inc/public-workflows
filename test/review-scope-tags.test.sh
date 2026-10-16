@@ -350,6 +350,44 @@ visible tail" absent
   run_case keeps-other-unicode "## Scope
 - In: ${uni} ok" "- In: ${uni} ok"
 
+  # Fenced code blocks: a heading inside a fence neither starts nor ends Scope.
+  bt='```'
+  td='~~~'
+  run_case fenced-backtick-example-is-not-scope "How to write one:
+${bt}markdown
+## Scope
+- In: example.sh
+${bt}
+## Test plan
+- x" absent
+  run_case fenced-tilde-example-is-not-scope "How to write one:
+${td}
+## Scope
+- In: example.sh
+${td}" absent
+  run_case fence-inside-scope-keeps-heading "## Scope
+- In: a.sh
+${bt}sh
+# not a heading
+## Also not a heading
+${bt}
+- Out: b.sh
+## Test plan
+- x" "- In: a.sh
+${bt}sh
+# not a heading
+## Also not a heading
+${bt}
+- Out: b.sh"
+  run_case real-scope-after-fenced-example "${bt}
+## Scope
+- In: example.sh
+${bt}
+## Scope
+- In: real.sh
+## Test plan
+- x" "- In: real.sh"
+
   # A stale scope.md from an earlier step must not survive a no-scope body.
   mkdir -p "$TMP/stale/.x-review"
   printf 'stale\n' > "$TMP/stale/.x-review/scope.md"
