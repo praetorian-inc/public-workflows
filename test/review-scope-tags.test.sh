@@ -379,6 +379,13 @@ ${bt}sh
 ## Also not a heading
 ${bt}
 - Out: b.sh"
+  # A backtick in a backtick fence's info string makes it plain text, not a
+  # fence, so the next ``` opens the real code block.
+  run_case backtick-info-string-is-not-a-fence "${bt}a\`b
+${bt}
+## Scope
+- In: fenced-example
+${bt}" absent
   run_case real-scope-after-fenced-example "${bt}
 ## Scope
 - In: example.sh

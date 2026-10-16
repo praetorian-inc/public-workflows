@@ -27,12 +27,13 @@ printf '%s\n' "${PR_BODY:-}" | perl -0777 -ne '
   s/\xD8\x9C|\xC2\xAD|\xF3\xA0[\x80-\x81\x84-\x87][\x80-\xBF]//g;
   s/<!--.*?(?:-->|\z)//gs;
   # A heading inside a fenced code block (``` or ~~~, 3+) neither starts nor
-  # ends Scope; a fence closes on 3+ of the same char ($fc) at least as long
-  # as the opener ($fn). Fenced lines inside Scope are kept as content.
+  # ends Scope. A backtick opener whose info string has a backtick is plain
+  # text, not a fence. A fence closes on 3+ of the same char ($fc) at least as
+  # long as the opener ($fn). Fenced lines inside Scope are kept as content.
   my ($grab, $fc, $fn, @out) = (0, "", 0);
   for (split /\n/, $_, -1) {
     if ($fn) { $fn = 0 if /^ {0,3}\Q$fc\E{$fn,}[ \t]*\z/ }
-    elsif (/^ {0,3}(`{3,}|~{3,})/) { ($fc, $fn) = (substr($1, 0, 1), length $1) }
+    elsif (/^ {0,3}(`{3,}(?!.*`)|~{3,})/) { ($fc, $fn) = (substr($1, 0, 1), length $1) }
     elsif ($grab) { last if /^ {0,3}#{1,2}(?:[ \t]|\z)/ }
     elsif (/^ {0,3}##[ \t]+scope[ \t]*(?:\([^)]*\))?[ \t]*:?[ \t]*\z/i) { $grab = 1; next }
     push @out, $_ if $grab;
