@@ -32,18 +32,26 @@ fi
 # heading match, so a commented-out heading is not a Scope section.
 printf '%s\n' "$body" | perl -0777 -ne '
   # Drop the raw HTML whose text GitHub never renders: comments ("<!--" to
-  # "-->"), processing instructions ("<?" to "?>"), CDATA ("<![CDATA[" to
-  # "]]>") and declarations ("<!" + letter to ">"), each to the end of the
-  # segment when unclosed. Drop it everywhere except inside a top-level fenced
-  # code block: one opened at column 0 or 1, before any line that starts with
-  # "<" (after any indent and blockquote or list markers) or with a fence
-  # indented 2 or 3 spaces. Such a line may open an HTML block or a fence this
-  # scan does not track, so after one no fence is trusted. Code spans are not exempt. Over-stripping is the cost; text
-  # GitHub hides never reaches scope.md.
+  # "-->"), processing instructions ("<?" to "?>"), CDATA ("<![CDATA[" to "]]>")
+  # and declarations ("<!" + letter to ">"), each to the end of the segment when
+  # unclosed (a declaration also when a "<" comes first, so it never ends inside
+  # the quoted value of a later tag). Drop every tag too ("<" or "</" + letter
+  # to the next ">" outside quotes, across lines, or to the end of the segment
+  # when none follows, as an unclosed quote hides the rest): attribute values
+  # are never shown. A quoted value never spans a "<", so a stray quote cannot
+  # pair with the quote of a later tag and expose its value; the stray tag is
+  # stripped to the end of the segment instead. Autolinks ("<https://...>",
+  # "<user@example.com>") are shown, so they stay. Drop it everywhere except
+  # inside a top-level fenced code block: one opened at column 0 or 1, before
+  # any line that starts with "<" (after any indent and blockquote or list
+  # markers) or with a fence indented 2 or 3 spaces. Such a line may open an
+  # HTML block or a fence this scan does not track, so after one no fence is
+  # trusted. Code spans are not exempt. Over-stripping is the cost; text GitHub
+  # hides never reaches scope.md.
   sub strip_comments {
     my ($out, $seg, $fc, $fn, $distrust) = ("", "", "", 0, 0);
     my $end = qr/(?=\n\z)|\z/;
-    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<![A-Za-z].*?(?:>|$end)/s;
+    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<![A-Za-z](?:[^<>]*>|.*?$end)|<\/?[A-Za-z](?![A-Za-z0-9+.-]{1,31}:[^\s<>]*>|[^\s<>@]*@[^\s<>]*>)(?:(?:"[^"<]*"|\x27[^\x27<]*\x27|[^>"\x27])*>|.*?$end)/s;
     my $flush = sub { $seg =~ s/$hide//g; $out .= $seg; $seg = "" };
     for my $line (split /^/, $_[0]) {
       if ($fn) {

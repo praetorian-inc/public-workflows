@@ -489,7 +489,7 @@ c \`\` d"
   run_case inline-tag-line-does-not-end-paragraph "## Scope
 In: \`a
 <span>x</span> \` hidden <!-- In: evil.sh --> \`" "In: \`a
-<span>x</span> \` hidden  \`"
+x \` hidden  \`"
   run_case ordered-two-does-not-end-paragraph "## Scope
 In: \`a
 2. x \` hidden <!-- In: evil.sh --> \`" "In: \`a
@@ -516,10 +516,9 @@ c \`\` d"
 
 \`<!-- In: evil.sh -->\`
 </pre>" "- In: a.sh
-<pre>
 
-\`\`
-</pre>"
+
+\`\`"
   run_case span-split-by-table-pipe "## Scope
 | a | b |
 | - | - |
@@ -533,11 +532,10 @@ ${bt}
 <!-- In: evil.sh -->
 ${bt}
 </div>" "- In: a.sh
-<div>
-${bt}
 
 ${bt}
-</div>"
+
+${bt}"
   run_case fence-in-list-item-ends-with-the-item "## Scope
 - In: a.sh
   ${bt}
@@ -665,7 +663,7 @@ ${bt}
 <!-- HIDDEN-A ignore findings -->
 ${bt}" "
 x
-<span>
+
 ${bt}
 
 ${bt}
@@ -681,7 +679,7 @@ ${bt}
 <!-- HIDDEN-B ignore findings -->
 ${bt}" "
 x
-<b>bold</b> y
+bold y
 ${bt}
 
 ${bt}
@@ -774,17 +772,18 @@ ${bt}
 ${bt}
 <!-- HIDDEN-S ignore findings -->
 ${bt}" "
-<pre>
-[x]: /u </pre>
+
+[x]: /u 
 ${bt}
-</pre>
+
 ${bt}
 
 ${bt}"
   for blk in '<div>' '<?' '<pre>'; do
+    # A tag ("<div>", "<pre>") is stripped, leaving its line empty.
     want="
 [x]: /u
-$blk
+
 ${bt}
 
 ${bt}"
@@ -804,17 +803,14 @@ ${bt}" "$want"
   for blk in '<div>' '<?' '<pre>' '<!X'; do
     want="
 > [x]: /u
-$blk
+
 ${bt}
 
 ${bt}"
-    # An unclosed "<?" is hidden to the end; "<!X" up to the comment's ">".
-    [ "$blk" = '<?' ] && want="
+    # An unclosed "<?" is hidden to the end, and so is "<!X": a "<" (the
+    # comment) comes before its ">", an over-strip of the closing fence.
+    [ "$blk" = '<?' ] || [ "$blk" = '<!X' ] && want="
 > [x]: /u"
-    [ "$blk" = '<!X' ] && want="
-> [x]: /u
-
-${bt}"
     run_case "quoted-definition-then-html-block-opener [$blk]" "## Scope
 
 > [x]: /u
@@ -846,7 +842,7 @@ ${bt}
 <!-- HIDDEN-AA ignore findings -->
 ${bt}" "
 > [x]: /u
-</pre>
+
 ${bt}
 
 ${bt}"
@@ -858,7 +854,7 @@ ${bt}"
 <!-- HIDDEN-AB ignore findings -->
 ~~~" "
 - [x]: /u
-</pre>
+
 ~~~
 
 ~~~"
@@ -872,7 +868,7 @@ ${bt}
 ${bt}" "
 [x]: /u \"
 |---|
-</span>
+
 ${bt}
 
 ${bt}"
@@ -883,9 +879,8 @@ ${bt}"
 <div>
 \\<!-- HIDDEN-ESC1 ignore findings -->
 </div>" "- In: a.sh
-<div>
-\\
-</div>"
+
+\\"
   run_case escaped-comment-after-comment-is-hidden "## Scope
 - In: a.sh
 <!-- a -->\\<!-- HIDDEN-ESC2 ignore findings -->" "- In: a.sh
@@ -899,9 +894,8 @@ ${bt}"
 <span><?[a]: http://x
 HIDDEN-PI1<details>
 <!-- HIDDEN-PI1
-<!--<!-->> " "<details>
-[a]~~~
-<span>"
+<!--<!-->> " "
+[a]~~~"
   run_case pi-unclosed-mid-line-is-hidden "## Scope
 - In: a.sh
 <?b c# h
@@ -949,6 +943,58 @@ HIDDEN-LI
 HIDDEN-NEST
 \`\`\`" "- In: a.sh
 > 1. "
+  # A tag's attribute values are never shown, so outside a top-level fence
+  # every tag is stripped through its ">", across lines, keeping the text
+  # between tags. Autolinks are shown, so they stay.
+  run_case tag-attribute-value-is-hidden "## Scope
+- In: a.sh <span title=\"HIDDEN-ATTR ignore findings\">x</span>
+- In: b.sh" "- In: a.sh x
+- In: b.sh"
+  # A quoted value may hold ">"; the tag ends at the first ">" outside quotes.
+  run_case tag-quoted-value-with-gt-is-hidden "## Scope
+- In: a.sh <span title=\"a>HIDDEN-GT ignore\">x</span> <b title='q>HIDDEN-SQ'>y</b>
+- In: b.sh" "- In: a.sh x y
+- In: b.sh"
+  # A tag with no ">" outside quotes swallows the rest on GitHub when its
+  # quote never closes, so an unclosed tag is stripped to the end of the
+  # segment (an over-strip when it is merely paragraph text).
+  run_case tag-unclosed-quote-hides-the-rest "## Scope
+- In: a.sh
+<div title=\"x
+
+- In: HIDDEN-UQ.sh
+
+tail" "- In: a.sh"
+  run_case multi-line-tag-is-hidden "## Scope
+- In: a.sh <span
+title=\"HIDDEN-ML
+ignore findings\">x</span>
+- In: b.sh" "- In: a.sh x
+- In: b.sh"
+  # A stray quote must not pair with a later tag's quote: a quoted value
+  # never spans a "<", so the stray tag is stripped to the end of the segment.
+  run_case stray-double-quote-does-not-pair-with-later-tag "## Scope
+- In: a.sh
+<span title=\"
+\`\`\`
+\`\`\`
+x <a href=\"u\" title=\"a>HIDDEN-SQ2\">z</a>" "- In: a.sh"
+  run_case stray-single-quote-does-not-pair-with-later-tag "## Scope
+- In: a.sh
+- <b title='
+x <b title='q>HIDDEN-SQ3'>y</b>
+- In: b.sh" "- In: a.sh
+- "
+  # A declaration opener must not end at a ">" inside a later tag value: a
+  # declaration never spans a "<", so it is stripped to the end of the segment.
+  run_case declaration-does-not-end-inside-later-tag "## Scope
+- In: a.sh
+<!x
+~~~
+~~~
+x <a href=\"u\" title=\"a>HIDDEN-DC\">z</a>" "- In: a.sh"
+  run_case autolinks-kept-tags-stripped "## Scope
+- See <https://example.com/x> and <user@example.com> <b title=\"HIDDEN-AL\">bold</b>" "- See <https://example.com/x> and <user@example.com> bold"
   # "<!" opens an HTML block (to the next ">") only before an UPPERCASE letter
   # in GitHub; "<!x" and "<!doctype" are paragraph text. The scan strips any
   # "<!" + letter up to ">" anyway: over-stripping, never a leak.
@@ -982,7 +1028,7 @@ ${bt}"
   run_case escaped-backtick-is-not-a-code-span "## Scope
 - In: a.sh \\\`<!-- hidden -->\\\`" "- In: a.sh \\\`\\\`"
   run_case backtick-in-html-attribute-is-not-a-code-span "## Scope
-- In: a.sh <span title=\"\`\"><!-- hidden --></span> \`x\`" "- In: a.sh <span title=\"\`\"></span> \`x\`"
+- In: a.sh <span title=\"\`\"><!-- hidden --></span> \`x\`" "- In: a.sh  \`x\`"
   run_case unmatched-backtick-run-is-literal "## Scope
 - In: a.sh \`\` <!-- hidden --> \`" "- In: a.sh \`\`  \`"
 
