@@ -32,16 +32,19 @@ fi
 # heading match, so a commented-out heading is not a Scope section.
 printf '%s\n' "$body" | perl -0777 -ne '
   # Drop the raw HTML whose text GitHub never renders: comments ("<!--" to
-  # "-->"), processing instructions ("<?" to "?>"), CDATA ("<![CDATA[" to "]]>")
-  # and declarations ("<!" + letter to ">"), each to the end of the segment when
-  # unclosed (a declaration also when a "<" comes first, so it never ends inside
-  # the quoted value of a later tag). Drop every tag too ("<" or "</" + letter
-  # to the next ">" outside quotes, across lines, or to the end of the segment
-  # when none follows, as an unclosed quote hides the rest): attribute values
-  # are never shown. A quoted value never spans a "<", so a stray quote cannot
-  # pair with the quote of a later tag and expose its value; the stray tag is
-  # stripped to the end of the segment instead. Autolinks ("<https://...>",
-  # "<user@example.com>") are shown, so they stay. Drop it everywhere except
+  # "-->"), processing instructions ("<?" to "?>"), CDATA ("<![CDATA[" to
+  # "]]>"), and any other "<!" or "</" (a declaration, closing tag or bogus
+  # comment) to the next ">", each to the end of the segment when unclosed or
+  # when a "<" comes first, so it never ends inside the quoted value of a later
+  # tag. Drop every tag and autolink too ("<" + letter to the next ">" outside
+  # quotes, across lines, or to the end of the segment when none follows, as an
+  # unclosed quote hides the rest): attribute values are never shown, and an
+  # autolink inside an HTML block is hidden. A quoted value never spans a "<",
+  # so a stray quote cannot pair with the quote of a later tag and expose its
+  # value. Then drop the info string of every line shaped like a fence opener
+  # (it is never shown), and every paragraph (run of non-blank lines) holding
+  # "]:", as a link reference definition renders as nothing. Drop it all
+  # everywhere except
   # inside a top-level fenced code block: one opened at column 0 or 1, before
   # any line that starts with "<" (after any indent and blockquote or list
   # markers) or with a fence indented 2 or 3 spaces. Such a line may open an
@@ -51,8 +54,14 @@ printf '%s\n' "$body" | perl -0777 -ne '
   sub strip_comments {
     my ($out, $seg, $fc, $fn, $distrust) = ("", "", "", 0, 0);
     my $end = qr/(?=\n\z)|\z/;
-    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<![A-Za-z](?:[^<>]*>|.*?$end)|<\/?[A-Za-z](?![A-Za-z0-9+.-]{1,31}:[^\s<>]*>|[^\s<>@]*@[^\s<>]*>)(?:(?:"[^"<]*"|\x27[^\x27<]*\x27|[^>"\x27])*>|.*?$end)/s;
-    my $flush = sub { $seg =~ s/$hide//g; $out .= $seg; $seg = "" };
+    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<\/?[A-Za-z](?:(?:"[^"<]*"|\x27[^\x27<]*\x27|[^>"\x27])*>|.*?$end)|<[\/!](?:[^<>]*>|.*?$end)/s;
+    my $flush = sub {
+      $seg =~ s/$hide//g;
+      $seg =~ s/^((?:[ \t]*(?:>|[-+*]|\d{1,9}[.)]))*[ \t]*(?:`{3,}(?![^\n]*`)|~{3,})).*/$1/gm;
+      $seg =~ s/(?:^[ \t]*\S.*\n?)+/index($&, "]:") < 0 ? $& : ""/gme;
+      $out .= $seg;
+      $seg = "";
+    };
     for my $line (split /^/, $_[0]) {
       if ($fn) {
         $fn = 0 if $line =~ /\A {0,3}\Q$fc\E{$fn,}[ \t]*\n?\z/;
@@ -62,9 +71,8 @@ printf '%s\n' "$body" | perl -0777 -ne '
       if (!$distrust && $line =~ /\A ?(`{3,}(?![^\n]*`)|~{3,})/) {
         $flush->();
         ($fc, $fn) = (substr($1, 0, 1), length $1);
-        # The info string is not shown, so hidden HTML there is dropped too.
-        (my $open = $line) =~ s/$hide//g;
-        $out .= $open;
+        # The info string is not shown, so it is dropped.
+        $out .= substr($line, 0, $+[1]) . ($line =~ /\n\z/ ? "\n" : "");
         next;
       }
       $distrust = 1 if $line =~ /\A(?:[ \t]*(?:>|[-+*]|\d{1,9}[.)]))*[ \t]*<|\A {2,3}(?:`{3,}|~{3,})/;
