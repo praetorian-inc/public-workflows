@@ -89,10 +89,14 @@ printf '%s\n' "$body" | perl -0777 -ne '
           my $c = $1;
           pos($seg) = $at + length $c;
           if ($seg =~ /\G(?=\[\^[^\]\s]+\]:)/) {
-            my $gap = 0;
+            # It ends where a line, inside the quotes the footnote sits in,
+            # starts a list item, a quote, a fence or a break.
+            my ($gap, $d) = (0, $c =~ tr/>//);
             for ($n = 1; $i + $n <= $#r && $r[$i + $n] !~ $head; $n++) {
+              (my $l = $r[$i + $n]) =~ s/\A(?: {0,3}> ?){0,$d}//;
               if ($r[$i + $n] =~ /\A[ \t>]*\n?\z/) { $gap = 1 }
               elsif ($gap && $r[$i + $n] !~ /\A(?: {4}|[ \t]*\t)/) { last }
+              elsif (!$gap && $l =~ /\A {0,3}(?:>|[-+*](?=[ \t\n]|\z)|\d{1,9}[.)](?=[ \t\n]|\z)|`{3,}|~{3,}|(?:[-*_][ \t]*){3,}\n?\z)/) { last }
               else { $gap = 0 }
             }
           } else {

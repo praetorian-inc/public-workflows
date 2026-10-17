@@ -1226,6 +1226,46 @@ HIDDEN-F2 lazy
 - [^2]: HIDDEN-F4
 > [^a[b]: HIDDEN-F5" "- In: a.sh
 - In: b.sh"
+  # A footnote ends at a line that starts a block other than a paragraph:
+  # a list item, a quote, a fence or a break. Inline HTML continues it.
+  run_case footnote-ends-at-list-item "## Scope
+[^1]: footnote text
+- In: parser
+- Out: UI" "- In: parser
+- Out: UI"
+  run_case footnote-ends-at-quote "## Scope
+
+[^1]: note
+> In: parser
+
+- Out: UI" "
+> In: parser
+
+- Out: UI"
+  run_case footnote-ends-at-ordered-item-and-break "## Scope
+[^1]: a
+2. TWO
+[^2]: b
+***
+shown
+[^3]: c
+-" "2. TWO
+***
+shown
+-"
+  run_case footnote-in-quote-holds-quoted-lines "## Scope
+- In: a
+
+> [^1]: a
+> HIDDEN-FN8 lazy
+> > deeper" "- In: a
+
+> > deeper"
+  run_case footnote-holds-inline-html-line "## Scope
+- In: a.sh
+
+[^1]: a
+<span>HIDDEN-FN7</span>" "- In: a.sh"
   run_case footnote-before-scope-heading-keeps-scope "[^1]: HIDDEN-F6
 ## Scope
 - In: a.sh" "- In: a.sh"
