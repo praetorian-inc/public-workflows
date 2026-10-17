@@ -481,24 +481,29 @@ jobs:
       - name: Extract PR Scope section
         # LAB-7197: copy the PR body's `## Scope` section next to pr.diff so the
         # reviewer can tag each finding IN-SCOPE / OUT-OF-SCOPE / HYPOTHETICAL.
-        # The body is untrusted: it enters only through env (never inline in
-        # run) and is written to a file as data. It comes from the event
-        # payload, so this step holds no token. The extractor is the shared
+        # The body is untrusted: the script reads it as data from the event
+        # payload file ($GITHUB_EVENT_PATH), never inline in run and never
+        # through env, where a large multibyte body exceeds Linux's
+        # 131072-byte entry limit and the exec fails with E2BIG. The payload
+        # needs no token, so this step holds none. The extractor is the shared
         # _pw/.github/actions/extract-pr-scope/extract-pr-scope.sh from this
         # reusable's own SHA, so it runs here, while the _pw checkout exists.
         # Only a successful trusted checkout may supply it (a PR can plant _pw/
         # when that checkout is skipped); without it the review runs as if the
-        # body had no Scope section.
+        # body had no Scope section. It fails open the same way: if the
+        # extractor fails, scope.md is removed and the job continues.
         if: steps.context.outputs.empty_scope != 'true'
         env:
-          PR_BODY: ${{ github.event.pull_request.body }}
           DEST: .claude-review/scope.md
           CHECKOUT_OK: ${{ steps.checkout-pw.outcome }}
         run: |
           set -euo pipefail
           script=_pw/.github/actions/extract-pr-scope/extract-pr-scope.sh
           if [ "${CHECKOUT_OK:-}" = "success" ] && [ -f "$script" ]; then
-            bash "$script"
+            bash "$script" || {
+              echo "::warning::scope extraction failed; reviewing as if the PR body had no Scope section"
+              rm -f -- "$DEST" "$DEST.tmp"
+            }
           else
             echo "::warning::scope-extract script checkout failed; reviewing as if the PR body had no Scope section"
             rm -f -- "$DEST" "$DEST.tmp"
