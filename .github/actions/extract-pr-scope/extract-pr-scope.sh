@@ -41,12 +41,17 @@ printf '%s\n' "$body" | perl -0777 -ne '
   # unclosed quote hides the rest): attribute values are never shown, and an
   # autolink inside an HTML block is hidden. A quoted value never spans a "<",
   # so a stray quote cannot pair with the quote of a later tag and expose its
-  # value. Then drop the info string of every line shaped like a fence opener
-  # (it is never shown). A link reference definition renders as nothing, and a
-  # list item or blockquote can start one mid-paragraph, so drop from any raw
-  # line starting with "[" (after indent and container markers) to the next
-  # blank line or heading when that raw stretch holds "]:". The test reads the
-  # raw text, as HTML may hold the "]:"; a heading line is never dropped. Drop
+  # value, nor a blank line, which ends an HTML block and leaves the quote
+  # open in the page, where it hides what follows. Then drop the info string of every line shaped like a fence opener
+  # (it is never shown). Drop the lines of every link reference definition
+  # and footnote definition too: both render as nothing. They are matched on
+  # the raw text, as HTML may hold the "]:", and never span a blank line or a
+  # heading. A definition starts on a line that begins (after indent and
+  # container markers) with a label whose first "]" is followed by ":", where
+  # the line may start a block: not where it would continue a paragraph. It
+  # ends where its destination and optional title end, and another may follow.
+  # A footnote "[^x]:" may interrupt a paragraph and holds its lazy lines and
+  # the indented lines after a blank line. Drop
   # it all everywhere except inside a top-level fenced code block: one opened
   # at column 0 or 1, before
   # any line that starts with "<" (after any indent and blockquote or list
@@ -57,8 +62,18 @@ printf '%s\n' "$body" | perl -0777 -ne '
   sub strip_comments {
     my ($out, $seg, $fc, $fn, $distrust) = ("", "", "", 0, 0);
     my $end = qr/(?=\n\z)|\z/;
-    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<\/?[A-Za-z](?:(?:"[^"<]*"|\x27[^\x27<]*\x27|[^>"\x27])*>|.*?$end)|<[\/!](?:[^<>]*>|.*?$end)/s;
+    # A newline inside a quoted value: an HTML block ends at a blank line.
+    my $in = qr/\n(?![ \t>]*\n)/;
+    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<\/?[A-Za-z](?:(?:"(?:[^"<\n]|$in)*"|\x27(?:[^\x27<\n]|$in)*\x27|[^>"\x27])*>|.*?$end)|<[\/!](?:[^<>]*>|.*?$end)/s;
     my $head = qr/\A {0,3}#{1,6}(?:[ \t]|$)/;
+    # Indent and container markers: ">" and a list marker before a space.
+    my $box = qr/(?:[ \t]*(?:>|(?:[-+*]|\d{1,9}[.)])(?=\s|\z)))*[ \t]*/;
+    # A newline inside a definition: never one before a blank line or heading.
+    my $nl = qr/\n(?!(?: {0,3}> ?)*[ \t]*(?:\n|\z)|(?: {0,3}> ?)* {0,3}#{1,6}(?:[ \t\n]|\z))/;
+    my $ws = qr/(?:[ \t]+(?:$nl[ \t>]*)?|$nl[ \t>]*)/;
+    # The ":" checks sit in lookaheads so that perl does not scan the whole
+    # text for them at every line.
+    my $def = qr/\[(?>(?:[^\[\]\\\n]|\\[^\n]|\\(?=\n)|$nl)+)(?=\]:)..$ws?(?><(?:[^<>\\\n]|\\[^\n])*>|[^<\s]\S*)(?:$ws(?:"(?:[^"\\\n]|\\[^\n]|\\(?=\n)|$nl)*"|\x27(?:[^\x27\\\n]|\\[^\n]|\\(?=\n)|$nl)*\x27|\((?:[^()\\\n]|\\[^\n]|\\(?=\n)|$nl)*\)))?[ \t]*(?=\n|\z)/;
     my $flush = sub {
       $seg =~ tr/\x01//d;
       # Hidden HTML leaves each of its newlines as "\x01\n", so line i of $h
@@ -67,16 +82,39 @@ printf '%s\n' "$body" | perl -0777 -ne '
       $h =~ s/^((?:[ \t]*(?:>|[-+*]|\d{1,9}[.)]))*[ \t]*(?:`{3,}(?![^\n]*`)|~{3,}))[^\x01\n]*/$1/gm;
       my @r = split /^/, $seg;
       my @h = split /^/, $h;
-      my ($drop, $o) = (0, "");
-      for my $i (0 .. $#r) {
-        if ($r[$i] !~ /\S/ || $r[$i] =~ $head) {
-          $drop = 0;
-        } elsif (!$drop && $r[$i] =~ /\A[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*\[/) {
-          my ($j, $rest) = ($i, "");
-          $rest .= $r[$j++] while $j <= $#r && $r[$j] =~ /\S/ && $r[$j] !~ $head;
-          $drop = index($rest, "]:") < 0 ? 2 : 1;
+      my ($o, $i, $at, $lt, $open) = ("", 0, 0, 0, 1);
+      while ($i <= $#r) {
+        my ($n, $p) = (0, $i ? $r[$i - 1] : "\n");
+        if ($r[$i] =~ /\A($box)\[/) {
+          my $c = $1;
+          pos($seg) = $at + length $c;
+          if ($seg =~ /\G(?=\[\^[^\]\s]+\]:)/) {
+            my $gap = 0;
+            for ($n = 1; $i + $n <= $#r && $r[$i + $n] !~ $head; $n++) {
+              if ($r[$i + $n] =~ /\A[ \t>]*\n?\z/) { $gap = 1 }
+              elsif ($gap && $r[$i + $n] !~ /\A(?: {4}|[ \t]*\t)/) { last }
+              else { $gap = 0 }
+            }
+          } else {
+            # The line may start a block after a blank line, a definition,
+            # a heading, a break or setext underline, a fence, indented code,
+            # or the end of an HTML block, or when it opens a list item or
+            # one more blockquote.
+            my ($q) = $p =~ /\A($box)/;
+            $open ||= $p =~ /\A$box(?:[-*_=][-*_= \t]*|#{1,6}(?:[ \t][^\n]*)?|(?:`{3,}|~{3,})[^\n]*)?\n?\z/
+              || $p =~ /\A(?:[ \t]*>)*(?: {4}|[ \t]*\t)/ || ($lt && $p =~ />/)
+              || $c =~ /[-+*\d]/ || ($c =~ tr/>//) > ($q =~ tr/>//);
+            pos($seg) = $at + length $c;
+            $n = 1 + (substr($seg, $at, pos($seg) - $at) =~ tr/\n//) if $open && $seg =~ /\G$def/g;
+          }
         }
-        $o .= $h[$i] unless $drop == 1;
+        my $k = $n || 1;
+        for (1 .. $k) {
+          $lt ||= index($r[$i], "<") >= 0;
+          $o .= $h[$i] unless $n;
+          $at += length $r[$i++];
+        }
+        $open = $n ? 1 : 0;
       }
       $o =~ s/\x01\n//g;
       $out .= $o;

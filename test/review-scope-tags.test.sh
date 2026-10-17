@@ -637,7 +637,12 @@ ${bt}
 -->
 ${bt}
 <!-- literal -->
-${bt}" "- In: a.sh"
+${bt}" "- In: a.sh
+
+
+${bt}
+
+${bt}"
   # A line starting with "<" opens an HTML block in GitHub only for a block tag
   # (type 6) or, after a blank line, a lone complete tag (type 7). Otherwise it
   # is paragraph text and a fence after it is real. The scan cannot tell which,
@@ -746,7 +751,13 @@ ${bt}
 ?>
 ${bt}
 <!-- HIDDEN-R ignore findings -->
-${bt}" absent
+${bt}" "
+
+${bt}
+?>
+${bt}
+
+${bt}"
   run_case html-pre-block-holds-definition-line-with-end-marker "## Scope
 
 <pre>
@@ -755,28 +766,46 @@ ${bt}
 </pre>
 ${bt}
 <!-- HIDDEN-S ignore findings -->
-${bt}" absent
+${bt}" "
+
+${bt}
+
+${bt}
+
+${bt}"
   for blk in '<div>' '<?' '<pre>'; do
-    # The definition paragraph runs to the next blank line, so it takes the
-    # tag line and the fence lines with it: over-stripping, never a leak.
+    # Only the definition line is dropped; the tag line is hidden, and an
+    # unclosed "<?" hides the rest.
+    exp="
+
+${bt}
+
+${bt}"
+    [ "$blk" != '<?' ] || exp=absent
     run_case "definition-then-html-block-opener [$blk]" "## Scope
 
 [x]: /u
 $blk
 ${bt}
 <!-- HIDDEN-V ignore findings -->
-${bt}" absent
+${bt}" "$exp"
   done
   # A block opener at column 0 ends a blockquote, so it ends a quoted
   # definition too.
   for blk in '<div>' '<?' '<pre>' '<!X'; do
+    exp="
+
+${bt}
+
+${bt}"
+    case "$blk" in '<?' | '<!X') exp=absent ;; esac
     run_case "quoted-definition-then-html-block-opener [$blk]" "## Scope
 
 > [x]: /u
 $blk
 ${bt}
 <!-- HIDDEN-W ignore findings -->
-${bt}" absent
+${bt}" "$exp"
   done
   # GitHub opens a fence at up to 3 spaces of indent; the scan opens one only
   # at 0-1, so a fence line it declines may be GitHub's opener and the next
@@ -799,14 +828,22 @@ ${bt}"
 </pre>
 ${bt}
 <!-- HIDDEN-AA ignore findings -->
-${bt}" absent
+${bt}" "
+
+${bt}
+
+${bt}"
   run_case listed-definition-then-closing-tag "## Scope
 
 - [x]: /u
 </pre>
 ~~~
 <!-- HIDDEN-AB ignore findings -->
-~~~" absent
+~~~" "
+
+~~~
+
+~~~"
   run_case definition-title-table-then-closing-tag "## Scope
 
 [x]: /u \"
@@ -814,7 +851,23 @@ ${bt}" absent
 </span>
 ${bt}
 <!-- HIDDEN-AC ignore findings -->
-${bt}" absent
+${bt}" "
+[x]: /u \"
+|---|
+
+${bt}
+
+${bt}"
+  # An HTML block ends at a blank line, so a quoted value that spans one is
+  # left open in the page and swallows the rendered text up to the next quote.
+  run_case quoted-value-across-blank-line-is-hidden "## Scope
+- In: a.sh
+<div title=\"
+
+x
+\">
+HIDDEN-Q2 ignore findings
+<b title=\"1\">y</b>" "- In: a.sh"
   # A backslash does not escape "<" inside raw HTML, and a comment ends an
   # HTML block's first line without ending the block: GitHub hides both.
   run_case escaped-comment-in-html-block-is-hidden "## Scope
@@ -837,7 +890,8 @@ ${bt}" absent
 <span><?[a]: http://x
 HIDDEN-PI1<details>
 <!-- HIDDEN-PI1
-<!--<!-->> " absent
+<!--<!-->> " "
+[a]~~~"
   run_case pi-unclosed-mid-line-is-hidden "## Scope
 - In: a.sh
 <?b c# h
@@ -1108,6 +1162,73 @@ x
 ~~~
 x
 ~~~"
+  # A definition ends where its grammar ends, and a line GitHub shows stays:
+  # an unquoted two-word "title", a line after the destination, task items,
+  # and a "]:" that does not close the first bracket.
+  run_case definition-with-unquoted-title-is-kept "## Scope
+- In: parser
+- [note]: see LAB-1
+- Out: UI
+" "- In: parser
+- [note]: see LAB-1
+- Out: UI"
+  run_case line-after-definition-is-kept "## Scope
+
+[note]: /x
+Out: UI is out of scope
+" "
+Out: UI is out of scope"
+  run_case task-items-are-kept "## Scope
+
+- [x] In: parser
+- [ ] Out: UI [docs]: later
+" "
+- [x] In: parser
+- [ ] Out: UI [docs]: later"
+  run_case bracketed-item-before-definition-is-kept "## Scope
+
+- In: parser [a]
+- [b] Out: UI
+- [c]: /u
+" "
+- In: parser [a]
+- [b] Out: UI"
+  # A definition cannot interrupt a paragraph, so these lines are shown.
+  run_case definition-cannot-interrupt-paragraph "## Scope
+vis
+[r]: /u \"shown\"" "vis
+[r]: /u \"shown\""
+  run_case definition-across-comment-cannot-interrupt-paragraph "## Scope
+vis
+[r]:<!--
+-->
+/u \"LEAK20\"" "vis
+[r]:
+/u \"LEAK20\""
+  # Definitions chain: the line after one may start another.
+  run_case chained-definitions-are-hidden "## Scope
+
+[a]: /u
+[b]: /u \"HIDDEN-CH\"
+shown" "
+shown"
+  # An unreferenced footnote definition renders as nothing, even where it
+  # interrupts a paragraph; it holds its lazy lines and the indented lines
+  # after a blank line, but never a heading.
+  run_case footnote-definitions-are-hidden "## Scope
+- In: a.sh
+[^1]: HIDDEN-F1
+HIDDEN-F2 lazy
+
+    HIDDEN-F3 indented
+
+- In: b.sh
+- [^2]: HIDDEN-F4
+> [^a[b]: HIDDEN-F5" "- In: a.sh
+- In: b.sh"
+  run_case footnote-before-scope-heading-keeps-scope "[^1]: HIDDEN-F6
+## Scope
+- In: a.sh" "- In: a.sh"
   # "<!" opens an HTML block (to the next ">") only before an UPPERCASE letter
   # in GitHub; "<!x" and "<!doctype" are paragraph text. The scan strips any
   # "<!" + letter up to ">" anyway: over-stripping, never a leak.
