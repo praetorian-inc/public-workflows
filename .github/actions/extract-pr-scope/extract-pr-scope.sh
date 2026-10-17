@@ -42,10 +42,13 @@ printf '%s\n' "$body" | perl -0777 -ne '
   # autolink inside an HTML block is hidden. A quoted value never spans a "<",
   # so a stray quote cannot pair with the quote of a later tag and expose its
   # value. Then drop the info string of every line shaped like a fence opener
-  # (it is never shown), and every paragraph (run of non-blank lines) holding
-  # "]:", as a link reference definition renders as nothing. Drop it all
-  # everywhere except
-  # inside a top-level fenced code block: one opened at column 0 or 1, before
+  # (it is never shown). A link reference definition renders as nothing, and a
+  # list item or blockquote can start one mid-paragraph, so drop from any raw
+  # line starting with "[" (after indent and container markers) to the next
+  # blank line or heading when that raw stretch holds "]:". The test reads the
+  # raw text, as HTML may hold the "]:"; a heading line is never dropped. Drop
+  # it all everywhere except inside a top-level fenced code block: one opened
+  # at column 0 or 1, before
   # any line that starts with "<" (after any indent and blockquote or list
   # markers) or with a fence indented 2 or 3 spaces. Such a line may open an
   # HTML block or a fence this scan does not track, so after one no fence is
@@ -55,11 +58,28 @@ printf '%s\n' "$body" | perl -0777 -ne '
     my ($out, $seg, $fc, $fn, $distrust) = ("", "", "", 0, 0);
     my $end = qr/(?=\n\z)|\z/;
     my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<\/?[A-Za-z](?:(?:"[^"<]*"|\x27[^\x27<]*\x27|[^>"\x27])*>|.*?$end)|<[\/!](?:[^<>]*>|.*?$end)/s;
+    my $head = qr/\A {0,3}#{1,6}(?:[ \t]|$)/;
     my $flush = sub {
-      $seg =~ s/$hide//g;
-      $seg =~ s/^((?:[ \t]*(?:>|[-+*]|\d{1,9}[.)]))*[ \t]*(?:`{3,}(?![^\n]*`)|~{3,})).*/$1/gm;
-      $seg =~ s/(?:^[ \t]*\S.*\n?)+/index($&, "]:") < 0 ? $& : ""/gme;
-      $out .= $seg;
+      $seg =~ tr/\x01//d;
+      # Hidden HTML leaves each of its newlines as "\x01\n", so line i of $h
+      # is what remains of raw line i; the markers are removed at the end.
+      (my $h = $seg) =~ s/$hide/"\x01\n" x (() = $& =~ m{\n}g)/ge;
+      $h =~ s/^((?:[ \t]*(?:>|[-+*]|\d{1,9}[.)]))*[ \t]*(?:`{3,}(?![^\n]*`)|~{3,}))[^\x01\n]*/$1/gm;
+      my @r = split /^/, $seg;
+      my @h = split /^/, $h;
+      my ($drop, $o) = (0, "");
+      for my $i (0 .. $#r) {
+        if ($r[$i] !~ /\S/ || $r[$i] =~ $head) {
+          $drop = 0;
+        } elsif (!$drop && $r[$i] =~ /\A[ \t]*(?:(?:>|[-+*]|\d{1,9}[.)])[ \t]*)*\[/) {
+          my ($j, $rest) = ($i, "");
+          $rest .= $r[$j++] while $j <= $#r && $r[$j] =~ /\S/ && $r[$j] !~ $head;
+          $drop = index($rest, "]:") < 0 ? 2 : 1;
+        }
+        $o .= $h[$i] unless $drop == 1;
+      }
+      $o =~ s/\x01\n//g;
+      $out .= $o;
       $seg = "";
     };
     for my $line (split /^/, $_[0]) {

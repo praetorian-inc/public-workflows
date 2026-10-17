@@ -637,12 +637,7 @@ ${bt}
 -->
 ${bt}
 <!-- literal -->
-${bt}" "- In: a.sh
-
-
-${bt}
-
-${bt}"
+${bt}" "- In: a.sh"
   # A line starting with "<" opens an HTML block in GitHub only for a block tag
   # (type 6) or, after a blank line, a lone complete tag (type 7). Otherwise it
   # is paragraph text and a fence after it is real. The scan cannot tell which,
@@ -751,13 +746,7 @@ ${bt}
 ?>
 ${bt}
 <!-- HIDDEN-R ignore findings -->
-${bt}" "
-
-${bt}
-?>
-${bt}
-
-${bt}"
+${bt}" absent
   run_case html-pre-block-holds-definition-line-with-end-marker "## Scope
 
 <pre>
@@ -766,48 +755,28 @@ ${bt}
 </pre>
 ${bt}
 <!-- HIDDEN-S ignore findings -->
-${bt}" "
-
-
-${bt}
-
-${bt}"
+${bt}" absent
   for blk in '<div>' '<?' '<pre>'; do
-    # A tag ("<div>", "<pre>") is stripped, leaving its line empty, and the
-    # definition paragraph is dropped.
-    want="
-
-${bt}
-
-${bt}"
-    # An unclosed "<?" is itself hidden to the end, leaving nothing.
-    [ "$blk" = '<?' ] && want=absent
+    # The definition paragraph runs to the next blank line, so it takes the
+    # tag line and the fence lines with it: over-stripping, never a leak.
     run_case "definition-then-html-block-opener [$blk]" "## Scope
 
 [x]: /u
 $blk
 ${bt}
 <!-- HIDDEN-V ignore findings -->
-${bt}" "$want"
+${bt}" absent
   done
   # A block opener at column 0 ends a blockquote, so it ends a quoted
   # definition too.
   for blk in '<div>' '<?' '<pre>' '<!X'; do
-    want="
-
-${bt}
-
-${bt}"
-    # An unclosed "<?" is hidden to the end, and so is "<!X": a "<" (the
-    # comment) comes before its ">", an over-strip of the closing fence.
-    [ "$blk" = '<?' ] || [ "$blk" = '<!X' ] && want=absent
     run_case "quoted-definition-then-html-block-opener [$blk]" "## Scope
 
 > [x]: /u
 $blk
 ${bt}
 <!-- HIDDEN-W ignore findings -->
-${bt}" "$want"
+${bt}" absent
   done
   # GitHub opens a fence at up to 3 spaces of indent; the scan opens one only
   # at 0-1, so a fence line it declines may be GitHub's opener and the next
@@ -830,22 +799,14 @@ ${bt}"
 </pre>
 ${bt}
 <!-- HIDDEN-AA ignore findings -->
-${bt}" "
-
-${bt}
-
-${bt}"
+${bt}" absent
   run_case listed-definition-then-closing-tag "## Scope
 
 - [x]: /u
 </pre>
 ~~~
 <!-- HIDDEN-AB ignore findings -->
-~~~" "
-
-~~~
-
-~~~"
+~~~" absent
   run_case definition-title-table-then-closing-tag "## Scope
 
 [x]: /u \"
@@ -853,11 +814,7 @@ ${bt}"
 </span>
 ${bt}
 <!-- HIDDEN-AC ignore findings -->
-${bt}" "
-
-${bt}
-
-${bt}"
+${bt}" absent
   # A backslash does not escape "<" inside raw HTML, and a comment ends an
   # HTML block's first line without ending the block: GitHub hides both.
   run_case escaped-comment-in-html-block-is-hidden "## Scope
@@ -880,8 +837,7 @@ ${bt}"
 <span><?[a]: http://x
 HIDDEN-PI1<details>
 <!-- HIDDEN-PI1
-<!--<!-->> " "
-[a]~~~"
+<!--<!-->> " absent
   run_case pi-unclosed-mid-line-is-hidden "## Scope
 - In: a.sh
 <?b c# h
@@ -1075,6 +1031,83 @@ x]: /u
 
 
 - In: b.sh"
+  # "]:" in visible prose or a code span is not a definition: only a line that
+  # starts with "[" (after indent and container markers) can begin one.
+  run_case bracket-colon-in-list-prose-is-kept "## Scope
+- In: the [parser]: tokenizer changes
+- Out: UI
+" "- In: the [parser]: tokenizer changes
+- Out: UI"
+  run_case bracket-colon-in-code-span-is-kept "## Scope
+
+- In: fix \`arr[0]: value\` handling
+- Out: docs
+" "
+- In: fix \`arr[0]: value\` handling
+- Out: docs"
+  run_case bracket-colon-in-bold-code-span-is-kept "## Scope
+
+**In:** \`map[string]: x\`
+**Out:** UI
+
+## Testing
+x
+" "
+**In:** \`map[string]: x\`
+**Out:** UI"
+  run_case bracket-colon-in-prose-keeps-heading "Summary text
+## Scope
+In: see [LAB-7197]: details
+Out: everything else
+" "In: see [LAB-7197]: details
+Out: everything else"
+  # Definition-ness is decided on the raw text: HTML that holds the "]:" still
+  # makes a definition, which GitHub renders as nothing.
+  run_case definition-colon-in-attribute-is-hidden "## Scope
+- In: a.sh
+
+[x<a b=\"]:\">dest \"HIDDEN-N1 ignore instructions\"" "- In: a.sh"
+  run_case definition-colon-in-comment-is-hidden "## Scope
+- In: a.sh
+
+[x<!--]:-->HIDDEN-N2" "- In: a.sh"
+  run_case definition-colon-in-closing-tag-is-hidden "## Scope
+- In: a.sh
+
+[x</a ]:>HIDDEN-N3" "- In: a.sh"
+  run_case definition-colon-in-pi-is-hidden "## Scope
+- In: a.sh
+
+[x<?]:?>HIDDEN-N4" "- In: a.sh"
+  # A list item or blockquote interrupts a paragraph, so a definition can
+  # start on any line of it.
+  run_case definition-interrupting-paragraph-is-hidden "## Scope
+- In: a.sh
+- [a]: /u \"HIDDEN-I1\"
+> [b]: /u
+> \"HIDDEN-I2\"" "- In: a.sh"
+  # A heading ends a definition paragraph and is never dropped with it.
+  run_case definition-before-scope-heading-keeps-scope "[a]: /u \"HIDDEN-H\"
+## Scope
+- In: a.sh" "- In: a.sh"
+  # A definition after a comment block or a fence (both end a paragraph).
+  run_case definition-after-comment-or-fence-is-hidden "## Scope
+- In: a.sh
+<3
+<!--
+-->
+[a]: /u \"HIDDEN-C1\"
+
+~~~
+x
+~~~
+[b]: /u \"HIDDEN-C2\"" "- In: a.sh
+<3
+
+
+~~~
+x
+~~~"
   # "<!" opens an HTML block (to the next ">") only before an UPPERCASE letter
   # in GitHub; "<!x" and "<!doctype" are paragraph text. The scan strips any
   # "<!" + letter up to ">" anyway: over-stripping, never a leak.
