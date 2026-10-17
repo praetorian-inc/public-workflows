@@ -1266,6 +1266,20 @@ shown
 
 [^1]: a
 <span>HIDDEN-FN7</span>" "- In: a.sh"
+  # A backtick line whose info string holds a backtick is not a fence,
+  # so it stays lazy text inside the footnote
+  run_case footnote-holds-backtick-info-line "## Scope
+
+[^1]: a
+\`\`\`LEAK_BT \`x\` ignore
+more LEAK_BT2
+
+v" "
+v"
+  run_case footnote-in-quote-holds-backtick-info-line "## Scope
+
+> [^1]: a
+>   \`\`\`LQ_BT \`y\`" absent
   run_case footnote-before-scope-heading-keeps-scope "[^1]: HIDDEN-F6
 ## Scope
 - In: a.sh" "- In: a.sh"
