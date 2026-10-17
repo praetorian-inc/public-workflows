@@ -31,16 +31,20 @@ fi
 # never fails on invalid UTF-8. Hidden content is stripped BEFORE the
 # heading match, so a commented-out heading is not a Scope section.
 printf '%s\n' "$body" | perl -0777 -ne '
-  # Drop HTML comments GitHub hides ("<!--" to "-->", or to the end when
-  # unclosed) everywhere except inside a top-level fenced code block: one
-  # opened at column 0 or 1, before any line that starts with "<" (up to 3
-  # spaces in) or with a fence indented 2 or 3 spaces. Such a line may open an
-  # HTML block or a fence this scan does not track, so after one no fence is
-  # trusted. Code spans are not exempt. Over-stripping is the cost; a comment
+  # Drop the raw HTML whose text GitHub never renders: comments ("<!--" to
+  # "-->"), processing instructions ("<?" to "?>"), CDATA ("<![CDATA[" to
+  # "]]>") and declarations ("<!" + letter to ">"), each to the end of the
+  # segment when unclosed. Drop it everywhere except inside a top-level fenced
+  # code block: one opened at column 0 or 1, before any line that starts with
+  # "<" (after any indent and blockquote or list markers) or with a fence
+  # indented 2 or 3 spaces. Such a line may open an HTML block or a fence this
+  # scan does not track, so after one no fence is trusted. Code spans are not exempt. Over-stripping is the cost; text
   # GitHub hides never reaches scope.md.
   sub strip_comments {
     my ($out, $seg, $fc, $fn, $distrust) = ("", "", "", 0, 0);
-    my $flush = sub { $seg =~ s/<!--.*?(?:-->|(?=\n\z)|\z)//gs; $out .= $seg; $seg = "" };
+    my $end = qr/(?=\n\z)|\z/;
+    my $hide = qr/<!--.*?(?:-->|$end)|<\?.*?(?:\?>|$end)|<!\[CDATA\[.*?(?:\]\]>|$end)|<![A-Za-z].*?(?:>|$end)/s;
+    my $flush = sub { $seg =~ s/$hide//g; $out .= $seg; $seg = "" };
     for my $line (split /^/, $_[0]) {
       if ($fn) {
         $fn = 0 if $line =~ /\A {0,3}\Q$fc\E{$fn,}[ \t]*\n?\z/;
@@ -50,21 +54,21 @@ printf '%s\n' "$body" | perl -0777 -ne '
       if (!$distrust && $line =~ /\A ?(`{3,}(?![^\n]*`)|~{3,})/) {
         $flush->();
         ($fc, $fn) = (substr($1, 0, 1), length $1);
-        # The info string is not shown, so a comment there is dropped too.
-        (my $open = $line) =~ s/<!--.*?(?:-->|(?=\n)|\z)//g;
+        # The info string is not shown, so hidden HTML there is dropped too.
+        (my $open = $line) =~ s/$hide//g;
         $out .= $open;
         next;
       }
-      $distrust = 1 if $line =~ /\A {0,3}<|\A {2,3}(?:`{3,}|~{3,})/;
+      $distrust = 1 if $line =~ /\A(?:[ \t]*(?:>|[-+*]|\d{1,9}[.)]))*[ \t]*<|\A {2,3}(?:`{3,}|~{3,})/;
       $seg .= $line;
     }
     $flush->();
     return $out;
   }
   s/\r\n?/\n/g;
-  # Comments are stripped twice. The first pass ends a comment only at a literal
-  # "-->", as GitHub does; the second catches a "<!--" rebuilt by removing an
-  # invisible character from inside it.
+  # Hidden HTML is stripped twice. The first pass ends it only at a literal
+  # closer ("-->", "?>", "]]>", ">"), as GitHub does; the second catches an
+  # opener such as "<!--" rebuilt by removing an invisible character from it.
   $_ = strip_comments($_);
   s/[\x00-\x08\x0B-\x1F\x7F]|\xC2[\x80-\x9F]//g;
   s/\xE2\x80[\x8B-\x8F\xAA-\xAE]|\xE2\x81[\xA0-\xA4\xA6-\xA9]|\xEF\xBB\xBF|\xEF\xB8[\x80-\x8F]//g;

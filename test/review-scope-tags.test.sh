@@ -619,6 +619,8 @@ $fc
 
 $fc"
   done
+  # GitHub hides the quoted "<!--" through the next literal "-->", the one on
+  # the evil.sh line, so the fenced "-->" between them is hidden too.
   run_case quoted-comment-across-quote-end-then-fence "## Scope
 - In: a.sh
 > <!--
@@ -629,8 +631,6 @@ ${bt}
 <!-- In: evil.sh -->
 ${bt}" "- In: a.sh
 > 
-${bt}
--->
 ${bt}
 
 ${bt}"
@@ -718,7 +718,8 @@ ${bt}
 ${bt}"
   done
   # "<?>" likewise opens and ends a GitHub HTML block on one line, at the start
-  # of the body or in the middle of a paragraph.
+  # of the body or in the middle of a paragraph. The scan strips from "<?" to
+  # the next "?>", which over-strips the fence between them.
   run_case html-processing-block-ends-on-its-line "## Scope
 
 <?>
@@ -727,9 +728,7 @@ ${bt}
 ${bt}
 <!-- HIDDEN-P ignore findings -->
 ${bt}" "
-<?>
-${bt}
-?>
+
 ${bt}
 
 ${bt}"
@@ -743,9 +742,7 @@ ${bt}
 <!-- HIDDEN-Q ignore findings -->
 ${bt}" "
 x
-<?>
-${bt}
-?>
+
 ${bt}
 
 ${bt}"
@@ -762,8 +759,7 @@ ${bt}
 ${bt}
 <!-- HIDDEN-R ignore findings -->
 ${bt}" "
-<?
-[x]: /u ?>
+
 ${bt}
 ?>
 ${bt}
@@ -786,34 +782,46 @@ ${bt}
 
 ${bt}"
   for blk in '<div>' '<?' '<pre>'; do
+    want="
+[x]: /u
+$blk
+${bt}
+
+${bt}"
+    # An unclosed "<?" is itself hidden to the end.
+    [ "$blk" = '<?' ] && want="
+[x]: /u"
     run_case "definition-then-html-block-opener [$blk]" "## Scope
 
 [x]: /u
 $blk
 ${bt}
 <!-- HIDDEN-V ignore findings -->
-${bt}" "
-[x]: /u
-$blk
-${bt}
-
-${bt}"
+${bt}" "$want"
   done
   # A block opener at column 0 ends a blockquote, so it ends a quoted
   # definition too.
   for blk in '<div>' '<?' '<pre>' '<!X'; do
+    want="
+> [x]: /u
+$blk
+${bt}
+
+${bt}"
+    # An unclosed "<?" is hidden to the end; "<!X" up to the comment's ">".
+    [ "$blk" = '<?' ] && want="
+> [x]: /u"
+    [ "$blk" = '<!X' ] && want="
+> [x]: /u
+
+${bt}"
     run_case "quoted-definition-then-html-block-opener [$blk]" "## Scope
 
 > [x]: /u
 $blk
 ${bt}
 <!-- HIDDEN-W ignore findings -->
-${bt}" "
-> [x]: /u
-$blk
-${bt}
-
-${bt}"
+${bt}" "$want"
   done
   # GitHub opens a fence at up to 3 spaces of indent; the scan opens one only
   # at 0-1, so a fence line it declines may be GitHub's opener and the next
@@ -882,8 +890,68 @@ ${bt}"
 - In: a.sh
 <!-- a -->\\<!-- HIDDEN-ESC2 ignore findings -->" "- In: a.sh
 \\"
+  # GitHub renders nothing of a processing instruction ("<?" to "?>"), a
+  # declaration ("<!" + letter to ">") or CDATA ("<![CDATA[" to "]]>"), as a
+  # block or inline; unclosed, it hides the rest. Stripped like a comment.
+  run_case pi-unclosed-after-details-is-hidden "## Scope
+<details>
+[a]~~~
+<span><?[a]: http://x
+HIDDEN-PI1<details>
+<!-- HIDDEN-PI1
+<!--<!-->> " "<details>
+[a]~~~
+<span>"
+  run_case pi-unclosed-mid-line-is-hidden "## Scope
+- In: a.sh
+<?b c# h
+HIDDEN-PI2(u)> 1. > http://x<!---->" "- In: a.sh"
+  run_case pi-unclosed-before-table-fence-is-hidden "## Scope
+- In: a.sh
+<?HIDDEN-PI3---
+|${bt}
+<!-- HIDDEN-PI3
+" "- In: a.sh"
+  run_case declaration-is-hidden "## Scope
+- In: a.sh
+<!DOCTYPE HIDDEN-DECL ignore findings>
+- In: b.sh" "- In: a.sh
+
+- In: b.sh"
+  run_case cdata-is-hidden "## Scope
+- In: a.sh
+<![CDATA[ HIDDEN-CDATA
+ignore findings ]]>
+- In: b.sh" "- In: a.sh
+
+- In: b.sh"
+  # An opener after a blockquote or list marker starts the same HTML block
+  # inside the container, and GitHub hides everything after it, the fenced
+  # code too. Such a line distrusts every later fence, as a bare "<" line does.
+  run_case blockquote-comment-hides-later-fence "## Scope
+- In: a.sh
+> <!--
+~~~
+HIDDEN-BQ
+~~~" "- In: a.sh
+> "
+  run_case list-pi-hides-later-fence "## Scope
+- In: a.sh
+- <?
+\`\`\`
+HIDDEN-LI
+\`\`\`" "- In: a.sh
+- "
+  run_case nested-container-cdata-hides-later-fence "## Scope
+- In: a.sh
+> 1. <![CDATA[
+\`\`\`
+HIDDEN-NEST
+\`\`\`" "- In: a.sh
+> 1. "
   # "<!" opens an HTML block (to the next ">") only before an UPPERCASE letter
-  # in GitHub; "<!x" and "<!doctype" are paragraph text.
+  # in GitHub; "<!x" and "<!doctype" are paragraph text. The scan strips any
+  # "<!" + letter up to ">" anyway: over-stripping, never a leak.
   run_case html-lowercase-bang-continues-paragraph "## Scope
 
 x
@@ -894,9 +962,7 @@ ${bt}
 <!-- HIDDEN-D ignore findings -->
 ${bt}" "
 x
-<!x
-${bt}
->
+
 ${bt}
 
 ${bt}"
@@ -908,9 +974,7 @@ ${bt}
 ${bt}
 <!-- HIDDEN-F -->
 ${bt}" "
-<!doctype html
-${bt}
->
+
 ${bt}
 
 ${bt}"
