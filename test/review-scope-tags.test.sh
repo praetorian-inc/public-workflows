@@ -372,6 +372,63 @@ ${tab}<!-- code sample
 ${tab}<!-- code sample
 
 - Out: b"
+  # A fence inside an open line-start comment is part of the comment: it does
+  # not split it, so guidance after the fence stays hidden. A "<!--" inside a
+  # fence is code and opens no comment. The leading blank line is what is left
+  # of the comment's line, as f0b8fe3 also gives.
+  fb='```'
+  run_case fence-inside-comment-is-hidden "## Scope
+<!--
+Example:
+${fb}
+In: foo.go
+${fb}
+Replace this before merging
+-->
+**In:** real.sh
+
+## Next" "
+**In:** real.sh"
+  run_case fence-inside-comment-before-scope-keeps-heading "<!--
+Paste output like:
+${fb}
+-->
+## Scope
+**In:** real.sh" "**In:** real.sh"
+  # The tag in the later fence is kept only if the "<!--" in the first fence
+  # opened no comment: a comment would swallow that fence and strip the tag.
+  run_case unclosed-comment-opener-in-fence-is-code "## Scope
+${fb}
+<!-- sample
+${fb}
+${fb}
+<b>y</b>
+${fb}
+**In:** real.sh" "${fb}
+<!-- sample
+${fb}
+${fb}
+<b>y</b>
+${fb}
+**In:** real.sh"
+  # "<!-->" and "<!--->" are empty comments that close at once and hide
+  # nothing after them; each leaves a blank line. Their "-->" overlaps the
+  # opener, so a "no --> after <!--" check alone would open a comment: the
+  # tag in the fence is kept only if none opened.
+  run_case empty-comment-before-fence-hides-nothing "## Scope
+<!-->
+- In: a
+${fb}
+<b>x</b>
+${fb}
+<!--->
+- In: b" "
+- In: a
+${fb}
+<b>x</b>
+${fb}
+
+- In: b"
   run_case commented-out-heading-is-not-scope "<!-- ## Scope -->
 - In: a.sh" absent
   cr="$(printf '\r')"

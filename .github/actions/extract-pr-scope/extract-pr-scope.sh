@@ -39,8 +39,10 @@ fi
 # so a commented-out heading is not a Scope section.
 printf '%s\n' "$body" | perl -0777 -ne '
   # Outside fenced code blocks, drop HTML comments and tags. A "<!--" that
-  # starts a line (0-3 spaces in) runs to "-->", or to the next fence or the
-  # end when unclosed. A "<!--" later in a line must close on that line, else
+  # starts a line (0-3 spaces in) runs to the first "-->", or to the end when
+  # unclosed; a fence line inside it is comment text and opens or closes no
+  # fence. "<!-->" and "<!--->" are empty comments that close at once. A
+  # "<!--" later in a line must close on that line, else
   # it is kept as text, as GitHub shows it (a code span often holds one). Each
   # chunk between fences starts at a line start, so "^" holds there too. A tag
   # is "<" or "</" and a letter, to the next ">" on the same line with no "<"
@@ -49,19 +51,22 @@ printf '%s\n' "$body" | perl -0777 -ne '
   # only boundary that keeps it from running across list items, quotes, breaks
   # and headings to a later ">". Hiding a tag that spans lines is a non-goal
   # under the contract above. Inside a fence they are code and are kept.
-  my ($txt, $seg, $fc, $fn) = ("", "", "", 0);
+  my ($txt, $seg, $fc, $fn, $cm) = ("", "", "", 0, 0);
   my $strip = sub {
-    $seg =~ s/(?:(?m:^) {0,3}<!--.*?(?:-->|(?=\n\z)|\z)|<!--[^\n]*?-->)|<\/?[A-Za-z][^<>\n]*>//gs;
+    $seg =~ s/(?:(?m:^) {0,3}<!--(?:-?>|.*?(?:-->|(?=\n\z)|\z))|<!--[^\n]*?-->)|<\/?[A-Za-z][^<>\n]*>//gs;
     ($txt, $seg) = ($txt . $seg, "");
   };
   s/\r\n?/\n/g;
   # A fence is ``` or ~~~ (3+); a backtick opener whose info string has a
   # backtick is plain text, not a fence. A fence closes on 3+ of the same char
-  # ($fc) at least as long as the opener ($fn).
+  # ($fc) at least as long as the opener ($fn). $cm is set while a line-start
+  # "<!--" with no "-->" after it is open; it closes on the first "-->". Inside
+  # a fence a "<!--" is code and opens no comment.
   for (split /^/) {
     if ($fn) { $fn = 0 if /\A {0,3}\Q$fc\E{$fn,}[ \t]*\n?\z/ }
+    elsif ($cm) { $cm = 0 if /-->/; $seg .= $_; next }
     elsif (/\A {0,3}(`{3,}(?!.*`)|~{3,})/) { $strip->(); ($fc, $fn) = (substr($1, 0, 1), length $1) }
-    else { $seg .= $_; next }
+    else { $cm = 1 if /\A {0,3}<!--(?!-?>)(?!.*-->)/; $seg .= $_; next }
     $txt .= $_;
   }
   $strip->();
