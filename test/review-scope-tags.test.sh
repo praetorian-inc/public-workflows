@@ -289,15 +289,25 @@ Just a body.
 - not scope" "- In: a.sh"
   # Heading forms (guard#9214 uses "## Scope (from the ticket)").
   for h in '## Scope' '## scope' '## Scope:' '## Scope (from the ticket)' \
-           '## Scope (from the ticket):' '   ## Scope' '## SCOPE  '; do
+           '## Scope (from the ticket):' '   ## Scope' '## SCOPE  ' \
+           '## Scope ##' '## Scope ###  ' '## Scope (optional) ##' \
+           '## Scope: #'; do
     run_case "heading-match [$h]" "Intro
 $h
 - In: a.sh
 ## Next
 - no" "- In: a.sh"
   done
+  # An ATX closing sequence ("#"s after a space or tab) is not heading text,
+  # on the Scope heading or on the heading that ends it.
+  run_case closed-heading-ends-scope "## Scope ##
+- In: a.sh
+## Next ##
+- no" "- In: a.sh"
+  # "Scope#" has no space before the "#", so GitHub's heading text is
+  # "Scope#"; "## x" after the "#"s makes them heading text too.
   for h in '## Scope and limitations' '## Scoped notes' '### Scope' \
-           '    ## Scope' '##Scope' '# Scope'; do
+           '    ## Scope' '##Scope' '# Scope' '## Scope#' '## Scope ## x'; do
     run_case "heading-reject [$h]" "Intro
 $h
 - In: a.sh" absent
@@ -483,8 +493,8 @@ c \`\` d"
 \`b" "- In: \`a.sh
 >quoted 
 \`b"
-  # Where GitHub's pairing is uncertain the comment is stripped, so text
-  # GitHub hides never reaches scope.md. Each body below hides the comment on
+  # Where GitHub's pairing is uncertain the comment is stripped, a best-effort
+  # cleanup (scope.md is only a tag hint). Each body below hides the comment on
   # GitHub (commonmark 0.31 reference).
   run_case inline-tag-line-does-not-end-paragraph "## Scope
 In: \`a

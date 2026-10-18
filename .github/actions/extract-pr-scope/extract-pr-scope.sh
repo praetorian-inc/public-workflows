@@ -16,6 +16,14 @@
 #   DEST        output file (e.g. .claude-review/scope.md). Removed first;
 #               written only when the Scope section has non-blank content.
 #
+# Contract: scope.md is a hint for the reviewer's tags, not a security
+# boundary. Stripping HTML comments, tags and other markup is a best-effort
+# cleanup so PR-template guidance and markup do not read as Scope; it does not
+# promise to match exactly what GitHub's renderer hides. That is safe because
+# the bot prompt tags any problem the PR's diff introduced [IN-SCOPE] whatever
+# Scope says (the SCOPE TAGS rule in claude-code.yml), and the human
+# adjudicator re-classifies every finding.
+#
 # Shared by claude-code.yml, codex-code.yml, gemini-code.yml and grok-code.yml,
 # which run it from the _pw checkout of this reusable's own SHA.
 # test/review-scope-tags.test.sh exercises this file directly.
@@ -28,10 +36,11 @@ if ! body="$(jq -r '.pull_request.body // ""' "$event" 2>/dev/null)"; then
 fi
 # perl on raw bytes (perl-base is Essential on ubuntu-24.04): mawk
 # cannot match the zero-width/bidi code points, and byte matching
-# never fails on invalid UTF-8. Hidden content is stripped BEFORE the
-# heading match, so a commented-out heading is not a Scope section.
+# never fails on invalid UTF-8. Markup is stripped BEFORE the heading
+# match, so a commented-out heading is not a Scope section.
 printf '%s\n' "$body" | perl -0777 -ne '
-  # Drop the raw HTML whose text GitHub never renders: comments ("<!--" to
+  # Best-effort cleanup, not an exact model of the GitHub renderer (see the
+  # contract above). Drop the raw HTML GitHub does not render: comments ("<!--" to
   # "-->"), processing instructions ("<?" to "?>"), CDATA ("<![CDATA[" to
   # "]]>"), and any other "<!" or "</" (a declaration, closing tag or bogus
   # comment) to the next ">", each to the end of the segment when unclosed or
@@ -57,8 +66,8 @@ printf '%s\n' "$body" | perl -0777 -ne '
   # any line that starts with "<" (after any indent and blockquote or list
   # markers) or with a fence indented 2 or 3 spaces. Such a line may open an
   # HTML block or a fence this scan does not track, so after one no fence is
-  # trusted. Code spans are not exempt. Over-stripping is the cost; text GitHub
-  # hides never reaches scope.md.
+  # trusted. Code spans are not exempt. Where the pairing is uncertain this
+  # leans toward stripping; it may still keep or drop text GitHub would not.
   sub strip_comments {
     my ($out, $seg, $fc, $fn, $distrust) = ("", "", "", 0, 0);
     my $end = qr/(?=\n\z)|\z/;
@@ -161,7 +170,8 @@ printf '%s\n' "$body" | perl -0777 -ne '
     if ($fn) { $fn = 0 if /^ {0,3}\Q$fc\E{$fn,}[ \t]*\z/ }
     elsif (/^ {0,3}(`{3,}(?!.*`)|~{3,})/) { ($fc, $fn) = (substr($1, 0, 1), length $1) }
     elsif ($grab) { last if /^ {0,3}#{1,2}(?:[ \t]|\z)/ }
-    elsif (/^ {0,3}##[ \t]+scope[ \t]*(?:\([^)]*\))?[ \t]*:?[ \t]*\z/i) { $grab = 1; next }
+    # An ATX closing sequence ("#"s after a space or tab) is not heading text.
+    elsif (/^ {0,3}##[ \t]+scope[ \t]*(?:\([^)]*\))?[ \t]*:?(?:[ \t]+#+)?[ \t]*\z/i) { $grab = 1; next }
     push @out, $_ if $grab;
   }
   print join("\n", @out), "\n" if grep { /\S/ } @out;
