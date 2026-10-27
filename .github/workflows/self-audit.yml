@@ -22,6 +22,7 @@ on:
       - 'test/no-pr-graph-overlay.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
       - 'test/check-graphify-use.test.sh'
+      - 'test/agents-md-drift-comment.test.sh'
   push:
     branches: [main]
     paths:
@@ -39,6 +40,7 @@ on:
       - 'test/no-pr-graph-overlay.test.sh'
       - 'test/check-grok-skill-trace.test.sh'
       - 'test/check-graphify-use.test.sh'
+      - 'test/agents-md-drift-comment.test.sh'
 
 permissions:
   contents: read
@@ -99,6 +101,20 @@ jobs:
 
       - name: Graphify use gate
         run: bash test/check-graphify-use.test.sh
+
+      # The drift-comment test extracts the real workflow step with python3 + PyYAML.
+      # Same pinned setup as test-agents-md-audit.yml: system python on ubuntu-24.04
+      # is externally managed (PEP 668), so a bare `pip install` there would fail.
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install "PyYAML==6.0.2"
+
+      - name: Unit-test instruction-file drift comment path (ENG-5663)
+        run: bash test/agents-md-drift-comment.test.sh
 
       - name: Install zizmor
         env:
