@@ -75,6 +75,19 @@ test("tsx N6: a 120-line component that loses its JSX fails", () => {
   assert.match(r.out, /`C` is now 120 lines; the limit is 50/);
 });
 
+for (const lang of ["ts", "py"]) {
+  test(`${lang} N10: bare-CR line endings neither hide a function's growth nor a file's length`, () => {
+    const cr = (t) => t.replaceAll("\n", "\r");
+    const p = `src/a.${EXT[lang]}`;
+    const grown = check(repo(lang, { [p]: cr(source(lang, fn(lang, "F", 40))) }, { [p]: cr(source(lang, fn(lang, "F", 60))) }));
+    assert.equal(grown.code, 1, grown.out);
+    assert.match(grown.out, /`F` grew to 60 lines; the limit is 50/);
+    const big = check(repo(lang, {}, { [p]: cr(file(lang, 301)) }));
+    assert.equal(big.code, 1, big.out);
+    assert.match(big.out, /new file is 301 lines; the limit is 300/);
+  });
+}
+
 test("py N9: a HEAD file with a syntax error fails", () => {
   const p = "src/a.py";
   const r = check(repo("py", { [p]: source("py", fn("py", "F", 5)) }, { [p]: "def f(:\n    pass\n" }));

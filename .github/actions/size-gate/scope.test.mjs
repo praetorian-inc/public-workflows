@@ -73,11 +73,17 @@ test("exemptByText applies the generated header to Go only", () => {
 });
 
 test("lineCount counts physical lines; a last line without newline counts", () => {
-  assert.equal(lineCount(""), 1); // ported verbatim: the port counts an empty file as one line
-  assert.equal(lineCount("a"), 1);
-  assert.equal(lineCount("a\n"), 1);
-  assert.equal(lineCount("a\n\nb"), 3);
-  assert.equal(lineCount("a\n// c\n\n"), 3);
+  assert.equal(lineCount("a.go", ""), 1); // ported verbatim: the port counts an empty file as one line
+  assert.equal(lineCount("a.go", "a"), 1);
+  assert.equal(lineCount("a.go", "a\n"), 1);
+  assert.equal(lineCount("a.go", "a\n\nb"), 3);
+  assert.equal(lineCount("a.go", "a\n// c\n\n"), 3);
+});
+
+test("lineCount breaks lines where each language's parser does", () => {
+  const t = "a\r\nb\rc\u2028d\u2029e\n";
+  assert.deepEqual(["a.go", "a.py", "a.ts", "a.tsx"].map((p) => lineCount(p, t)), [2, 3, 5, 5]);
+  for (const p of ["a.go", "a.py", "a.ts"]) assert.equal(lineCount(p, "a\r\nb\r\n"), 2, `${p}: CRLF counts as today`);
 });
 
 test("measureTree measures in-scope regular files and skips the rest", () => {

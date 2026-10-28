@@ -56,7 +56,7 @@ export function baseLengths(root, ref, baseline, renames) {
   for (const p of Object.keys(baseline)) {
     const from = renames.get(p) ?? p;
     const text = showBlob(root, ref, from);
-    if (text !== null) out[from] = lineCount(text);
+    if (text !== null) out[from] = lineCount(from, text);
   }
   return out;
 }

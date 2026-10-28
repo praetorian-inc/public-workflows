@@ -8,12 +8,13 @@ import { COMPONENT_MAX, FUNCTION_MAX } from "./config.mjs";
 import { extractAll } from "./extract.mjs";
 import { showBlob } from "./git.mjs";
 import { matchFunctions } from "./match.mjs";
-import { readRegular } from "./measure.mjs";
+import { readRegular, splitLines } from "./measure.mjs";
 import { exemptByText, inScope, language } from "./scope.mjs";
 
 const limit = (f) => (f.isComponent ? COMPONENT_MAX : FUNCTION_MAX);
 const len = (f) => f.end - f.start + 1;
-const body = (text, f) => text.split("\n").slice(f.start - 1, f.end).join("\n");
+// The function's lines, split as its parser numbered them.
+const body = (p, text, f) => splitLines(p, text).slice(f.start - 1, f.end).join("\n");
 const tick = (s) => `\`${s}\``;
 const list = (files) => {
   const t = files.map(tick);
@@ -69,7 +70,7 @@ function verdict(m, headText, baseText) {
   if (m.kind === "copy")
     return `${x} in ${tick(m.file)} matches the base function ${tick(m.base.fn.name)} in ${tick(m.base.file)}, which ${tick(m.base.file)} still holds in place; a copy does not inherit its allowance, so it is checked as a new function`;
   const b = m.base.fn;
-  if (body(baseText.get(m.base.file), b) === body(headText, h)) return null;
+  if (body(m.base.file, baseText.get(m.base.file), b) === body(m.file, headText, h)) return null;
   const nb = len(b);
   if (nb > limit(b)) {
     if (n <= nb) return null;
