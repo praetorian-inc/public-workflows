@@ -7,9 +7,11 @@ const DISABLE = [
   /eslint-disable(-next-line|-line)?\s*(--[^\n]*?)?(\*\/|$)/, // bare, with or without "-- reason"
   /eslint-disable(-next-line|-line)?\b[^\n]*\b(max-lines|max-lines-per-function)\b/,
   /\/\*\s*eslint\s+[^\n]*\b(max-lines|max-lines-per-function)\b/, // inline rule config
-  /#\s*noqa\b(?!\s*:)/i, // bare # noqa silences every flake8/ruff rule, size rules included
-  /#\s*noqa\s*:[\w,\s-]*\b(PLR0915|C0302|R0915)\b/i,
-  /#\s*pylint\s*:\s*disable(-next)?\s*=[\w,\s-]*\b(too-many-lines|too-many-statements|C0302|R0915)\b/,
+  // bare # noqa silences every flake8/ruff rule; "# ruff: noqa" and "# flake8: noqa" do it file-wide
+  /#\s*((ruff|flake8)\s*:\s*)?noqa\b(?!\s*:)/i,
+  /#\s*((ruff|flake8)\s*:\s*)?noqa\s*:[\w,\s-]*\b(PLR0915|C0302|R0915)\b/i,
+  /#\s*pylint\s*:\s*disable(-next)?\s*=[\w,\s-]*\b(too-many-lines|too-many-statements|C0302|R0915|all)(?![\w-])/,
+  /#\s*pylint\s*:\s*skip-file\b/,
 ];
 
 // The line numbers among added lines (Map line -> text) that carry one.

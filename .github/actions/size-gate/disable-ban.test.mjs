@@ -20,6 +20,12 @@ test("D1: every banned form, one per pattern", () => {
     "# pylint: disable=too-many-lines",
     "# pylint: disable=C0302",
     "def f():  # pylint: disable=too-many-statements,R0915",
+    "# ruff: noqa",
+    "# flake8: noqa",
+    "# ruff: noqa: PLR0915",
+    "# pylint: disable=all",
+    "x = 1  # pylint: disable-next=all",
+    "# pylint: skip-file",
   ])
     assert.equal(banned(t), true, t);
 });
@@ -33,6 +39,8 @@ test("D2: suppressions of non-size rules pass", () => {
     "x := 1 //nolint:lll",
     "// eslint-disable-next-line no-console",
     "const nolintish = 1;",
+    "# ruff: noqa: E501",
+    "# pylint: disable=all-caps-name",
   ])
     assert.equal(banned(t), false, t);
 });
