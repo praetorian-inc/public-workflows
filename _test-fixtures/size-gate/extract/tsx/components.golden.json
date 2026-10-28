@@ -1,0 +1,10 @@
+{
+  "functions": [
+    { "name": "Card", "start": 3, "end": 5, "isComponent": true },
+    { "name": "App", "start": 7, "end": 17, "isComponent": true },
+    { "name": "App>useEffect", "start": 9, "end": 11, "isComponent": false },
+    { "name": "useData", "start": 19, "end": 21, "isComponent": false },
+    { "name": "List", "start": 23, "end": 26, "isComponent": false },
+    { "name": "List>renderRow", "start": 24, "end": 24, "isComponent": true }
+  ]
+}
