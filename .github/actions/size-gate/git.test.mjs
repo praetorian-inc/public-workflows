@@ -1,8 +1,11 @@
 // Unit tests for git.mjs against real temporary repositories (LAB-7587).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { symlinkSync } from "node:fs";
+import path from "node:path";
+import { bannedLines } from "./disable-ban.mjs";
 import { isCommit, listFiles, readDiff, resolveBase, showBlob } from "./git.mjs";
-import { commit, initRepo, makeRepo, run } from "./scenario-kit.mjs";
+import { commit, initRepo, makeRepo, run, write } from "./scenario-kit.mjs";
 
 const ZERO = "0000000000000000000000000000000000000000";
 
@@ -73,6 +76,19 @@ test("readDiff: statuses, renames, added lines and untracked files", () => {
   assert.deepEqual([...d.added.get("d/u.py")], [[1, "a = 1"], [2, "b = 2"], [3, ""]]);
   assert.equal(d.atBase.has("d/old.go"), true);
   assert.equal(d.atBase.has("d/add.ts"), false);
+});
+
+test("readDiff: a symlink that becomes a regular file (status T) reports its added lines at the path", () => {
+  const root = initRepo();
+  write(root, { "t.go": "package x\n" });
+  symlinkSync("t.go", path.join(root, "x.go"));
+  const base = commit(root, {}, "base");
+  write(root, { "x.go": null });
+  commit(root, { "x.go": "package x\n\nvar y = 1 //nolint\n" }, "head");
+  assert.match(run(root, "diff", "--name-status", base), /^T\tx\.go$/m);
+  const d = readDiff(root, base, []);
+  assert.deepEqual(d.status.get("x.go"), { code: "M", from: "x.go" });
+  assert.deepEqual([...bannedLines(d.added.get("x.go"))], [3]);
 });
 
 test("readDiff and listFiles honor include and exclude pathspecs", () => {
