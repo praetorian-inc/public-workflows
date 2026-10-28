@@ -45,6 +45,7 @@ export function parseConfig(argv, env) {
     exclude: f["--exclude"].length ? f["--exclude"] : list(env.SIZE_GATE_EXCLUDE),
     minScanned: count(f["--min-scanned"] ?? (env.SIZE_GATE_MIN_SCANNED || "1"), "min-scanned-files"),
     base: env.SIZE_GATE_BASE || "",
+    defaultBranch: env.SIZE_GATE_DEFAULT_BRANCH || "",
     goExtractor: env.SIZE_GATE_GO_EXTRACTOR || "",
   };
 }

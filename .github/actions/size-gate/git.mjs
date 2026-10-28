@@ -21,20 +21,35 @@ export function isCommit(root, rev) {
   }
 }
 
-function originDefault(root) {
+function originHead(root) {
   try {
     return git(root, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
-    return "origin/main";
+    return null;
+  }
+}
+
+// refs/remotes/origin/<branch>, or null (with a notice) for an invalid name.
+// git validates it; the name only ever travels as one argv entry.
+function originBranch(root, branch, log) {
+  if (!branch) return null;
+  const ref = `refs/remotes/origin/${branch}`;
+  try {
+    git(root, ["check-ref-format", ref], { stdio: "ignore" });
+    return ref;
+  } catch {
+    log(`::notice::SIZE_GATE_DEFAULT_BRANCH '${escapeData(branch)}' is not a valid branch name; ignoring it.`);
+    return null;
   }
 }
 
 // The merge-base of HEAD with the first usable candidate: SIZE_GATE_BASE (the
-// PR base or the pre-push commit), origin's default branch, then HEAD~1. With
-// none, HEAD itself, which checks nothing new.
-export function resolveBase(root, envBase, log) {
+// PR base or the pre-push commit), origin/HEAD, origin/<SIZE_GATE_DEFAULT_BRANCH>,
+// origin/main, then HEAD~1. With none, HEAD itself, which checks nothing new.
+export function resolveBase(root, envBase, log, defaultBranch = "") {
   const usable = envBase && !/^0+$/.test(envBase) && isCommit(root, envBase);
-  const name = usable ? envBase : [originDefault(root), "HEAD~1"].find((c) => isCommit(root, c));
+  const fallbacks = () => [originHead(root), originBranch(root, defaultBranch, log), "origin/main", "HEAD~1"];
+  const name = usable ? envBase : fallbacks().find((c) => c && isCommit(root, c));
   if (envBase && !usable)
     log(`::notice::SIZE_GATE_BASE '${escapeData(envBase)}' is not a resolvable commit here; comparing with ${name ?? "HEAD"}.`);
   if (!name) {

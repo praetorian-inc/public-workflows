@@ -42,6 +42,19 @@ test("resolveBase: origin's default branch is the next candidate", () => {
   assert.equal(resolveBase(root, "", () => {}), fork);
 });
 
+test("resolveBase: without origin/HEAD, origin/<SIZE_GATE_DEFAULT_BRANCH> comes before origin/main", () => {
+  const root = initRepo();
+  const fork = commit(root, { "a.go": "package a\n" });
+  run(root, "update-ref", "refs/remotes/origin/develop", fork);
+  const later = commit(root, { "b.go": "package a\n" });
+  run(root, "update-ref", "refs/remotes/origin/main", later);
+  commit(root, { "c.go": "package a\n" });
+  assert.equal(resolveBase(root, "", () => {}, "develop"), fork);
+  const logs = [];
+  assert.equal(resolveBase(root, "", (m) => logs.push(m), "bad..name"), later);
+  assert.match(logs[0], /^::notice::SIZE_GATE_DEFAULT_BRANCH 'bad\.\.name' is not a valid branch name/);
+});
+
 test("resolveBase: a single commit compares with HEAD and warns", () => {
   const root = initRepo();
   const only = commit(root, { "a.go": "package a\n" });
