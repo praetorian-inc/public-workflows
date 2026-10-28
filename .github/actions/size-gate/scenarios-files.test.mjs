@@ -1,9 +1,10 @@
 // End-to-end file-rule scenarios F1-F11 and B1 for every language (LAB-7587).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
-import { EXT, LANGS, baselineJson as bj, check, file, makeRepo, runCli } from "./scenario-kit.mjs";
+import { EXT, LANGS, baselineJson as bj, check, commit, file, initRepo, makeRepo, runCli, write } from "./scenario-kit.mjs";
 
 const B = ".github/size-baseline.json";
 // Every repo carries one small in-scope file so the liveness floor holds.
@@ -111,6 +112,38 @@ test("F13: with no merge-base baseline, a new baseline may only list files no lo
   const grown = check(repo("go", { "d/a.go": file("go", 250) }, { "d/a.go": file("go", 400), [B]: bj({ "d/a.go": 400 }) }));
   assert.equal(grown.code, 1);
   assert.match(grown.out, /allows 400 lines but it was 250 at the merge-base, which has no \.github\/size-baseline\.json; a baseline entry cannot exceed it\./);
+});
+
+// A repo whose head commit adds `files` and the symlinks `links` (path -> target).
+function linked(links, files = {}) {
+  const root = initRepo();
+  const base = commit(root, { "keep.go": file("go", 3) });
+  write(root, files);
+  for (const [p, target] of Object.entries(links)) symlinkSync(target, path.join(root, p));
+  commit(root, {});
+  return { root, base };
+}
+
+test("F14: an in-scope symlink passes only when it resolves to an in-scope file in the checkout", () => {
+  const rule = "an in-scope symlink must resolve to an in-scope file inside the checkout, which is then checked on its own";
+  const outside = path.join(mkdtempSync(path.join(tmpdir(), "sg-out-")), "big.go");
+  writeFileSync(outside, file("go", 400));
+  const bad = [
+    [{ "a.go": outside }, {}, {}, "a path outside the checkout"],
+    [{ "a.go": "notes.txt" }, { "notes.txt": file("go", 400) }, {}, "`notes.txt`, which is not an in-scope file"],
+    [{ "a.go": "missing.go" }, {}, {}, "a path that does not exist"],
+    [{ "a.go": "vendor/big.go" }, { "vendor/big.go": file("go", 400) }, { SIZE_GATE_EXCLUDE: "vendor/**" }, "`vendor/big.go`, which is not an in-scope file"],
+  ];
+  for (const [links, files, env, why] of bad) {
+    const r = check(linked(links, files), env);
+    assert.equal(r.code, 1, r.out);
+    assert.ok(r.out.includes(`::error file=a.go::a.go is a symlink to ${why}; ${rule}.`), r.out);
+  }
+  assert.equal(check(linked({ "a.go": "real/b.go" }, { "real/b.go": file("go", 10) })).code, 0);
+  const big = check(linked({ "a.go": "real/b.go" }, { "real/b.go": file("go", 400) }));
+  assert.equal(big.code, 1);
+  assert.match(big.out, /::error file=real\/b\.go::real\/b\.go new file is 400 lines/);
+  assert.doesNotMatch(big.out, /file=a\.go/);
 });
 
 test("usage errors exit 2", () => {

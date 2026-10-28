@@ -1,5 +1,5 @@
 // Physical line counts for in-scope files (LAB-7587), ported from guard#9602.
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { exemptByText, inScope, language } from "./scope.mjs";
 
@@ -36,4 +36,43 @@ export function measureTree(root, paths) {
     if (text !== null && !exemptByText(p, text)) loc.set(p, lineCount(p, text));
   }
   return loc;
+}
+
+// Why a symlink's target is not a listed in-scope file in the checkout, or null.
+function linkProblem(top, abs, listed) {
+  let real;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    return "a path that does not exist";
+  }
+  const rel = path.relative(top, real);
+  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return "a path outside the checkout";
+  const shown = rel.split(path.sep).join("/");
+  if (!lstatSync(real).isFile() || !inScope(shown) || !listed.has(shown)) return `\`${shown}\`, which is not an in-scope file`;
+  return null;
+}
+
+const isLink = (root, p) => {
+  try {
+    return lstatSync(path.join(root, p)).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+const LINK_RULE = "an in-scope symlink must resolve to an in-scope file inside the checkout, which is then checked on its own";
+
+// measureTree skips symlinks, so an in-scope one could hide code: it passes
+// only when its target is itself a listed in-scope file, measured on its own.
+export function symlinkErrors(root, paths) {
+  const listed = new Set(paths);
+  const top = realpathSync(root);
+  const errors = [];
+  for (const p of listed) {
+    if (!inScope(p) || !isLink(root, p)) continue;
+    const why = linkProblem(top, path.join(root, p), listed);
+    if (why) errors.push({ file: p, msg: `is a symlink to ${why}; ${LINK_RULE}.` });
+  }
+  return errors;
 }

@@ -9,7 +9,7 @@
 // passes the same values as SIZE_GATE_* environment variables.
 import { parseConfig, pathspecs, UsageError } from "./config.mjs";
 import { listFiles, readDiff, resolveBase } from "./git.mjs";
-import { measureTree } from "./measure.mjs";
+import { measureTree, symlinkErrors } from "./measure.mjs";
 import { baseLengths, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
 import { checkFiles } from "./files-check.mjs";
 import { checkFunctions } from "./functions-check.mjs";
@@ -18,15 +18,15 @@ import { escapeData, report } from "./report.mjs";
 const log = (m) => console.log(m);
 
 // Measure the scope and refuse a walk too small to be real (a vacuous pass).
-function measure(cfg, specs) {
-  const loc = measureTree(cfg.root, listFiles(cfg.root, specs));
+function measure(cfg, paths) {
+  const loc = measureTree(cfg.root, paths);
   if (loc.size < cfg.minScanned)
     throw new Error(`size gate scanned ${loc.size} files; expected ≥ ${cfg.minScanned} — the scope is wrong`);
   return loc;
 }
 
 function runBaseline(cfg) {
-  const n = writeBaseline(cfg.root, cfg.baselinePath, measure(cfg, pathspecs(cfg.include, cfg.exclude)));
+  const n = writeBaseline(cfg.root, cfg.baselinePath, measure(cfg, listFiles(cfg.root, pathspecs(cfg.include, cfg.exclude))));
   log(`wrote ${cfg.baselinePath}: ${n} files over 300 lines`);
   return 0;
 }
@@ -34,7 +34,8 @@ function runBaseline(cfg) {
 function runCheck(cfg, env) {
   const specs = pathspecs(cfg.include, cfg.exclude);
   const base = resolveBase(cfg.root, cfg.base, log);
-  const loc = measure(cfg, specs);
+  const paths = listFiles(cfg.root, specs);
+  const loc = measure(cfg, paths);
   const diff = readDiff(cfg.root, base, specs);
   let baseline = readBaseline(cfg.root, cfg.baselinePath);
   if (baseline === null) {
@@ -45,7 +46,7 @@ function runCheck(cfg, env) {
   const baseLines = baseBaseline ? undefined : baseLengths(cfg.root, base, baseline, diff.renames);
   const files = checkFiles({ loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
-  const errors = [...files.errors, ...fns.errors];
+  const errors = [...symlinkErrors(cfg.root, paths), ...files.errors, ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];
   report({ errors, warnings, base, scanned: loc.size, baselined: Object.keys(baseline).length, env, log });
   return errors.length ? 1 : 0;
