@@ -79,3 +79,14 @@ for (const lang of LANGS) {
     assert.match(r.out, new RegExp(`^::error file=${b}.*\`F\` in \`${b}\` matches the base function \`F\` in \`${a}\`, which \`${a}\` still holds in place; a copy does not inherit its allowance, so it is checked as a new function`, "m"));
   });
 }
+
+test("M10: a function only matches a base function in the same language", () => {
+  const base = { "keep.go": file("go", 3), "src/legacy.py": source("py", fn("py", "F", 100)) };
+  const r = check(makeRepo({ base, head: { "src/legacy.py": null, "src/split.go": source("go", fn("go", "F", 80)) } }));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /new function `F` is 80 lines; the limit is 50/);
+  const ts = { "src/legacy.ts": source("ts", fn("ts", "F", 80), fn("ts", "Z", 100)) };
+  const tsx = { "src/legacy.ts": source("ts", fn("ts", "Z", 100)), "src/split.tsx": source("tsx", fn("tsx", "F", 80, "1")) };
+  const moved = check(makeRepo({ base: { "keep.ts": file("ts", 3), ...ts }, head: tsx }));
+  assert.equal(moved.code, 0, moved.out);
+});
