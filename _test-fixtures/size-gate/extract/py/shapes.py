@@ -42,3 +42,7 @@ def outer():
             return 2
 
     return inner, Local
+
+
+def sort_keys(items):
+    return sorted(items, key=lambda v: v)

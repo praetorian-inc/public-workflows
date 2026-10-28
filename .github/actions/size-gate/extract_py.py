@@ -1,4 +1,4 @@
-"""List the functions in Python sources for the size gate.
+"""List the functions and lambdas in Python sources for the size gate.
 
 Usage: python3 -I extract_py.py <file>...
 
@@ -19,24 +19,43 @@ def _start_line(node):
     return min([node.lineno] + [d.lineno for d in node.decorator_list])
 
 
-def _collect(node, prefix, out):
-    """Append every def under node, pre-order (source order), __qualname__ names."""
+def _entry(name, start, end):
+    return {"name": name, "start": start, "end": end, "isComponent": False}
+
+
+def _lambda_hints(tree):
+    """Map each lambda that is the whole value of `name = lambda ...` to name."""
+    return {
+        node.value: node.targets[0].id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Lambda)
+    }
+
+
+def _collect(node, prefix, enclosing, hints, out):
+    """Append every def and lambda under node, pre-order (source order).
+
+    Defs get __qualname__ names; lambdas are named like the Go extractor's
+    function literals: `<enclosing>>lambda:<var>`, `anon` without a var.
+    """
     for child in ast.iter_child_nodes(node):
         if isinstance(child, FUNCTION_NODES):
             name = prefix + child.name
-            out.append(
-                {
-                    "name": name,
-                    "start": _start_line(child),
-                    "end": child.end_lineno,
-                    "isComponent": False,
-                }
-            )
-            _collect(child, name + ".<locals>.", out)
+            out.append(_entry(name, _start_line(child), child.end_lineno))
+            _collect(child, name + ".<locals>.", name, hints, out)
+        elif isinstance(child, ast.Lambda):
+            name = enclosing + ">" if enclosing else ""
+            name += "lambda:" + hints.get(child, "anon")
+            out.append(_entry(name, child.lineno, child.end_lineno))
+            _collect(child, prefix, name, hints, out)
         elif isinstance(child, ast.ClassDef):
-            _collect(child, prefix + child.name + ".", out)
+            qualname = prefix + child.name
+            _collect(child, qualname + ".", qualname, hints, out)
         else:
-            _collect(child, prefix, out)
+            _collect(child, prefix, enclosing, hints, out)
 
 
 def extract_file(path):
@@ -46,7 +65,7 @@ def extract_file(path):
             source = fh.read()
         tree = ast.parse(source, filename=path)
         functions = []
-        _collect(tree, "", functions)
+        _collect(tree, "", "", _lambda_hints(tree), functions)
     except (OSError, SyntaxError, ValueError, RecursionError) as exc:
         return {"functions": [], "error": f"{type(exc).__name__}: {exc}"}
     return {"functions": functions}

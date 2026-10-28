@@ -89,6 +89,43 @@ class GoldenFixtureTest(unittest.TestCase):
         self.assertEqual(names, ["setup", "other", "setup"])
 
 
+LAMBDA_SOURCE = """\
+square = (
+    lambda a: (
+        a * a
+    )
+)
+
+
+class Widget:
+    x = lambda self: 0
+
+
+curried = lambda a: lambda b: a + b
+a = b = lambda: 0
+obj.y = lambda: 0
+"""
+
+
+class LambdaTest(unittest.TestCase):
+    def test_lambdas_are_measured_and_named_like_go_literals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = write(directory, "lambdas.py", LAMBDA_SOURCE)
+            out = run_extractor(self, source)
+        spans = [(fn["name"], fn["start"], fn["end"]) for fn in out[source]["functions"]]
+        self.assertEqual(
+            spans,
+            [
+                ("lambda:square", 2, 4),
+                ("Widget>lambda:x", 9, 9),
+                ("lambda:curried", 12, 12),
+                ("lambda:curried>lambda:anon", 12, 12),
+                ("lambda:anon", 13, 13),
+                ("lambda:anon", 14, 14),
+            ],
+        )
+
+
 class PerFileErrorTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

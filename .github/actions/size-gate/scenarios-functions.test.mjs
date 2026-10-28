@@ -1,4 +1,4 @@
-// End-to-end function-rule scenarios N1-N9 (LAB-7587).
+// End-to-end function-rule scenarios N1-N12 (LAB-7587).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EXT, LANGS, check, component, file, fn, makeRepo, source } from "./scenario-kit.mjs";
@@ -123,4 +123,12 @@ test("py: a base file that does not parse counts everything as new, with a warni
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /::warning file=src\/a\.py::src\/a\.py did not parse at the merge-base/);
   assert.match(r.out, /new function `F` is 51 lines/);
+});
+
+test("py N12: a new 60-line parenthesized lambda fails", () => {
+  const p = "src/a.py";
+  const lam = ["handler = (", "    lambda: [", ...Array(58).fill("        0,"), "    ]", ")"];
+  const r = check(repo("py", { [p]: source("py") }, { [p]: source("py", lam) }));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /new function `lambda:handler` is 60 lines; the limit is 50/);
 });
