@@ -90,6 +90,16 @@ test("F11: scanning fewer files than min-scanned-files fails", () => {
   assert.match(r.out, /::error::size gate scanned 2 files; expected ≥ 5 — the scope is wrong/);
 });
 
+test("F12: a baseline entry that is not a line count fails the gate, at HEAD or the merge-base", () => {
+  const p = "d/a.go";
+  const bad = JSON.stringify({ files: { [p]: "x" } });
+  for (const [base, head] of [[{ [p]: file("go", 400) }, { [B]: bad }], [{ [p]: file("go", 400), [B]: bad }, { [B]: bj({ [p]: 400 }) }]]) {
+    const r = check(repo("go", base, head));
+    assert.equal(r.code, 1);
+    assert.match(r.out, /::error::.*size-baseline\.json: entry "d\/a\.go" is "x"; it must be a non-negative integer line count/);
+  }
+});
+
 test("usage errors exit 2", () => {
   assert.equal(runCli(repo("go", {}, {}).root, ["bogus"]).code, 2);
 });

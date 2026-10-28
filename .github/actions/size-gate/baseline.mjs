@@ -9,13 +9,26 @@ import { showBlob } from "./git.mjs";
 export const oversized = (loc) =>
   Object.fromEntries([...loc].filter(([, n]) => n > FILE_MAX).sort(([a], [b]) => (a < b ? -1 : 1)));
 
-const filesOf = (text, where) => {
+// A non-number entry would make every ratchet comparison false and let the
+// file grow, so the whole map is checked before use; a throw fails the gate.
+function validated(files, where) {
+  if (typeof files !== "object" || files === null || Array.isArray(files))
+    throw new Error(`${where}: "files" must be an object of path to line count`);
+  for (const [p, n] of Object.entries(files))
+    if (!Number.isSafeInteger(n) || n < 0)
+      throw new Error(`${where}: entry ${JSON.stringify(p)} is ${JSON.stringify(n)}; it must be a non-negative integer line count`);
+  return files;
+}
+
+function filesOf(text, where) {
+  let files;
   try {
-    return JSON.parse(text).files ?? {};
+    files = JSON.parse(text).files;
   } catch (e) {
     throw new Error(`cannot read ${where}: ${e.message}`);
   }
-};
+  return validated(files === undefined ? {} : files, where);
+}
 
 // The working-tree baseline, or null when the file does not exist.
 export function readBaseline(root, baselinePath) {

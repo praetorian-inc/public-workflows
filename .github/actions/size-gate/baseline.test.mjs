@@ -47,3 +47,17 @@ test("readBaseBaseline: absent at the ref is null", () => {
   assert.deepEqual(readBaseBaseline(repo.root, repo.base, B), { x: 301 });
   assert.equal(readBaseBaseline(repo.root, repo.head, B), null);
 });
+
+test("readBaseline and readBaseBaseline refuse a files map that is not path -> line count", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "sg-bl-"));
+  const bad = [[{ files: [] }, /b\.json: "files" must be an object/], [{ files: null }, /"files" must be an object/],
+    [{ files: { "a.go": "x" } }, /b\.json: entry "a\.go" is "x"; it must be a non-negative integer/],
+    [{ files: { "a.go": {} } }, /entry "a\.go" is \{\}/], [{ files: { "a.go": -1 } }, /entry "a\.go" is -1/],
+    [{ files: { "a.go": 1.5 } }, /entry "a\.go" is 1\.5/]];
+  for (const [body, re] of bad) {
+    writeFileSync(path.join(root, B), JSON.stringify(body));
+    assert.throws(() => readBaseline(root, B), re, JSON.stringify(body));
+  }
+  const repo = makeRepo({ base: { [B]: JSON.stringify({ files: { "a.go": "400" } }) } });
+  assert.throws(() => readBaseBaseline(repo.root, repo.base, B), /:b\.json: entry "a\.go" is "400"/);
+});
