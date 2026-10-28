@@ -595,7 +595,7 @@ Nerva (workspace mode off) also passes `gowork: "off"`.
 
 ### `size-gate.yml` — file and function size gate (callable) (LAB-7587)
 
-Fails a PR that makes Go, TypeScript/TSX or Python code too large. It applies one rule set to every language; there are no per-language lint configs to keep in step. Files are capped at 300 lines, with a ratcheting baseline for legacy files. Functions are capped at 50 lines, or 150 for a TSX component, and only the functions a PR adds or changes are checked. The gate fails closed: a failed checkout, toolchain setup, `npm ci`, extractor crash, malformed baseline, unparseable HEAD file or unmet `min-scanned-files` floor turns the job red.
+Fails a PR that makes Go, TypeScript/TSX or Python code too large. It applies one rule set to every language; there are no per-language lint configs to keep in step. Files are capped at 300 lines, with a ratcheting baseline for legacy files. Functions are capped at 50 lines, or 150 for a TSX component, and only the functions a PR adds or changes are checked. The gate fails closed: a failed checkout, toolchain setup, `npm ci`, extractor crash, malformed baseline, unparseable HEAD file (any parse diagnostic, in every language) or unmet `min-scanned-files` floor turns the job red.
 
 **Minimal caller:**
 

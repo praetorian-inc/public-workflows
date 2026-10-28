@@ -103,8 +103,9 @@ function extractFile(path) {
   }
   const kind = path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, kind);
+  // Any diagnostic fails, as in Go and Python: recovery can cut a function short.
   const diags = sf.parseDiagnostics ?? [];
-  if (diags.length > 0 && sf.statements.length === 0) {
+  if (diags.length > 0) {
     return { functions: [], error: ts.flattenDiagnosticMessageText(diags[0].messageText, "\n") };
   }
   return { functions: collect(sf) };

@@ -28,7 +28,7 @@ for (const lang of ["ts", "tsx"]) {
   }
 }
 
-test("a file the parser cannot produce statements from is a per-file error; exit 0", () => {
+test("a file that does not parse is a per-file error; exit 0", () => {
   const d = mkdtempSync(join(tmpdir(), "extract-ts-"));
   try {
     const bad = join(d, "bad.ts");
@@ -39,6 +39,17 @@ test("a file the parser cannot produce statements from is a per-file error; exit
     assert.deepEqual(out[bad].functions, []);
     assert.match(out[bad].error, /./);
     assert.deepEqual(out[good], { functions: [{ name: "g", start: 1, end: 3, isComponent: false }] });
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("a recoverable syntax error is a per-file error too, as in Go and Python", () => {
+  const d = mkdtempSync(join(tmpdir(), "extract-ts-"));
+  try {
+    const stray = join(d, "stray.ts");
+    writeFileSync(stray, "function f() {\n  return 1;\n}\n}\nfunction g() {\n  return 2;\n}\n");
+    assert.deepEqual(run(stray)[stray], { functions: [], error: "Declaration or statement expected." });
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
