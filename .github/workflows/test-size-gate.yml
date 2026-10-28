@@ -1,0 +1,103 @@
+name: Test size-gate
+# Tests for the shared size gate (LAB-7587).
+#   unit:    extractor goldens (Go, TS/TSX, Python), the node:test suites
+#            including the end-to-end scenario matrix, and actionlint.
+#   dogfood: runs the reusable workflow on the gate's own sources, scoped to
+#            .github/actions/size-gate/ (the whole-repo scope fails on
+#            collect_leaderboard_metrics.py, 343 lines, which has no baseline
+#            here). Only .go/.ts/.tsx/.py files are measured and tests are
+#            exempt, so the floor is the two extractor sources.
+
+on:
+  # Escape hatch: both real triggers are paths:-filtered.
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/size-gate.yml"
+      - ".github/workflows/test-size-gate.yml"
+      - ".github/actions/size-gate/**"
+      - "_test-fixtures/size-gate/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/size-gate.yml"
+      - ".github/workflows/test-size-gate.yml"
+      - ".github/actions/size-gate/**"
+      - "_test-fixtures/size-gate/**"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: .github/actions/size-gate/extract-go/go.mod
+          cache: false
+
+      - name: Install the TypeScript parser
+        run: npm ci --ignore-scripts --prefix .github/actions/size-gate
+
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "v1.7.7"
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Run actionlint
+        run: actionlint -color -shellcheck="-S warning"
+
+      - name: Go extractor tests
+        working-directory: .github/actions/size-gate/extract-go
+        run: go test ./...
+
+      - name: Python extractor tests
+        run: python3 -I -m unittest discover -s .github/actions/size-gate -v
+
+      - name: Node tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          # Enumerated by the shell and counted: a node-side glob that matches
+          # nothing exits 0, which would pass this job having run no tests.
+          tests=(.github/actions/size-gate/*.test.mjs)
+          if [ "${#tests[@]}" -eq 0 ]; then
+            echo "::error::No *.test.mjs files found under .github/actions/size-gate/ — this job would have reported success without running a single test."
+            exit 1
+          fi
+
+          printf 'node %s — running %d test file(s):\n' "$(node --version)" "${#tests[@]}"
+          printf '  %s\n' "${tests[@]}"
+          node --test "${tests[@]}"
+
+  dogfood:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/size-gate.yml
+    with:
+      include-paths: ".github/actions/size-gate/**"
+      baseline-path: ".github/actions/size-gate/.size-baseline.json"
+      min-scanned-files: 2

@@ -15,3 +15,6 @@ paths:
   .github/workflows/grok-code.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/size-gate.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
