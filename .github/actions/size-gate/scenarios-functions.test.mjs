@@ -75,6 +75,15 @@ test("tsx N6: a 120-line component that loses its JSX fails", () => {
   assert.match(r.out, /`C` is now 120 lines; the limit is 50/);
 });
 
+test("tsx N11: a grandfathered 100-line function that gains JSX may change but not grow", () => {
+  const p = "src/a.tsx";
+  const one = (head) => check(repo("tsx", { [p]: source("tsx", fn("tsx", "C", 100)) }, { [p]: head }));
+  const grown = one(source("tsx", component("C", 120)));
+  assert.equal(grown.code, 1, grown.out);
+  assert.match(grown.out, /`C` was 100 lines at the merge-base and is now 120; an over-limit function may change but not grow/);
+  assert.equal(one(source("tsx", component("C", 100, "1"))).code, 0);
+});
+
 for (const lang of ["ts", "py"]) {
   test(`${lang} N10: bare-CR line endings neither hide a function's growth nor a file's length`, () => {
     const cr = (t) => t.replaceAll("\n", "\r");

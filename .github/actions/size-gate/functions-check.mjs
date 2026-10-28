@@ -58,10 +58,21 @@ function extractSides(root, { head, old }, goExtractor) {
 const AMBIGUOUS = "the match is ambiguous, so it is checked as a new function";
 const NO_GROWTH = "an over-limit function may change but not grow";
 
+// A function over its own limit at the merge-base may not grow, whatever its
+// HEAD limit: gaining JSX does not raise a grandfathered function's allowance.
+function grandfathered(m, n, x) {
+  const nb = len(m.base.fn);
+  if (n <= nb) return null;
+  const was = `${nb} lines at the merge-base and is now ${n}; ${NO_GROWTH}`;
+  return m.kind === "moved" ? `${x} moved from ${tick(m.base.file)}; it was ${was}` : `${x} was ${was}`;
+}
+
 // The failure message for one match, or null when it passes.
 function verdict(m, headText, baseText) {
   const h = m.fn;
   const [n, lim, x] = [len(h), limit(h), tick(h.name)];
+  const matched = m.kind === "exact" || m.kind === "moved";
+  if (matched && len(m.base.fn) > limit(m.base.fn)) return grandfathered(m, n, x);
   if (n <= lim) return null;
   if (m.kind === "new") return `new function ${x} is ${n} lines; the limit is ${lim}`;
   if (m.kind === "ambiguous") return `${x} (${n} lines; the limit is ${lim}) matches base functions in ${list(m.others)}; ${AMBIGUOUS}`;
@@ -72,11 +83,6 @@ function verdict(m, headText, baseText) {
   const b = m.base.fn;
   if (body(m.base.file, baseText.get(m.base.file), b) === body(m.file, headText, h)) return null;
   const nb = len(b);
-  if (nb > limit(b)) {
-    if (n <= nb) return null;
-    const was = `${nb} lines at the merge-base and is now ${n}; ${NO_GROWTH}`;
-    return m.kind === "moved" ? `${x} moved from ${tick(m.base.file)}; it was ${was}` : `${x} was ${was}`;
-  }
   return n > nb ? `${x} grew to ${n} lines; the limit is ${lim}` : `${x} is now ${n} lines; the limit is ${lim}`;
 }
 
