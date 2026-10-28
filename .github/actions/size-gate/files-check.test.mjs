@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { checkFiles } from "./files-check.mjs";
 import { annotation, escapeData } from "./report.mjs";
 
-const diff = (o = {}) => ({ atBase: new Set(o.atBase ?? []), renames: new Map(o.renames ?? []), added: new Map((o.added ?? []).map((p) => [p, new Map()])) });
+const diff = (o = {}) => ({ status: new Map(), atBase: new Set(o.atBase ?? []), renames: new Map(o.renames ?? []), added: new Map((o.added ?? []).map((p) => [p, new Map()])) });
 const run = (loc, d, baseline = {}) =>
   checkFiles({ loc: new Map(Object.entries(loc)), diff: d, baseline, baseBaseline: null, baselinePath: "b.json" });
 
