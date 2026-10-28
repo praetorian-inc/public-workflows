@@ -50,6 +50,7 @@ function extractSides(root, { head, old }, goExtractor) {
     });
     const out = extractAll([...head, ...old].map((x) => x.abs), goExtractor);
     for (const x of [...head, ...old]) Object.assign(x, out.get(x.abs));
+    for (const x of [...head, ...old]) for (const f of x.functions) f.text = body(x.file, x.text, f);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -68,7 +69,7 @@ function grandfathered(m, n, x) {
 }
 
 // The failure message for one match, or null when it passes.
-function verdict(m, headText, baseText) {
+function verdict(m) {
   const h = m.fn;
   const [n, lim, x] = [len(h), limit(h), tick(h.name)];
   const matched = m.kind === "exact" || m.kind === "moved";
@@ -81,7 +82,7 @@ function verdict(m, headText, baseText) {
   if (m.kind === "copy")
     return `${x} in ${tick(m.file)} matches the base function ${tick(m.base.fn.name)} in ${tick(m.base.file)}, which ${tick(m.base.file)} still holds in place; a copy does not inherit its allowance, so it is checked as a new function`;
   const b = m.base.fn;
-  if (body(m.base.file, baseText.get(m.base.file), b) === body(m.file, headText, h)) return null;
+  if (b.text === h.text) return null;
   const nb = len(b);
   return n > nb ? `${x} grew to ${n} lines; the limit is ${lim}` : `${x} is now ${n} lines; the limit is ${lim}`;
 }
@@ -97,10 +98,8 @@ export function checkFunctions({ root, base, diff, goExtractor }) {
     warnings.push({ file: b.file, msg: `did not parse at the merge-base (${b.error}); its functions are checked as new.` });
   for (const h of s.head.filter((h) => h.error))
     errors.push({ file: h.file, msg: `cannot parse: ${h.error}. Fix the syntax or exclude the path.` });
-  const baseText = new Map(s.old.map((b) => [b.file, b.text]));
-  const headText = new Map(s.head.map((h) => [h.file, h.text]));
   for (const m of matchFunctions(s.old, s.head.filter((h) => !h.error))) {
-    const msg = verdict(m, headText.get(m.file), baseText);
+    const msg = verdict(m);
     if (msg) errors.push({ file: m.file, line: m.fn.start, msg });
   }
   return { errors, warnings };

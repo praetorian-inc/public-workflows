@@ -84,6 +84,19 @@ test("tsx N11: a grandfathered 100-line function that gains JSX may change but n
   assert.equal(one(source("tsx", component("C", 100, "1"))).code, 0);
 });
 
+test("go N12: a duplicate name's ordinal carries no allowance; an unchanged duplicate still passes", () => {
+  const p = "src/a.go";
+  const one = (head) => check(repo("go", { [p]: source("go", fn("go", "init", 60), fn("go", "init", 100)) }, { [p]: head }));
+  const grown = one(source("go", fn("go", "init", 5, "2"), fn("go", "init", 100, "1")));
+  assert.equal(grown.code, 1, grown.out);
+  assert.match(grown.out, /`init#2` \(100 lines; the limit is 50\) matches base functions in `src\/a\.go`; the match is ambiguous/);
+  const kept = one(source("go", fn("go", "init", 5, "2"), fn("go", "init", 60), fn("go", "init", 100)));
+  assert.equal(kept.code, 0, kept.out);
+  const copied = check(repo("go", { [p]: source("go", fn("go", "init", 100)) }, { [p]: source("go", fn("go", "init", 100), fn("go", "init", 100)) }));
+  assert.equal(copied.code, 1, copied.out);
+  assert.match(copied.out, /`init#2` in `src\/a\.go` matches the base function `init`.*a copy does not inherit its allowance/);
+});
+
 for (const lang of ["ts", "py"]) {
   test(`${lang} N10: bare-CR line endings neither hide a function's growth nor a file's length`, () => {
     const cr = (t) => t.replaceAll("\n", "\r");

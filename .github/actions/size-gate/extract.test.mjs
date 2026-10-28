@@ -9,3 +9,8 @@ test("a repeated name is numbered from its second occurrence; others are untouch
   const names = numberDuplicates([f("init"), f("App>useEffect"), f("init"), f("x"), f("App>useEffect"), f("init")]).map((g) => g.name);
   assert.deepEqual(names, ["init", "App>useEffect", "init#2", "x", "App>useEffect#2", "init#3"]);
 });
+
+test("every occurrence of a repeated name carries the bare name as dup; a unique name carries none", () => {
+  const dups = numberDuplicates([f("init"), f("x"), f("init")]).map((g) => g.dup);
+  assert.deepEqual(dups, ["init", undefined, "init"]);
+});

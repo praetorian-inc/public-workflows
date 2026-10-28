@@ -29,13 +29,17 @@ function runExtractor(lang, files, goExtractor) {
   }
 }
 
-// A name seen k>1 times in one file gets "#k" from its second occurrence on.
+// A name seen k>1 times in one file gets "#k" from its second occurrence on,
+// and every occurrence carries the bare name as `dup`.
 export function numberDuplicates(functions) {
+  const count = new Map();
+  for (const f of functions) count.set(f.name, (count.get(f.name) ?? 0) + 1);
   const seen = new Map();
   return functions.map((f) => {
+    if (count.get(f.name) < 2) return f;
     const k = (seen.get(f.name) ?? 0) + 1;
     seen.set(f.name, k);
-    return k > 1 ? { ...f, name: `${f.name}#${k}` } : f;
+    return { ...f, name: k > 1 ? `${f.name}#${k}` : f.name, dup: f.name };
   });
 }
 
