@@ -90,3 +90,26 @@ test("M10: a function only matches a base function in the same language", () => 
   const moved = check(makeRepo({ base: { "keep.ts": file("ts", 3), ...ts }, head: tsx }));
   assert.equal(moved.code, 0, moved.out);
 });
+
+// A whole-file rename keeps its allowances only within one directory and language.
+const renamed = (from, to, text) => makeRepo({ base: { "keep.go": file("go", 3), [from]: text }, head: { [from]: null, [to]: text } });
+
+test("M11: renaming a file to another directory makes its functions new", () => {
+  for (const lang of LANGS) {
+    const r = check(renamed(`src/a.${EXT[lang]}`, `lib/a.${EXT[lang]}`, source(lang, fn(lang, "F", 100))));
+    assert.equal(r.code, 1, `${lang}: ${r.out}`);
+    assert.match(r.out, /new function `F` is 100 lines; the limit is 50/, lang);
+  }
+  const twins = check(renamed("src/a.go", "lib/a.go", source("go", fn("go", "init", 100), fn("go", "init", 100))));
+  assert.equal(twins.code, 1, twins.out);
+  assert.equal(count(twins.out, /^::error .*new function `init(#2)?` is 100 lines/), 2, twins.out);
+});
+
+test("M12: renaming a file in its directory and language keeps its allowances", () => {
+  for (const lang of LANGS) {
+    const r = check(renamed(`src/a.${EXT[lang]}`, `src/b.${EXT[lang]}`, source(lang, fn(lang, "F", 100))));
+    assert.equal(r.code, 0, `${lang}: ${r.out}`);
+  }
+  const tsx = check(renamed("src/a.ts", "src/a.tsx", source("ts", fn("ts", "F", 100))));
+  assert.equal(tsx.code, 0, tsx.out);
+});

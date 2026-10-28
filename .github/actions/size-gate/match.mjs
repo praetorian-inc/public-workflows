@@ -22,10 +22,15 @@ export function matchFunctions(base, head) {
       pool.get(k).push({ file: b.file, fn: f });
     }
   const out = [];
-  for (const h of head)
-    for (const fn of h.functions) out.push(matchOne(h, fn, byFile, pool));
+  for (const h of head) {
+    // A rename source is the origin only within one directory and language.
+    const at = sameHome(h.origin, h.file) ? h : { ...h, origin: null };
+    for (const fn of h.functions) out.push(matchOne(at, fn, byFile, pool));
+  }
   return guardClaims(out);
 }
+
+const sameHome = (a, b) => a !== null && keyOf(a, "") === keyOf(b, "");
 
 // An ordinal is not an identity: a function whose name occurs more than once
 // in its file, at the merge-base or HEAD, keeps an allowance only with a body
