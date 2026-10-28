@@ -92,6 +92,33 @@ test("readDiff: a path with a space keeps its name", () => {
   assert.deepEqual([...readDiff(root, base, []).added.keys()], ["a b/x.go"]);
 });
 
+test("readDiff: a C-quoted path keeps its name, in order with its neighbours", () => {
+  const { root, base } = makeRepo({
+    base: { "q/a.ts": "let a;\n", "q/old.ts": "x\ny\nz\nw\n" },
+    head: { "q/a.ts": "let a;\nlet b;\n", 'q/we"ird.ts': "let c;\n", "q/back\\slash.ts": "let d;\n", "q/old.ts": null, "q/new.ts": "x\ny\nz\nw\nv\n" },
+  });
+  const added = readDiff(root, base, []).added;
+  assert.deepEqual([...added.get('q/we"ird.ts')], [[1, "let c;"]]);
+  assert.deepEqual([...added.get("q/back\\slash.ts")], [[1, "let d;"]]);
+  assert.deepEqual([...added.get("q/a.ts")], [[2, "let b;"]]);
+  assert.deepEqual([...added.get("q/new.ts")], [[5, "v"]]);
+});
+
+test("readDiff: escaped tab, octal control byte and raw UTF-8 inside a quoted name", () => {
+  const names = ['q/t\tab é".ts', "q/c\u0001.ts"];
+  const { root, base } = makeRepo({ base: {}, head: Object.fromEntries(names.map((n) => [n, "let a;\n"])) });
+  const added = readDiff(root, base, []).added;
+  for (const n of names) assert.deepEqual([...(added.get(n) ?? [])], [[1, "let a;"]], JSON.stringify(n));
+});
+
+test("readDiff: diff.noprefix and diff.mnemonicPrefix in the repo config change nothing", () => {
+  for (const [key, val] of [["diff.noprefix", "true"], ["diff.mnemonicPrefix", "true"]]) {
+    const { root, base } = makeRepo({ base: { "x.go": "package x\n" }, head: { "x.go": "package x\n\nvar y = 1\n" } });
+    run(root, "config", key, val);
+    assert.deepEqual([...readDiff(root, base, []).added.get("x.go")], [[2, ""], [3, "var y = 1"]], key);
+  }
+});
+
 test("showBlob returns the file at a ref, or null when absent", () => {
   const { root, base } = makeRepo({ base: { "a.go": "package a\n" }, head: { "a.go": null } });
   assert.equal(showBlob(root, base, "a.go"), "package a\n");

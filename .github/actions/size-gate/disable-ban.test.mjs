@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { bannedLines } from "./disable-ban.mjs";
-import { check, file, makeRepo } from "./scenario-kit.mjs";
+import { check, file, makeRepo, run } from "./scenario-kit.mjs";
 
 const banned = (text) => bannedLines(new Map([[1, text]])).length === 1;
 
@@ -56,4 +56,14 @@ test("D1/D2 end to end: an added banned comment fails at its line; a coded noqa 
   assert.match(r.out, /::error file=m\.py,line=4::m\.py:4 adds a size-lint disable comment; split the code instead\./);
   const ok = makeRepo({ base: { "m.py": file("py", 3) }, head: { "m.py": file("py", 3) + "x = 1  # noqa: E501\n" } });
   assert.equal(check(ok).code, 0);
+});
+
+test("D1 end to end: a quoted filename or diff.noprefix does not hide a banned comment", () => {
+  const quoted = makeRepo({ base: { "q/base.ts": file("ts", 3) }, head: { 'q/we"ird.ts': "// eslint-disable\n" } });
+  assert.equal(check(quoted).code, 1);
+  const noprefix = makeRepo({ base: { "p.ts": file("ts", 3) }, head: { "p.ts": file("ts", 3) + "// eslint-disable\n" } });
+  run(noprefix.root, "config", "diff.noprefix", "true");
+  const r = check(noprefix);
+  assert.equal(r.code, 1);
+  assert.match(r.out, /::error file=p\.ts,line=4::/);
 });

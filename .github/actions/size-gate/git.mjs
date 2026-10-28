@@ -64,18 +64,40 @@ function readStatus(root, base, specs) {
   return status;
 }
 
-// Added line numbers per new-side path, from a zero-context patch.
+// C escapes git uses in a quoted path; any other escaped character stands for itself.
+const C_ESCAPE = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 };
+
+// Decode a path git C-quoted ("b/we\"ird.ts", octal bytes for control chars).
+function unquote(q) {
+  const parts = [];
+  for (const [, esc, lit] of q.slice(1, -1).matchAll(/\\([0-7]{3}|.)|([^\\]+)/gs)) {
+    if (lit !== undefined) parts.push(Buffer.from(lit));
+    else parts.push(Buffer.from([/^[0-7]/.test(esc) ? parseInt(esc, 8) : (C_ESCAPE[esc] ?? esc.charCodeAt(0))]));
+  }
+  return Buffer.concat(parts).toString("utf8");
+}
+
+// The path on a "+++ " header line, or null for a deletion. The prefix is
+// forced to b/ below; git ends an unquoted name with a tab when it has a space.
+function newSidePath(line) {
+  const raw = line.slice(4).replace(/\t$/, "");
+  if (raw === "/dev/null") return null;
+  return (raw.startsWith('"') ? unquote(raw) : raw).slice(2);
+}
+
+// Added line numbers per new-side path, from a zero-context patch. Explicit
+// prefixes override diff.noprefix and diff.mnemonicPrefix in the repo config.
 function readAdded(root, base, specs) {
   const added = new Map();
-  const patch = git(root, ["-c", "core.quotePath=false", "diff", "-M", "--unified=0", "--no-color", "--no-ext-diff", base, "--", ...specs]);
+  const flags = ["-M", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
+  const patch = git(root, ["-c", "core.quotePath=false", "diff", ...flags, base, "--", ...specs]);
   let file = null;
   let line = 0;
   let inHeader = false; // an added line "++ b/x" reads "+++ b/x" inside a hunk
   for (const l of patch.split("\n")) {
     if (l.startsWith("diff --git ")) [inHeader, file] = [true, null];
     else if (inHeader && l.startsWith("+++ ")) {
-      // git ends the header with a tab when the path contains a space.
-      file = l === "+++ /dev/null" ? null : l.slice(6).replace(/\t$/, "");
+      file = newSidePath(l);
       if (file && !added.has(file)) added.set(file, new Map());
     } else if (l.startsWith("@@")) [inHeader, line] = [false, Number(/\+(\d+)/.exec(l)[1])];
     else if (!inHeader && file && l.startsWith("+")) added.get(file).set(line++, l.slice(1));
