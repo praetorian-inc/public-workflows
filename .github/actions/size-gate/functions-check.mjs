@@ -66,6 +66,8 @@ function verdict(m, headText, baseText) {
   if (m.kind === "ambiguous") return `${x} (${n} lines; the limit is ${lim}) matches base functions in ${list(m.others)}; ${AMBIGUOUS}`;
   if (m.kind === "shared")
     return `${x} (${n} lines; the limit is ${lim}) claims the same base function in ${tick(m.base.file)} as ${list(m.others)}; ${AMBIGUOUS}`;
+  if (m.kind === "copy")
+    return `${x} in ${tick(m.file)} matches the base function ${tick(m.base.fn.name)} in ${tick(m.base.file)}, which ${tick(m.base.file)} still holds in place; a copy does not inherit its allowance, so it is checked as a new function`;
   const b = m.base.fn;
   if (body(baseText.get(m.base.file), b) === body(headText, h)) return null;
   const nb = len(b);

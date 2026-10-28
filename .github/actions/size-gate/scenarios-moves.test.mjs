@@ -1,4 +1,4 @@
-// End-to-end cross-file matching scenarios M1-M8 (LAB-7587): a function may
+// End-to-end cross-file matching scenarios M1-M9 (LAB-7587): a function may
 // move between files in one directory and keep its allowance.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -64,10 +64,18 @@ for (const lang of LANGS) {
     assert.equal(r.code, 0, r.out);
   });
 
-  test(`${lang} M8: a grandfathered function copied into two new siblings fails both`, () => {
-    const head = { [legacy]: shrunk, [at("s1")]: source(lang, fn(lang, "F", 80)), [at("s2")]: source(lang, fn(lang, "F", 80)) };
+  test(`${lang} M8: a grandfathered function moved out and copied into two new siblings fails both`, () => {
+    const head = { [legacy]: null, [at("s1")]: source(lang, fn(lang, "F", 80)), [at("s2")]: source(lang, fn(lang, "F", 80)) };
     const r = check(repo(lang, zBase, head));
     assert.equal(r.code, 1, r.out);
     assert.equal(count(r.out, /^::error .*`F` \(80 lines; the limit is 50\) .*ambiguous/), 2, r.out);
+  });
+
+  test(`${lang} M9: an in-place edit keeps the allowance and a sibling copy is checked as new`, () => {
+    const [a, b] = [at("a"), at("b")];
+    const r = check(repo(lang, { [a]: source(lang, fn(lang, "F", 80)) }, { [a]: source(lang, fn(lang, "F", 80, "1")), [b]: source(lang, fn(lang, "F", 80)) }));
+    assert.equal(r.code, 1, r.out);
+    assert.equal(count(r.out, new RegExp(`^::error file=${a}`)), 0, r.out);
+    assert.match(r.out, new RegExp(`^::error file=${b}.*\`F\` in \`${b}\` matches the base function \`F\` in \`${a}\`, which \`${a}\` still holds in place; a copy does not inherit its allowance, so it is checked as a new function`, "m"));
   });
 }

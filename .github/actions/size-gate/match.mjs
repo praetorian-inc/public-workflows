@@ -8,7 +8,7 @@ const keyOf = (file, name) => `${path.posix.dirname(file)}::${name}`;
 // head: [{ file, origin, functions }]; origin is the same path (M) or the
 // rename source (R), null for an added file.
 // Returns one entry per HEAD function:
-//   { file, fn, kind: "exact"|"moved"|"new"|"ambiguous", base?, others? }
+//   { file, fn, kind: "exact"|"moved"|"new"|"ambiguous"|"shared"|"copy", base?, others? }
 export function matchFunctions(base, head) {
   const byFile = new Map(base.map((b) => [b.file, new Map(b.functions.map((f) => [f.name, f]))]));
   const pool = new Map();
@@ -21,7 +21,7 @@ export function matchFunctions(base, head) {
   const out = [];
   for (const h of head)
     for (const fn of h.functions) out.push(matchOne(h, fn, byFile, pool));
-  return guardSharedClaims(out);
+  return guardClaims(out);
 }
 
 function matchOne(h, fn, byFile, pool) {
@@ -33,12 +33,19 @@ function matchOne(h, fn, byFile, pool) {
   return { file: h.file, fn, kind: "ambiguous", others: candidates.map((c) => c.file) };
 }
 
-// Two or more HEAD functions that claim one base function through the pool
-// are all ambiguous: a copy-paste may not hand every copy the allowance.
-function guardSharedClaims(matches) {
+// Every base function has at most one claimant (plan §5.3 step 5c). An exact
+// in-place match is a claim: it keeps the allowance, and any pool-matched copy
+// is a "copy", checked as new. With no exact claim, two or more pool claims
+// are all "shared", so copy-paste never hands out a second allowance.
+function guardClaims(matches) {
+  const held = new Set(matches.filter((m) => m.kind === "exact").map((m) => m.base.fn));
   const claims = new Map();
   for (const m of matches) {
     if (m.kind !== "moved") continue;
+    if (held.has(m.base.fn)) {
+      m.kind = "copy";
+      continue;
+    }
     if (!claims.has(m.base.fn)) claims.set(m.base.fn, []);
     claims.get(m.base.fn).push(m);
   }
