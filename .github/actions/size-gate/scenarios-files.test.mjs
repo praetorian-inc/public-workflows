@@ -1,10 +1,10 @@
 // End-to-end file-rule scenarios F1-F11 and B1 for every language (LAB-7587).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { EXT, LANGS, baselineJson as bj, check, commit, file, initRepo, makeRepo, runCli, write } from "./scenario-kit.mjs";
+import { EXT, LANGS, baselineJson as bj, check, commit, file, fn, initRepo, makeRepo, runCli, source, write } from "./scenario-kit.mjs";
 
 const B = ".github/size-baseline.json";
 // Every repo carries one small in-scope file so the liveness floor holds.
@@ -119,7 +119,10 @@ function linked(links, files = {}) {
   const root = initRepo();
   const base = commit(root, { "keep.go": file("go", 3) });
   write(root, files);
-  for (const [p, target] of Object.entries(links)) symlinkSync(target, path.join(root, p));
+  for (const [p, target] of Object.entries(links)) {
+    mkdirSync(path.dirname(path.join(root, p)), { recursive: true });
+    symlinkSync(target, path.join(root, p));
+  }
   commit(root, {});
   return { root, base };
 }
@@ -144,6 +147,22 @@ test("F14: an in-scope symlink passes only when it resolves to an in-scope file 
   assert.equal(big.code, 1);
   assert.match(big.out, /::error file=real\/b\.go::real\/b\.go new file is 400 lines/);
   assert.doesNotMatch(big.out, /file=a\.go/);
+});
+
+test("F15: a directory symlink passes only when every in-scope file it exposes is checked on its own", () => {
+  const big = { "testdata/big/big.go": source("go", fn("go", "F", 120), fn("go", "G", 300)) };
+  const r = check(linked({ "pkg/big": "../testdata/big" }, big));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /::error file=pkg\/big::pkg\/big is a symlink to a directory exposing `testdata\/big\/big\.go`, which is not an in-scope file; /);
+  assert.equal(check(linked({ "pkg/alias": "../real" }, { "real/a.go": file("go", 10) })).code, 0);
+  const away = check(linked({ "pkg/out": mkdtempSync(path.join(tmpdir(), "sg-dir-")) }));
+  assert.match(away.out, /pkg\/out is a symlink to a directory outside the checkout; /);
+  const nested = check(linked({ "real/in": "../keep.go", "pkg/alias": "../real" }, { "real/a.go": file("go", 3) }));
+  assert.match(nested.out, /pkg\/alias is a symlink to a directory holding the symlink `real\/in`; /);
+  const grown = check(linked({ "pkg/alias": "../real" }, { "real/a.go": file("go", 400) }));
+  assert.equal(grown.code, 1);
+  assert.match(grown.out, /::error file=real\/a\.go::real\/a\.go new file is 400 lines/);
+  assert.doesNotMatch(grown.out, /file=pkg\/alias/);
 });
 
 test("usage errors exit 2", () => {

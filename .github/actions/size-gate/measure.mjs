@@ -1,5 +1,5 @@
 // Physical line counts for in-scope files (LAB-7587), ported from guard#9602.
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { exemptByText, inScope, language } from "./scope.mjs";
 
@@ -38,17 +38,37 @@ export function measureTree(root, paths) {
   return loc;
 }
 
-// Why a symlink's target is not a listed in-scope file in the checkout, or null.
-function linkProblem(top, abs, listed) {
+const posix = (p) => p.split(path.sep).join("/");
+const outside = (rel) => rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel);
+
+// A directory link exposes every file under it at a new name, so each file
+// in scope under either name must be a listed in-scope file itself (B1).
+function dirProblem(top, real, link, listed) {
+  for (const e of readdirSync(real, { recursive: true, withFileTypes: true })) {
+    const abs = path.join(e.parentPath, e.name);
+    const shown = posix(path.relative(top, abs));
+    if (e.isSymbolicLink()) return `a directory holding the symlink \`${shown}\``;
+    if (!e.isFile()) continue;
+    const exposed = inScope(`${link}/${posix(path.relative(real, abs))}`) || inScope(shown);
+    if (exposed && !(inScope(shown) && listed.has(shown))) return `a directory exposing \`${shown}\`, which is not an in-scope file`;
+  }
+  return null;
+}
+
+// Why a symlink hides code, or null. A link of any name to a directory is
+// checked; a file link only under an in-scope name.
+function linkProblem(top, abs, p, listed) {
   let real;
   try {
     real = realpathSync(abs);
   } catch {
-    return "a path that does not exist";
+    return inScope(p) ? "a path that does not exist" : null;
   }
   const rel = path.relative(top, real);
-  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return "a path outside the checkout";
-  const shown = rel.split(path.sep).join("/");
+  if (lstatSync(real).isDirectory()) return outside(rel) ? "a directory outside the checkout" : dirProblem(top, real, p, listed);
+  if (!inScope(p)) return null;
+  if (outside(rel)) return "a path outside the checkout";
+  const shown = posix(rel);
   if (!lstatSync(real).isFile() || !inScope(shown) || !listed.has(shown)) return `\`${shown}\`, which is not an in-scope file`;
   return null;
 }
@@ -62,17 +82,20 @@ const isLink = (root, p) => {
 };
 
 const LINK_RULE = "an in-scope symlink must resolve to an in-scope file inside the checkout, which is then checked on its own";
+const DIR_RULE = "a directory symlink must stay inside the checkout and expose only in-scope files that are checked on their own";
 
-// measureTree skips symlinks, so an in-scope one could hide code: it passes
-// only when its target is itself a listed in-scope file, measured on its own.
+// measureTree skips symlinks, so a link could hide code: a file link passes
+// only when its target is a listed in-scope file, measured on its own; a
+// directory link only when every in-scope file under it is.
 export function symlinkErrors(root, paths) {
   const listed = new Set(paths);
   const top = realpathSync(root);
   const errors = [];
   for (const p of listed) {
-    if (!inScope(p) || !isLink(root, p)) continue;
-    const why = linkProblem(top, path.join(root, p), listed);
-    if (why) errors.push({ file: p, msg: `is a symlink to ${why}; ${LINK_RULE}.` });
+    if (!isLink(root, p)) continue;
+    const why = linkProblem(top, path.join(root, p), p, listed);
+    const rule = why?.startsWith("a directory") ? DIR_RULE : LINK_RULE;
+    if (why) errors.push({ file: p, msg: `is a symlink to ${why}; ${rule}.` });
   }
   return errors;
 }
