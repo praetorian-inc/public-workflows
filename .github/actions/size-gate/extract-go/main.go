@@ -93,11 +93,13 @@ func (v *visitor) Visit(node ast.Node) ast.Visitor {
 	return v
 }
 
+// enter records physical lines: PositionFor(_, false) ignores //line
+// directives, which could otherwise renumber a long function short (LAB-7587).
 func (v *visitor) enter(name string, start, end token.Pos) ast.Visitor {
 	v.c.functions = append(v.c.functions, function{
 		Name:  name,
-		Start: v.c.fset.Position(start).Line,
-		End:   v.c.fset.Position(end).Line,
+		Start: v.c.fset.PositionFor(start, false).Line,
+		End:   v.c.fset.PositionFor(end, false).Line,
 	})
 	return &visitor{c: v.c, enclosing: name}
 }

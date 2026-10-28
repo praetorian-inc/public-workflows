@@ -13,7 +13,7 @@ import (
 const fixtureDir = "../../../../_test-fixtures/size-gate/extract/go"
 
 func TestGoldens(t *testing.T) {
-	for _, name := range []string{"shapes", "duplicates"} {
+	for _, name := range []string{"shapes", "duplicates", "linedirective"} {
 		t.Run(name, func(t *testing.T) {
 			src := filepath.Join(fixtureDir, name+".go")
 			want := readGolden(t, filepath.Join(fixtureDir, name+".golden.json"))
