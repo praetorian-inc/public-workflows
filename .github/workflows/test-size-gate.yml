@@ -55,6 +55,12 @@ jobs:
           go-version-file: .github/actions/size-gate/extract-go/go.mod
           cache: false
 
+      # Same interpreter as size-gate.yml's python-version default.
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
       - name: Install the TypeScript parser
         run: npm ci --ignore-scripts --prefix .github/actions/size-gate
 

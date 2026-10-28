@@ -54,6 +54,12 @@ on:
         type: number
         default: 1
 
+      python-version:
+        description: "Python version for the Python extractor (its ast module parses the caller's .py files)."
+        required: false
+        type: string
+        default: "3.13"
+
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner."
         required: false
@@ -164,6 +170,27 @@ jobs:
         with:
           go-version-file: _pw/.github/actions/size-gate/extract-go/go.mod
           cache: false
+
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # The extractor runs bare `python3` from PATH, so prove PATH resolves to
+      # the interpreter setup-python installed, not the runner image's.
+      - name: Verify python3 is the pinned interpreter
+        shell: bash
+        env:
+          WANT_PYTHON: ${{ steps.python.outputs.python-version }}
+        run: |
+          set -euo pipefail
+          got="$(python3 -I -c 'import platform; print(platform.python_version())')"
+          if [ "$got" != "$WANT_PYTHON" ]; then
+            echo "::error::python3 on PATH is ${got}, expected ${WANT_PYTHON} from setup-python"
+            exit 1
+          fi
+          echo "python3 is ${got}"
 
       - name: Install the TypeScript parser
         run: npm ci --ignore-scripts --prefix _pw/.github/actions/size-gate
