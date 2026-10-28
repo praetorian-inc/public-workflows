@@ -73,7 +73,7 @@ on:
         default: "audit"
 
       harden-runner-allowed-endpoints:
-        description: "Newline-separated allowed endpoints for block mode. This job needs github.com:443, proxy.golang.org:443 and registry.npmjs.org:443 at least."
+        description: "Newline-separated allowed endpoints for block mode. Recommended for block mode: github.com:443, api.github.com:443, raw.githubusercontent.com:443, release-assets.githubusercontent.com:443, nodejs.org:443, go.dev:443, dl.google.com:443, registry.npmjs.org:443."
         required: false
         type: string
         default: ""
