@@ -47,16 +47,19 @@ function originBranch(root, branch, log) {
 // PR base or the pre-push commit), origin/HEAD, origin/<SIZE_GATE_DEFAULT_BRANCH>,
 // origin/main, then HEAD~1. With none, HEAD itself, which checks nothing new.
 export function resolveBase(root, envBase, log, defaultBranch = "") {
+  const head = git(root, ["rev-parse", "HEAD"]).trim();
+  const mergeBase = (c) => git(root, ["merge-base", c, "HEAD"]).trim();
   const usable = envBase && !/^0+$/.test(envBase) && isCommit(root, envBase);
+  // A fallback already at HEAD (origin on a default-branch push) would check nothing; try the next.
   const fallbacks = () => [originHead(root), originBranch(root, defaultBranch, log), "origin/main", "HEAD~1"];
-  const name = usable ? envBase : fallbacks().find((c) => c && isCommit(root, c));
+  const name = usable ? envBase : fallbacks().find((c) => c && isCommit(root, c) && mergeBase(c) !== head);
   if (envBase && !usable)
     log(`::notice::SIZE_GATE_BASE '${escapeData(envBase)}' is not a resolvable commit here; comparing with ${name ?? "HEAD"}.`);
   if (!name) {
     log("::warning::No base commit resolves; a HEAD base checks nothing new on this run.");
-    return git(root, ["rev-parse", "HEAD"]).trim();
+    return head;
   }
-  return git(root, ["merge-base", name, "HEAD"]).trim();
+  return mergeBase(name);
 }
 
 // Tracked plus untracked (not ignored) paths under the pathspecs.

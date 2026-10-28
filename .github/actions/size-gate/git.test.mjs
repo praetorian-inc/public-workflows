@@ -33,6 +33,15 @@ test("resolveBase: a zero or unknown SIZE_GATE_BASE falls through to origin, the
   assert.match(logs[0], /^::notice::/);
 });
 
+test("resolveBase: a fallback whose merge-base is HEAD is skipped, so a default-branch push compares with HEAD~1", () => {
+  const root = initRepo();
+  const first = commit(root, { "a.go": "package a\n" });
+  const tip = commit(root, { "b.go": "package a\n" });
+  run(root, "update-ref", "refs/remotes/origin/main", tip);
+  run(root, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  for (const env of [ZERO, "deadbeef"]) assert.equal(resolveBase(root, env, () => {}, "main"), first);
+});
+
 test("resolveBase: origin's default branch is the next candidate", () => {
   const root = initRepo();
   const fork = commit(root, { "a.go": "package a\n" });
