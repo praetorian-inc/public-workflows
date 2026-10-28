@@ -135,6 +135,25 @@ jobs:
           path: _pw
           persist-credentials: false
 
+      # An empty job.workflow_sha would let checkout fall back to the default
+      # branch and gate with the wrong code, so prove the commit (A01).
+      - name: Verify gate checkout matches job.workflow_sha
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_sha is empty; cannot verify the size-gate checkout"
+            exit 1
+          fi
+          got="$(git -C _pw rev-parse HEAD)"
+          if [ "$got" != "$WORKFLOW_SHA" ]; then
+            echo "::error::size-gate checkout is ${got}, expected job.workflow_sha ${WORKFLOW_SHA}"
+            exit 1
+          fi
+          echo "size-gate checkout verified at ${got}"
+
       - name: Set up Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
