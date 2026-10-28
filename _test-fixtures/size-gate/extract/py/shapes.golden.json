@@ -13,6 +13,7 @@
     {"name": "outer.<locals>.inner>lambda:handler", "start": 37, "end": 37, "isComponent": false},
     {"name": "outer.<locals>.Local.km", "start": 41, "end": 42, "isComponent": false},
     {"name": "sort_keys", "start": 47, "end": 48, "isComponent": false},
-    {"name": "sort_keys>lambda:anon", "start": 48, "end": 48, "isComponent": false}
+    {"name": "sort_keys>lambda:anon", "start": 48, "end": 48, "isComponent": false},
+    {"name": "lambda:typed", "start": 51, "end": 51, "isComponent": false}
   ]
 }

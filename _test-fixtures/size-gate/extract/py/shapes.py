@@ -46,3 +46,6 @@ def outer():
 
 def sort_keys(items):
     return sorted(items, key=lambda v: v)
+
+
+typed: object = lambda v: v

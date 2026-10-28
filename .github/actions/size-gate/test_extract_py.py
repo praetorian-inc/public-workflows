@@ -104,6 +104,8 @@ class Widget:
 curried = lambda a: lambda b: a + b
 a = b = lambda: 0
 obj.y = lambda: 0
+typed: object = lambda: 0
+obj.z: object = lambda: 0
 """
 
 
@@ -122,6 +124,8 @@ class LambdaTest(unittest.TestCase):
                 ("lambda:curried>lambda:anon", 12, 12),
                 ("lambda:anon", 13, 13),
                 ("lambda:anon", 14, 14),
+                ("lambda:typed", 15, 15),
+                ("lambda:anon", 16, 16),
             ],
         )
 

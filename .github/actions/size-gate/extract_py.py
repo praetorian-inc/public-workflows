@@ -24,15 +24,19 @@ def _entry(name, start, end):
 
 
 def _lambda_hints(tree):
-    """Map each lambda that is the whole value of `name = lambda ...` to name."""
-    return {
-        node.value: node.targets[0].id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and len(node.targets) == 1
-        and isinstance(node.targets[0], ast.Name)
-        and isinstance(node.value, ast.Lambda)
-    }
+    """Map each lambda that is the whole value of `name = lambda ...` or
+    `name: T = lambda ...` to name."""
+    hints = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+        else:
+            continue
+        if isinstance(target, ast.Name) and isinstance(node.value, ast.Lambda):
+            hints[node.value] = target.id
+    return hints
 
 
 def _collect(node, prefix, enclosing, hints, out):

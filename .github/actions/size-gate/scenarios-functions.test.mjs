@@ -1,4 +1,4 @@
-// End-to-end function-rule scenarios N1-N12 (LAB-7587).
+// End-to-end function-rule scenarios N1-N15 (LAB-7587).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EXT, LANGS, check, component, file, fn, makeRepo, source } from "./scenario-kit.mjs";
@@ -125,10 +125,27 @@ test("py: a base file that does not parse counts everything as new, with a warni
   assert.match(r.out, /new function `F` is 51 lines/);
 });
 
-test("py N12: a new 60-line parenthesized lambda fails", () => {
+test("py N13: a new 60-line parenthesized lambda fails", () => {
   const p = "src/a.py";
   const lam = ["handler = (", "    lambda: [", ...Array(58).fill("        0,"), "    ]", ")"];
   const r = check(repo("py", { [p]: source("py") }, { [p]: source("py", lam) }));
   assert.equal(r.code, 1, r.out);
   assert.match(r.out, /new function `lambda:handler` is 60 lines; the limit is 50/);
+});
+
+test("py N14: replacing an over-limit annotated lambda with a differently named one is checked as new", () => {
+  const p = "src/a.py";
+  const lam = (name) => [`${name}: object = (`, "    lambda: [", ...Array(58).fill("        0,"), "    ]", ")"];
+  const r = check(repo("py", { [p]: source("py", lam("old")) }, { [p]: source("py", lam("new")) }));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /new function `lambda:new` is 60 lines; the limit is 50/);
+});
+
+test("tsx N15: a grandfathered component that loses its JSX may change but not grow", () => {
+  const p = "src/a.tsx";
+  const one = (head) => check(repo("tsx", { [p]: source("tsx", component("C", 200)) }, { [p]: head }));
+  assert.equal(one(source("tsx", fn("tsx", "C", 200))).code, 0);
+  const grown = one(source("tsx", fn("tsx", "C", 201)));
+  assert.equal(grown.code, 1, grown.out);
+  assert.match(grown.out, /`C` was 200 lines at the merge-base and is now 201; an over-limit function may change but not grow/);
 });
