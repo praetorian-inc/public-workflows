@@ -1,7 +1,8 @@
 // git plumbing for the size gate (LAB-7587), ported from guard#9602. Every call
 // is an argv array to the git binary; nothing goes through a shell.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { inScope } from "./scope.mjs";
 import { escapeData } from "./report.mjs";
@@ -46,6 +47,22 @@ export function resolveBase(root, envBase, log) {
 // Tracked plus untracked (not ignored) paths under the pathspecs.
 export const listFiles = (root, specs) =>
   [...new Set(z(git(root, ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...specs])))];
+
+// The subset of `paths` the pathspecs match, by git's own matching: the paths
+// go into a throwaway index, so they need not exist as listed.
+export function matchSpecs(root, specs, paths) {
+  if (specs.length === 0 || paths.length === 0) return new Set(paths);
+  const tmp = mkdtempSync(path.join(tmpdir(), "size-gate-index-"));
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(tmp, "index") };
+  try {
+    const blob = git(root, ["hash-object", "--stdin"], { input: "" }).trim();
+    const info = paths.map((p) => `100644 ${blob}\t${p}\0`).join("");
+    git(root, ["update-index", "-z", "--index-info"], { env, input: info });
+    return new Set(z(git(root, ["ls-files", "-z", "--cached", "--", ...specs], { env })));
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 // path -> { code: A|M|D|R, from }, from `git diff --name-status` against base.
 function readStatus(root, base, specs) {

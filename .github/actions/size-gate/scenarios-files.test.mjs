@@ -165,6 +165,16 @@ test("F15: a directory symlink passes only when every in-scope file it exposes i
   assert.doesNotMatch(grown.out, /file=pkg\/alias/);
 });
 
+test("F16: a directory symlink is checked whatever include-paths lists, against that scope", () => {
+  const env = { SIZE_GATE_INCLUDE: "src/**/*.go" };
+  const files = { "src/a.go": file("go", 3), "other/big.go": file("go", 400) };
+  const r = check(linked({ "src/lib": "../other" }, files), env);
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /::error file=src\/lib::src\/lib is a symlink to a directory exposing `other\/big\.go`, which is not an in-scope file; /);
+  const away = check(linked({ "tools/lib": "../other" }, files), env);
+  assert.equal(away.code, 0, away.out);
+});
+
 test("usage errors exit 2", () => {
   assert.equal(runCli(repo("go", {}, {}).root, ["bogus"]).code, 2);
 });

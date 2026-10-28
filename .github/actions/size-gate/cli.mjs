@@ -46,7 +46,7 @@ function runCheck(cfg, env) {
   const baseLines = baseBaseline ? undefined : baseLengths(cfg.root, base, baseline, diff.renames);
   const files = checkFiles({ loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
-  const errors = [...symlinkErrors(cfg.root, paths), ...files.errors, ...fns.errors];
+  const errors = [...symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), ...files.errors, ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];
   report({ errors, warnings, base, scanned: loc.size, baselined: Object.keys(baseline).length, env, log });
   return errors.length ? 1 : 0;
