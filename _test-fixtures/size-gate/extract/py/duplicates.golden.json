@@ -1,0 +1,7 @@
+{
+  "functions": [
+    {"name": "setup", "start": 1, "end": 2, "isComponent": false},
+    {"name": "other", "start": 5, "end": 6, "isComponent": false},
+    {"name": "setup", "start": 9, "end": 10, "isComponent": false}
+  ]
+}
