@@ -94,7 +94,7 @@ function collect(sf) {
   return out;
 }
 
-export function extractFile(path) {
+function extractFile(path) {
   let text;
   try {
     text = readFileSync(path, "utf8");

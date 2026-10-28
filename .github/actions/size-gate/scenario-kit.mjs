@@ -101,7 +101,19 @@ export function runCli(root, args, env = {}) {
   }
 }
 
+// The Go extractor, built once per test process (the workflow builds it once too).
+let goBin = null;
+export function goExtractor() {
+  if (goBin) return goBin;
+  const dir = mkdtempSync(path.join(tmpdir(), "size-gate-go-"));
+  process.on("exit", () => rmSync(dir, { recursive: true, force: true }));
+  const out = path.join(dir, "extract-go");
+  execFileSync("go", ["build", "-o", out, "."], { cwd: new URL("./extract-go", import.meta.url).pathname, stdio: "ignore" });
+  return (goBin = out);
+}
+
 // `check` against the repo's base commit.
-export const check = (repo, env = {}, args = []) => runCli(repo.root, ["check", ...args], { SIZE_GATE_BASE: repo.base, ...env });
+export const check = (repo, env = {}, args = []) =>
+  runCli(repo.root, ["check", ...args], { SIZE_GATE_BASE: repo.base, SIZE_GATE_GO_EXTRACTOR: goExtractor(), ...env });
 
 export const baselineJson = (files) => JSON.stringify({ limit: 300, generatedBy: "test", files }, null, 2) + "\n";

@@ -12,6 +12,7 @@ import { listFiles, readDiff, resolveBase } from "./git.mjs";
 import { measureTree } from "./measure.mjs";
 import { readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
 import { checkFiles } from "./files-check.mjs";
+import { checkFunctions } from "./functions-check.mjs";
 import { escapeData, report } from "./report.mjs";
 
 const log = (m) => console.log(m);
@@ -41,7 +42,10 @@ function runCheck(cfg, env) {
     baseline = {};
   }
   const baseBaseline = readBaseBaseline(cfg.root, base, cfg.baselinePath);
-  const { errors, warnings } = checkFiles({ loc, diff, baseline, baseBaseline, baselinePath: cfg.baselinePath });
+  const files = checkFiles({ loc, diff, baseline, baseBaseline, baselinePath: cfg.baselinePath });
+  const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
+  const errors = [...files.errors, ...fns.errors];
+  const warnings = [...files.warnings, ...fns.warnings];
   report({ errors, warnings, base, scanned: loc.size, baselined: Object.keys(baseline).length, env, log });
   return errors.length ? 1 : 0;
 }
