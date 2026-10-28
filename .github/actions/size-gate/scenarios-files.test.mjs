@@ -100,6 +100,19 @@ test("F12: a baseline entry that is not a line count fails the gate, at HEAD or 
   }
 });
 
+test("F13: with no merge-base baseline, a new baseline may only list files no longer than at the merge-base", () => {
+  const big = { "d/a.go": file("go", 400) };
+  assert.equal(check(repo("go", big, { [B]: bj({ "d/a.go": 400 }) })).code, 0);
+  const renamed = check(repo("go", big, { "d/a.go": null, "d/n.go": file("go", 400), [B]: bj({ "d/n.go": 400 }) }));
+  assert.equal(renamed.code, 0, renamed.out);
+  const added = check(repo("go", {}, { "d/b.go": file("go", 400), [B]: bj({ "d/b.go": 400 }) }));
+  assert.equal(added.code, 1);
+  assert.match(added.out, /d\/b\.go did not exist at the merge-base, which has no \.github\/size-baseline\.json; a new file cannot be baselined\./);
+  const grown = check(repo("go", { "d/a.go": file("go", 250) }, { "d/a.go": file("go", 400), [B]: bj({ "d/a.go": 400 }) }));
+  assert.equal(grown.code, 1);
+  assert.match(grown.out, /allows 400 lines but it was 250 at the merge-base, which has no \.github\/size-baseline\.json; a baseline entry cannot exceed it\./);
+});
+
 test("usage errors exit 2", () => {
   assert.equal(runCli(repo("go", {}, {}).root, ["bogus"]).code, 2);
 });

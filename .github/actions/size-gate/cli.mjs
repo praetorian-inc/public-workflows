@@ -10,7 +10,7 @@
 import { parseConfig, pathspecs, UsageError } from "./config.mjs";
 import { listFiles, readDiff, resolveBase } from "./git.mjs";
 import { measureTree } from "./measure.mjs";
-import { readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
+import { baseLengths, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
 import { checkFiles } from "./files-check.mjs";
 import { checkFunctions } from "./functions-check.mjs";
 import { escapeData, report } from "./report.mjs";
@@ -42,7 +42,8 @@ function runCheck(cfg, env) {
     baseline = {};
   }
   const baseBaseline = readBaseBaseline(cfg.root, base, cfg.baselinePath);
-  const files = checkFiles({ loc, diff, baseline, baseBaseline, baselinePath: cfg.baselinePath });
+  const baseLines = baseBaseline ? undefined : baseLengths(cfg.root, base, baseline, diff.renames);
+  const files = checkFiles({ loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
   const errors = [...files.errors, ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];

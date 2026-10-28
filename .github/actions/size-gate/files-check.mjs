@@ -16,10 +16,10 @@ function unbaselined(loc, baseline, diff, B) {
 }
 
 // { errors, warnings }, each a list of { file, line?, msg }.
-export function checkFiles({ loc, diff, baseline, baseBaseline, baselinePath }) {
+export function checkFiles({ loc, diff, baseline, baseBaseline, baseLines, baselinePath }) {
   const pairs = [
     ...unbaselined(loc, baseline, diff, baselinePath),
-    ...ratchet({ loc, baseline, baseBaseline, renames: diff.renames, baselinePath }),
+    ...ratchet({ loc, baseline, baseBaseline, baseLines, renames: diff.renames, baselinePath }),
   ];
   const errors = pairs.map(([file, msg]) => ({ file, msg }));
   const warnings = [];

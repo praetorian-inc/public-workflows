@@ -4,12 +4,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { oversized, ratchet, readBaseBaseline, readBaseline } from "./baseline.mjs";
+import { baseLengths, oversized, ratchet, readBaseBaseline, readBaseline } from "./baseline.mjs";
 import { baselineJson, makeRepo } from "./scenario-kit.mjs";
 
 const B = "b.json";
-const r = (loc, baseline, baseBaseline, renames = new Map()) =>
-  ratchet({ loc: new Map(Object.entries(loc)), baseline, baseBaseline, renames, baselinePath: B });
+const r = (loc, baseline, baseBaseline, renames = new Map(), baseLines = undefined) =>
+  ratchet({ loc: new Map(Object.entries(loc)), baseline, baseBaseline, renames, baselinePath: B, baseLines });
 
 test("oversized keeps files over 300, sorted by path", () => {
   assert.deepEqual(Object.entries(oversized(new Map([["z", 301], ["a", 900], ["m", 300]]))), [["a", 900], ["z", 301]]);
@@ -60,4 +60,20 @@ test("readBaseline and readBaseBaseline refuse a files map that is not path -> l
   }
   const repo = makeRepo({ base: { [B]: JSON.stringify({ files: { "a.go": "400" } }) } });
   assert.throws(() => readBaseBaseline(repo.root, repo.base, B), /:b\.json: entry "a\.go" is "400"/);
+});
+
+test("ratchet: with no merge-base baseline, entries are bounded by the merge-base files", () => {
+  const none = "did not exist at the merge-base, which has no b.json; a new file cannot be baselined.";
+  assert.deepEqual(r({ a: 400 }, { a: 400 }, null, new Map(), {}), [["a", none]]);
+  assert.deepEqual(r({ a: 400 }, { a: 400 }, null, new Map(), { a: 250 }),
+    [["a", "b.json allows 400 lines but it was 250 at the merge-base, which has no b.json; a baseline entry cannot exceed it."]]);
+  assert.deepEqual(r({ a: 400 }, { a: 400 }, null, new Map(), { a: 400 }), []);
+  assert.deepEqual(r({ n: 400 }, { n: 400 }, null, new Map([["n", "o"]]), { o: 410 }), []);
+  assert.deepEqual(r({ a: 400 }, { a: 400 }, { a: 400 }, new Map(), {}), [], "a merge-base baseline decides alone");
+});
+
+test("baseLengths: the merge-base length of each entry's file, following renames", () => {
+  const repo = makeRepo({ base: { "a.go": "x\ny\n", "o.go": "1\n2\n3\n" } });
+  assert.deepEqual(baseLengths(repo.root, repo.base, { "a.go": 1, "n.go": 1, "z.go": 1 }, new Map([["n.go", "o.go"]])),
+    { "a.go": 2, "o.go": 3 });
 });

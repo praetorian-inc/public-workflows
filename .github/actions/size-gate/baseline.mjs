@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { FILE_MAX } from "./config.mjs";
 import { showBlob } from "./git.mjs";
+import { lineCount } from "./measure.mjs";
 
 // Every measured file over the limit, sorted by path.
 export const oversized = (loc) =>
@@ -48,6 +49,18 @@ export function readBaseBaseline(root, ref, baselinePath) {
   return text === null ? null : filesOf(text, `${ref}:${baselinePath}`);
 }
 
+// With no baseline at the merge-base, the merge-base files bound a new one:
+// each entry's file length there, keyed by its merge-base path.
+export function baseLengths(root, ref, baseline, renames) {
+  const out = {};
+  for (const p of Object.keys(baseline)) {
+    const from = renames.get(p) ?? p;
+    const text = showBlob(root, ref, from);
+    if (text !== null) out[from] = lineCount(text);
+  }
+  return out;
+}
+
 export function writeBaseline(root, baselinePath, loc) {
   const files = oversized(loc);
   const body = { limit: FILE_MAX, generatedBy: "node .github/actions/size-gate/cli.mjs baseline", files };
@@ -65,18 +78,30 @@ function entryError(n, entry, B) {
   return null;
 }
 
+// No exception for drift on main: when two PRs combine into a file over
+// its entry, the fix is to shrink the file or revert, never to raise it.
+function shrinkError(was, entry, B) {
+  if (was === undefined) return `was added to ${B}; the baseline can only shrink.`;
+  return entry > was ? `${B} entry rose from ${was} to ${entry}; the baseline can only shrink.` : null;
+}
+
+// A first baseline cannot grandfather a new file or one grown since the merge-base.
+function firstError(was, entry, B) {
+  if (was === undefined) return `did not exist at the merge-base, which has no ${B}; a new file cannot be baselined.`;
+  if (entry > was) return `${B} allows ${entry} lines but it was ${was} at the merge-base, which has no ${B}; a baseline entry cannot exceed it.`;
+  return null;
+}
+
 // Ratchet failures for every baseline entry, as [path, message] pairs.
-export function ratchet({ loc, baseline, baseBaseline, renames, baselinePath: B }) {
+// baseLines (from baseLengths) applies only when baseBaseline is null.
+export function ratchet({ loc, baseline, baseBaseline, renames, baselinePath: B, baseLines }) {
   const out = [];
   for (const [p, entry] of Object.entries(baseline)) {
     const err = entryError(loc.get(p), entry, B);
     if (err) out.push([p, err]);
-    if (!baseBaseline) continue;
-    const was = baseBaseline[renames.get(p) ?? p] ?? baseBaseline[p];
-    // No exception for drift on main: when two PRs combine into a file over
-    // its entry, the fix is to shrink the file or revert, never to raise it.
-    if (was === undefined) out.push([p, `was added to ${B}; the baseline can only shrink.`]);
-    else if (entry > was) out.push([p, `${B} entry rose from ${was} to ${entry}; the baseline can only shrink.`]);
+    const at = (m) => m[renames.get(p) ?? p] ?? m[p];
+    const base = baseBaseline ? shrinkError(at(baseBaseline), entry, B) : baseLines && firstError(at(baseLines), entry, B);
+    if (base) out.push([p, base]);
   }
   return out;
 }
