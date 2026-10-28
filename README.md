@@ -593,6 +593,65 @@ Nerva (workspace mode off) also passes `gowork: "off"`.
 
 **Notes:** the caller preserves its own `concurrency` group and `permissions` model — this workflow only requires `contents: read`. No `paths:` filter on `on:` (docs-only PRs skip the repo's ci.yml; the drift gate is exactly what docs-only PRs must not skip). No `branches:` filter on `pull_request` — `on.pull_request.branches` matches the BASE, so `branches: [main]` would skip stacked PRs.
 
+### `size-gate.yml` — file and function size gate (callable) (LAB-7587)
+
+Fails a PR that makes Go, TypeScript/TSX or Python code too large. It applies one rule set to every language; there are no per-language lint configs to keep in step. Files are capped at 300 lines, with a ratcheting baseline for legacy files. Functions are capped at 50 lines, or 150 for a TSX component, and only the functions a PR adds or changes are checked. The gate fails closed: a failed checkout, toolchain setup, `npm ci`, extractor crash, unparseable HEAD file or unmet `min-scanned-files` floor turns the job red.
+
+**Minimal caller:**
+
+```yaml
+name: Size Gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  size:
+    uses: praetorian-inc/public-workflows/.github/workflows/size-gate.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      baseline-path: .github/size-baseline.json
+```
+
+**Inputs:**
+
+| Input | Default | Purpose |
+|---|---|---|
+| `baseline-path` | `.github/size-baseline.json` | Baseline file in the caller repo. A missing file is an empty baseline |
+| `include-paths` | `""` (whole repo) | Newline-separated git pathspec globs that limit the scope |
+| `exclude-paths` | `""` | Newline-separated git pathspec globs removed from the scope |
+| `min-scanned-files` | `1` | Fails when fewer in-scope files are measured, so a wrong scope cannot pass vacuously |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Block mode needs at least `github.com:443`, `proxy.golang.org:443` and `registry.npmjs.org:443` |
+| `timeout-minutes` | `15` | Job timeout |
+
+**Outputs:** `violations` (error count), `warnings` (warning count), `base-sha` (the merge-base the PR was compared with).
+
+**Rules:**
+
+- **Scope.** `.go`, `.ts`, `.tsx` and `.py` files, narrowed by `include-paths` and `exclude-paths`. Tests are exempt (`_test.go`, `.test.ts(x)`, `.spec.ts(x)`, `test_*.py`, `*_test.py`, `conftest.py`, and `tests/`, `testdata/`, `fixtures/`, `__tests__/` directories). Also exempt: `.d.ts`, `.pb.go`, `vendor/`, `node_modules/`, `generated/`, `mocks/`, `e2e/`, and Go files with a `// Code generated … DO NOT EDIT.` header.
+- **Files.** A file over 300 lines fails unless the baseline lists it. A baselined file may shrink but not grow. When it shrinks, its entry must be lowered to the new length in the same PR. When it reaches 300 or fewer, its entry must be removed. A PR cannot add a baseline entry or raise one. Added or changed files of 201–300 lines get a warning.
+- **Functions ("may change, not grow").** A new function over its limit fails. An existing function that a PR pushes over its limit fails. A function that was already over its limit at the merge-base may be edited, but fails if it gets longer. Unchanged functions are not checked. A TSX component is a function whose own body contains JSX. A component that loses its JSX drops to the 50-line limit.
+- **Moves.** A function moved to another file in the same directory keeps its allowance, so you can split a legacy file in place. A move to another directory, or a rename during the move, counts as a new function. The match is strict when it is ambiguous: the same name in two changed base files, or one base function copied into two HEAD files. Every ambiguous copy is checked as a new function, and the message names the files. To split across directories, split within the directory first, then move the pieces in a later PR.
+- **No disable comments.** Added lines may not silence size rules: bare `//nolint`, `//nolint:funlen|revive|all`, `revive:disable`, bare `eslint-disable` or one naming `max-lines` or `max-lines-per-function`, bare `# noqa`, `# noqa: PLR0915|C0302|R0915`, and `# pylint: disable=too-many-lines|too-many-statements`. Coded `# noqa` for other rules passes.
+
+**Regenerating the baseline.** The baseline only matters when you adopt the gate, or when you delete or shrink a legacy file. It needs no extractors:
+
+```
+git clone --depth 1 --branch vX.Y.Z https://github.com/praetorian-inc/public-workflows /tmp/pw
+node /tmp/pw/.github/actions/size-gate/cli.mjs baseline --root . --baseline .github/size-baseline.json \
+  [--include '<glob>']... [--exclude '<glob>']...
+```
+
+It writes every in-scope file over 300 lines. Pass the same globs that the caller passes as `include-paths` and `exclude-paths`. CI's ratchet refuses any raise, whoever runs the writer.
+
+**Notes:** no `branches:` filter on `pull_request`, because `on.pull_request.branches` matches the BASE and would skip stacked PRs. No `paths:` filter either. The gate checks out the caller into `repo/` with full history, so the merge-base resolves. It checks out its own sources at `job.workflow_sha` into `_pw/`. Parsing never runs caller code (go/parser, the TypeScript parser and Python `ast`), so the gate is safe on fork PRs.
+
 ### `agents-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
 Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped.
