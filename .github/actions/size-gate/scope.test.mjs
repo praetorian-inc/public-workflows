@@ -40,6 +40,7 @@ test("generic test, vendor and generated directories are exempt", () => {
     "a/x_gen.go",
     "a/x.gen.ts",
     "a/zz_generated.deepcopy.go",
+    "zz_generated.deepcopy.go",
     "a/__tests__/t.ts",
     "a/testdata/t.go",
     "a/fixtures/f.py",
@@ -47,6 +48,8 @@ test("generic test, vendor and generated directories are exempt", () => {
     "a/testutils.go",
   ])
     assert.equal(inScope(p), false, p);
+  // zz_generated must start the filename; a hand-written name that merely contains it is measured.
+  for (const p of ["pkg/jazz_generated.py", "pkg/util_zz_generated.go"]) assert.equal(inScope(p), true, p);
 });
 
 test("language by extension", () => {

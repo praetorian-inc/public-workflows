@@ -6,7 +6,7 @@
 const TEST_SUFFIX =
   /(_test\.go|\.test\.tsx?|\.spec\.tsx?|\.d\.ts|\.pb\.go)$|(^|\/)test_[^/]*\.py$|_test\.py$|(^|\/)conftest\.py$/;
 const EXCLUDED_DIR =
-  /(^|\/)(e2e|mocks?|__mocks__|generated|node_modules|vendor)(\/|$)|_gen\.go$|\.gen\.tsx?$|zz_generated/i;
+  /(^|\/)(e2e|mocks?|__mocks__|generated|node_modules|vendor)(\/|$)|_gen\.go$|\.gen\.tsx?$|(^|\/)zz_generated/i;
 const TEST_ONLY =
   /(^|\/)(__tests__|__fixtures__|fixtures|tests?|testdata|testutils?|testhelpers?|test-utils)(\/|$)|(^|\/)(test[-_]?utils?|test_?helpers?)\.(go|tsx?)$/i;
 const LANGUAGE = /\.(go|tsx?|py)$/;
