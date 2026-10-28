@@ -118,10 +118,11 @@ function newSidePath(line) {
 }
 
 // Added line numbers per new-side path, from a zero-context patch. Explicit
-// prefixes override diff.noprefix and diff.mnemonicPrefix in the repo config.
+// prefixes override diff.noprefix and diff.mnemonicPrefix in the repo config;
+// --text and --no-textconv keep .gitattributes from hiding or rewriting a hunk.
 function readAdded(root, base, specs) {
   const added = new Map();
-  const flags = ["-M", "--unified=0", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
+  const flags = ["-M", "--unified=0", "--text", "--no-textconv", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
   const patch = git(root, ["-c", "core.quotePath=false", "diff", ...flags, base, "--", ...specs]);
   let file = null;
   let line = 0;
