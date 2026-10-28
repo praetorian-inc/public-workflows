@@ -625,10 +625,10 @@ jobs:
 | `include-paths` | `""` (whole repo) | Newline-separated git pathspec globs that limit the scope |
 | `exclude-paths` | `""` | Newline-separated git pathspec globs removed from the scope |
 | `min-scanned-files` | `1` | Fails when fewer in-scope files are measured, so a wrong scope cannot pass vacuously |
-| `python-version` | `3.13` | Python for the Python extractor, installed with `actions/setup-python`. `ast` differs between versions, so the gate does not use the runner image's `python3` |
+| `python-version` | `3.13` | CPython `X.Y` or `X.Y.Z` for the Python extractor, installed with `actions/setup-python`. `ast` differs between versions, so the gate does not use the runner image's `python3`. The default is in the `ubuntu-24.04` toolcache; a version that is not needs the block-mode endpoints below |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
-| `harden-runner-allowed-endpoints` | `""` | Block mode needs at least `github.com:443`, `proxy.golang.org:443` and `registry.npmjs.org:443` |
+| `harden-runner-allowed-endpoints` | `""` | Block mode needs at least `github.com:443`, `proxy.golang.org:443` and `registry.npmjs.org:443`. A `python-version` not in the toolcache also needs `api.github.com:443`, `raw.githubusercontent.com:443`, `release-assets.githubusercontent.com:443`, `pypi.org:443` and `files.pythonhosted.org:443` |
 | `timeout-minutes` | `15` | Job timeout |
 
 **Outputs:** `violations` (error count), `warnings` (warning count), `base-sha` (the merge-base the PR was compared with).
