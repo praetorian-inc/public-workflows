@@ -6,8 +6,9 @@ Prints one JSON object mapping each path, as given, to
 {"functions": [{"name", "start", "end", "isComponent"}],
  "comments": [{"start", "end", "text"}], "error"?}.
 Comments are tokenize's COMMENT tokens, so `#` inside a string is not one.
-They are read in the declared encoding and, like ruff, as UTF-8; a file whose
-declared encoding adds or removes line breaks gets "error".
+They are read in the declared encoding, in the encoding flake8 and pylint
+detect on the raw bytes, and, like ruff, as UTF-8; a file whose declared
+encoding adds or removes line breaks gets "error".
 Parse-only: the sources are read and parsed with ast, never executed.
 """
 
@@ -80,20 +81,32 @@ def _declared(data, enc):
     return text
 
 
-def _views(data):
-    """Each text a linter may read: the declared encoding, and UTF-8 as ruff reads it.
+def _detect(data):
+    """detect_encoding on data, or None when it cannot detect one."""
+    try:
+        return tokenize.detect_encoding(io.BytesIO(data).readline)[0]
+    except SyntaxError:
+        return None
 
-    Raises ValueError when the declared encoding adds or removes line breaks.
+
+def _views(data, source):
+    """Each text a linter may read, all in data's (normalized) line numbering:
+    the declared encoding; the encoding flake8 and pylint detect on the raw
+    source, where a lone \\r does not end a line; and UTF-8 as ruff reads it.
+
+    Raises ValueError when a declared encoding adds or removes line breaks.
     """
     enc = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
-    declared = _declared(data, enc)
-    if enc in UTF8:
-        return [declared]
-    try:
-        utf8 = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return [declared]
-    return [declared] if utf8 == declared else [declared, utf8]
+    views = [_declared(data, enc)]
+    raw = _detect(source)
+    if raw not in (None, enc) and raw not in UTF8:
+        views.append(_declared(data, raw))
+    if enc not in UTF8:
+        try:
+            views.append(data.decode("utf-8"))
+        except UnicodeDecodeError:
+            pass
+    return list(dict.fromkeys(views))
 
 
 def _comments(source):
@@ -106,7 +119,7 @@ def _comments(source):
     data = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     found = {
         (tok.start[0], tok.end[0], tok.string)
-        for view in _views(data)
+        for view in _views(data, source)
         for tok in tokenize.generate_tokens(io.StringIO(view).readline)
         if tok.type == tokenize.COMMENT
     }

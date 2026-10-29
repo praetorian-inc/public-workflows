@@ -63,5 +63,39 @@ class EncodingViewsTest(unittest.TestCase):
         )
 
 
+class RawEncodingViewTest(unittest.TestCase):
+    """flake8 and pylint detect the cookie on raw bytes, where a lone CR is
+    not a line break, so a cookie on normalized line 3 still applies."""
+
+    def test_n1_cr_only_cookie_on_line_3_reports_raw_view_comment(self):
+        data = (
+            b"#!/usr/bin/env python\r# x\r# coding: utf-7\r"
+            b'import os; x = "+ACIAIw- noqa"\r'
+        )
+        entry = extract(self, data)
+        self.assertNotIn("error", entry)
+        self.assertIn((4, 4, '# noqa"'), spans(entry))
+
+    def test_n1_mixed_endings_cookie_reports_raw_view_comment(self):
+        data = b'#a\r#b\n# coding: utf-7\nimport os; x = "+ACIAIw- noqa"\n'
+        entry = extract(self, data)
+        self.assertNotIn("error", entry)
+        self.assertIn((4, 4, '# noqa"'), spans(entry))
+
+    def test_n1_raw_view_that_creates_a_line_fails(self):
+        data = b"#!/usr/bin/env python\r# x\r# coding: utf-7\rx = 1 +AAoAIw- noqa\r"
+        entry = extract(self, data)
+        self.assertIn("error", entry)
+        self.assertEqual(entry["comments"], [])
+
+    def test_n1_cr_only_latin1_cookie_on_line_1_is_not_failed(self):
+        data = "# coding: latin-1\rx = 1\r# café\r".encode("latin-1")
+        entry = extract(self, data)
+        self.assertNotIn("error", entry)
+        self.assertEqual(
+            spans(entry), [(1, 1, "# coding: latin-1"), (3, 3, "# café")]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
