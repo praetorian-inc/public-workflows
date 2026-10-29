@@ -1,5 +1,7 @@
 // Size-lint disable comments the gate refuses on an added line (LAB-7587).
 // The Go and ESLint forms are ported from guard#9602; the Python forms are new.
+import { gitLines, splitLines } from "./measure.mjs";
+
 const DISABLE = [
   /\/\/\s*nolint(?![\w:])/, // bare //nolint disables every linter, funlen and revive included
   /\/\/\s*nolint:[\w,\s-]*\b(funlen|revive|all)\b/,
@@ -66,30 +68,30 @@ function sizeDirective(value) {
   return SIZE_RULE.test(part) || (name !== "eslint" && part === name); // bare disable: every rule
 }
 
-// [first, last] line spans of the block comments that are size directives.
-// Every "/*" is tried, so one inside a string cannot swallow the real comment.
-function directiveSpans(text) {
-  const spans = [];
-  for (let i = text.indexOf("/*"); i !== -1; i = text.indexOf("/*", i + 2)) {
-    const end = text.indexOf("*/", i + 2);
-    if (end === -1) break;
-    if (!sizeDirective(text.slice(i + 2, end))) continue;
-    const first = text.slice(0, i).split("\n").length;
-    spans.push([first, first + text.slice(i, end).split("\n").length - 1]);
-  }
-  return spans;
-}
+const disables = (t) => silencesPylint(t) || DISABLE.some((re) => re.test(t));
 
-// The line numbers among added lines (Map line -> text) that carry one. With
-// the file's text, a multi-line directive counts once, at its first added line.
-export function bannedLines(added, text) {
+// The git line numbers among added lines (Map line -> text) that carry one,
+// read from the parser's comments of the file at path p, so a string is never
+// one. `text` is the file the comments were parsed from: their parser lines
+// become git's "\n" lines through it. A multi-line directive counts once, at
+// its first added line. Only ruff's regex reads what precedes a comment, so a
+// comment after code on its parser line gets "x " first.
+export function bannedLines(added, comments, p, text) {
   const lines = [...added.keys()].sort((a, b) => a - b);
-  const spans = directiveSpans(text ?? "");
+  const [g, src] = [gitLines(p, text), splitLines(p, text)];
   const hits = new Set();
-  for (const [n, t] of added) {
-    const span = spans.find(([a, b]) => a <= n && n <= b);
-    if (span) hits.add(lines.find((m) => m >= span[0]));
-    else if (silencesPylint(t) || DISABLE.some((re) => re.test(t))) hits.add(n);
+  for (const c of comments) {
+    if (c.text.startsWith("/*") && sizeDirective(c.text.slice(2, -2))) {
+      const first = lines.find((n) => g[c.start - 1] <= n && n <= g[c.end - 1]);
+      if (first !== undefined) hits.add(first);
+      continue;
+    }
+    splitLines(p, c.text).forEach((seg, k) => {
+      const n = g[c.start - 1 + k];
+      if (!added.has(n)) return;
+      const after = k === 0 && !/^\s*#/.test(src[c.start - 1]);
+      if (disables(after ? `x ${seg}` : seg)) hits.add(n);
+    });
   }
   return lines.filter((n) => hits.has(n));
 }

@@ -20,8 +20,16 @@ type function struct {
 	IsComponent bool   `json:"isComponent"`
 }
 
+// comment is one comment, delimiters included, on physical lines.
+type comment struct {
+	Start int    `json:"start"`
+	End   int    `json:"end"`
+	Text  string `json:"text"`
+}
+
 type fileResult struct {
 	Functions []function `json:"functions"`
+	Comments  []comment  `json:"comments"`
 	Error     string     `json:"error,omitempty"`
 }
 
@@ -51,13 +59,29 @@ func extract(paths []string) map[string]fileResult {
 
 func extractFile(path string) fileResult {
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution|parser.ParseComments)
 	if err != nil {
-		return fileResult{Functions: []function{}, Error: err.Error()}
+		return fileResult{Functions: []function{}, Comments: []comment{}, Error: err.Error()}
 	}
 	c := &collector{fset: fset, hints: map[*ast.FuncLit]string{}, functions: []function{}}
 	ast.Walk(&visitor{c: c}, file)
-	return fileResult{Functions: c.functions}
+	return fileResult{Functions: c.functions, Comments: comments(fset, file)}
+}
+
+// comments lists every comment in source order, one entry per comment (not
+// per group), on physical lines like the functions.
+func comments(fset *token.FileSet, file *ast.File) []comment {
+	out := []comment{}
+	for _, group := range file.Comments {
+		for _, c := range group.List {
+			out = append(out, comment{
+				Start: fset.PositionFor(c.Pos(), false).Line,
+				End:   fset.PositionFor(c.End(), false).Line,
+				Text:  c.Text,
+			})
+		}
+	}
+	return out
 }
 
 // collector accumulates functions in source order. hints maps a literal to

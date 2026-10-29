@@ -2,5 +2,11 @@
   "functions": [
     {"name": "Long", "start": 7, "end": 13, "isComponent": false},
     {"name": "After", "start": 15, "end": 16, "isComponent": false}
+  ],
+  "comments": [
+    {"start": 3, "end": 3, "text": "// A //line directive renumbers what fset.Position reports; the gate must"},
+    {"start": 4, "end": 4, "text": "// see the physical lines the file has (LAB-7587)."},
+    {"start": 6, "end": 6, "text": "//line other.go:1"},
+    {"start": 11, "end": 11, "text": "//line other.go:2"}
   ]
 }

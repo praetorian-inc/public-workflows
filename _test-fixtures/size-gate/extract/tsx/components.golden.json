@@ -6,5 +6,6 @@
     { "name": "useData", "start": 19, "end": 21, "isComponent": false },
     { "name": "List", "start": 23, "end": 26, "isComponent": false },
     { "name": "List>renderRow", "start": 24, "end": 24, "isComponent": true }
-  ]
+  ],
+  "comments": []
 }

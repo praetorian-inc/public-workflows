@@ -27,7 +27,7 @@ export function inScope(p) {
 export function isGenerated(text) {
   let inBlock = false;
   // Go ends lines at \n only and drops a trailing \r from comment text.
-  for (const line of text.split("\n", 200).map((l) => l.replace(/\r$/, ""))) {
+  for (const line of text.split("\n").map((l) => l.replace(/\r$/, ""))) {
     if (!inBlock && /^\/\/ Code generated .* DO NOT EDIT\.$/.test(line)) return true;
     let rest = line;
     if (inBlock) {

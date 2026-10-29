@@ -125,6 +125,14 @@ test("py: a base file that does not parse counts everything as new, with a warni
   assert.match(r.out, /new function `F` is 51 lines/);
 });
 
+test("py: a grandfathered function in a Latin-1 file keeps its allowance", () => {
+  const p = "src/a.py";
+  const latin1 = (tok) => Buffer.from(source("py", ["# -*- coding: latin-1 -*-"], fn("py", "café", 60, tok)), "latin1");
+  const r = check(repo("py", { [p]: latin1("0") }, { [p]: latin1("1") }));
+  assert.equal(r.code, 0, r.out);
+  assert.doesNotMatch(r.out, /did not parse at the merge-base/);
+});
+
 test("py N13: a new 60-line parenthesized lambda fails", () => {
   const p = "src/a.py";
   const lam = ["handler = (", "    lambda: [", ...Array(58).fill("        0,"), "    ]", ")"];

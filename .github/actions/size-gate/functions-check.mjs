@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { COMPONENT_MAX, FUNCTION_MAX } from "./config.mjs";
+import { bannedLines } from "./disable-ban.mjs";
 import { extractAll } from "./extract.mjs";
 import { showBlob } from "./git.mjs";
 import { matchFunctions } from "./match.mjs";
@@ -32,8 +33,10 @@ function sides(root, base, diff) {
       if (measured(p, text)) head.push({ file: p, origin: s.code === "A" ? null : s.from, text });
     }
     if (s.code !== "A") {
-      const text = showBlob(root, base, s.from);
-      if (measured(s.from, text)) old.push({ file: s.from, text });
+      // The extractor reads the original bytes, as it does a HEAD file.
+      const bytes = showBlob(root, base, s.from, "buffer");
+      const text = bytes?.toString("utf8") ?? null;
+      if (measured(s.from, text)) old.push({ file: s.from, text, bytes });
     }
   }
   return { head, old };
@@ -46,7 +49,7 @@ function extractSides(root, { head, old }, goExtractor) {
     head.forEach((h) => (h.abs = path.join(root, h.file)));
     old.forEach((b, i) => {
       b.abs = path.join(tmp, `${i}${path.extname(b.file)}`);
-      writeFileSync(b.abs, b.text);
+      writeFileSync(b.abs, b.bytes);
     });
     const out = extractAll([...head, ...old].map((x) => x.abs), goExtractor);
     for (const x of [...head, ...old]) Object.assign(x, out.get(x.abs));
@@ -87,6 +90,19 @@ function verdict(m) {
   return n > nb ? `${x} grew to ${n} lines; the limit is ${lim}` : `${x} is now ${n} lines; the limit is ${lim}`;
 }
 
+// Added lines that disable a size lint, read from each HEAD file's parsed
+// comments. A file that does not parse already fails with "cannot parse".
+function banErrors(head, diff) {
+  const errors = [];
+  for (const h of head) {
+    const added = diff.added.get(h.file);
+    if (h.error || !added) continue;
+    for (const line of bannedLines(added, h.comments, h.file, h.text))
+      errors.push({ file: h.file, line, msg: "adds a size-lint disable comment; split the code instead." });
+  }
+  return errors;
+}
+
 // { errors, warnings }, each a list of { file, line?, msg }.
 export function checkFunctions({ root, base, diff, goExtractor }) {
   const s = sides(root, base, diff);
@@ -98,6 +114,7 @@ export function checkFunctions({ root, base, diff, goExtractor }) {
     warnings.push({ file: b.file, msg: `did not parse at the merge-base (${b.error}); its functions are checked as new.` });
   for (const h of s.head.filter((h) => h.error))
     errors.push({ file: h.file, msg: `cannot parse: ${h.error}. Fix the syntax or exclude the path.` });
+  errors.push(...banErrors(s.head, diff));
   for (const m of matchFunctions(s.old, s.head.filter((h) => !h.error))) {
     const msg = verdict(m);
     if (msg) errors.push({ file: m.file, line: m.fn.start, msg });

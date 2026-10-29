@@ -11,6 +11,14 @@ const BREAK = { go: /\n/, py: /\r\n|\r|\n/, ts: TS_BREAK, tsx: TS_BREAK };
 
 export const splitLines = (p, t) => t.split(BREAK[language(p)] ?? /\n/);
 
+// g[i] is the git (\n) line of parser line i + 1, so g.length matches
+// splitLines: a parser break is a git break only when it holds "\n".
+export function gitLines(p, t) {
+  const g = [1];
+  for (const [b] of t.matchAll(new RegExp(BREAK[language(p)] ?? /\n/, "g"))) g.push(g.at(-1) + (b.includes("\n") ? 1 : 0));
+  return g;
+}
+
 // A last line without a trailing break still counts.
 export function lineCount(p, t) {
   const parts = splitLines(p, t);

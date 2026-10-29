@@ -1,0 +1,9 @@
+{
+  "functions": [
+    {"name": "F", "start": 8, "end": 10, "isComponent": false}
+  ],
+  "comments": [
+    {"start": 3, "end": 3, "text": "// real trailing"},
+    {"start": 6, "end": 7, "text": "/* a block\n   over three lines */"}
+  ]
+}

@@ -1,5 +1,5 @@
 // Run the per-language function extractors over a batch of files (LAB-7587).
-// One process per language; each prints {path: {functions, error?}} (plan §6).
+// One process per language; each prints {path: {functions, comments, error?}} (plan §6).
 // An extractor crash or invalid JSON throws: the gate fails closed (§5.5).
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -44,7 +44,7 @@ export function numberDuplicates(functions) {
 }
 
 // files: absolute paths, each with a gate language extension.
-// Returns Map(path -> { functions, error? }).
+// Returns Map(path -> { functions, comments, error? }); comments are [] on an error.
 export function extractAll(files, goExtractor) {
   const byLang = new Map();
   for (const f of files) {
@@ -58,7 +58,7 @@ export function extractAll(files, goExtractor) {
     for (const f of batch) {
       const r = out[f];
       if (!r || !Array.isArray(r.functions)) throw new Error(`the ${lang} extractor returned no result for ${f}`);
-      result.set(f, r.error ? { functions: [], error: r.error } : { functions: numberDuplicates(r.functions) });
+      result.set(f, r.error ? { functions: [], comments: [], error: r.error } : { functions: numberDuplicates(r.functions), comments: r.comments });
     }
   }
   return result;

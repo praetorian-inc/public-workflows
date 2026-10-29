@@ -6,5 +6,6 @@
     {"name": "S.Value", "start": 15, "end": 15, "isComponent": false},
     {"name": "assign", "start": 21, "end": 23, "isComponent": false},
     {"name": "assign>func:later", "start": 22, "end": 22, "isComponent": false}
-  ]
+  ],
+  "comments": []
 }
