@@ -173,6 +173,25 @@ class CommentTest(unittest.TestCase):
             ],
         )
 
+    def test_comment_lines_match_ast_for_every_line_ending(self):
+        lf = b"# head\ndef f():\n    # body\n    return 1\n"
+        endings = {
+            "cr": lf.replace(b"\n", b"\r"),
+            "crlf": lf.replace(b"\n", b"\r\n"),
+            "mixed": b"# head\r\ndef f():\r    # body\n    return 1\r",
+        }
+        for label, content in endings.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                source = write(directory, label + ".py", content)
+                out = run_extractor(self, source)[source]
+                self.assertNotIn("error", out)
+                self.assertEqual(
+                    [(c["start"], c["text"]) for c in out["comments"]],
+                    [(1, "# head"), (3, "# body")],
+                )
+                self.assertEqual(out["functions"][0]["start"], 2)
+                self.assertEqual(out["functions"][0]["end"], 4)
+
 
 class PerFileErrorTest(unittest.TestCase):
     def setUp(self):

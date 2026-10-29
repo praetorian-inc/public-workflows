@@ -67,13 +67,21 @@ def _collect(node, prefix, enclosing, hints, out):
 
 
 def _comments(source):
-    """Every comment in source order, as 1-based physical lines and raw text."""
-    tokens = tokenize.tokenize(io.BytesIO(source).readline)
-    return [
-        {"start": tok.start[0], "end": tok.end[0], "text": tok.string}
-        for tok in tokens
-        if tok.type == tokenize.COMMENT
-    ]
+    """Every comment in source order, as 1-based physical lines and raw text.
+
+    ast ends a line at \\r\\n, \\r or \\n, but tokenize reads \\n-split lines,
+    so endings are normalized first; on bytes, because PEP 263 encodings are
+    ASCII-compatible. A file ast accepted never fails here: [] instead.
+    """
+    lines = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    try:
+        return [
+            {"start": tok.start[0], "end": tok.end[0], "text": tok.string}
+            for tok in tokenize.tokenize(io.BytesIO(lines).readline)
+            if tok.type == tokenize.COMMENT
+        ]
+    except (SyntaxError, ValueError, RecursionError, tokenize.TokenError):
+        return []
 
 
 def extract_file(path):
@@ -85,9 +93,7 @@ def extract_file(path):
         functions = []
         _collect(tree, "", "", _lambda_hints(tree), functions)
         comments = _comments(source)
-    except (
-        OSError, SyntaxError, ValueError, RecursionError, tokenize.TokenError
-    ) as exc:
+    except (OSError, SyntaxError, ValueError, RecursionError) as exc:
         error = f"{type(exc).__name__}: {exc}"
         return {"functions": [], "comments": [], "error": error}
     return {"functions": functions, "comments": comments}
