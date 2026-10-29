@@ -48,7 +48,7 @@ export function checkFiles({ root, base, loc, diff, baseline, baseBaseline, base
   for (const [p, lines] of diff.added) {
     const n = loc.get(p);
     if (n === undefined) continue;
-    for (const line of bannedLines(lines))
+    for (const line of bannedLines(lines, readRegular(root, p)))
       errors.push({ file: p, line, msg: "adds a size-lint disable comment; split the code instead." });
     if (n > FILE_WARN && n <= FILE_MAX)
       warnings.push({ file: p, msg: `is ${n} lines, over the ${FILE_WARN}-line soft limit (hard limit ${FILE_MAX}).` });
