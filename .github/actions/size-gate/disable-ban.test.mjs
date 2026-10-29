@@ -2,12 +2,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { bannedLines } from "./disable-ban.mjs";
+import { splitLines } from "./measure.mjs";
 import { check, file, makeRepo, run } from "./scenario-kit.mjs";
 
-const banned = (text) => bannedLines(new Map([[1, text]])).length === 1;
-// A whole file's lines added, or only line `only` (an inner-line edit).
-const bannedIn = (text, only) =>
-  bannedLines(new Map(text.split("\n").map((t, i) => [i + 1, t]).filter(([n]) => only === undefined || n === only)), text);
+// Each case is one comment, split by its path: .ts for /* */, .py for #, .go otherwise.
+const pathFor = (t) => (t.startsWith("/*") ? "a.ts" : t.startsWith("#") ? "a.py" : "a.go");
+const banned = (text, comment = text) => bannedLines(new Map([[1, text]]), [{ start: 1, end: 1, text: comment }], pathFor(comment), text).length === 1;
+// A block comment with every line added, or only line `only` (an inner-line edit).
+const bannedIn = (text, only, lines = splitLines("a.ts", text)) =>
+  bannedLines(new Map(lines.map((t, i) => [i + 1, t]).filter(([n]) => only === undefined || n === only)), [{ start: 1, end: lines.length, text }], "a.ts", text);
 
 test("D1: every banned form, one per pattern", () => {
   for (const t of [
@@ -90,7 +93,6 @@ test("D1: a multi-line ESLint directive fails at its first added line", () => {
     "/* eslint-disable\n max-lines-per-function */",
   ])
     assert.deepEqual(bannedIn(t), [1], t);
-  assert.deepEqual(bannedIn('a\nconst s = "/*";\n/* eslint\n max-lines: off */\nb'), [3]);
 });
 
 test("D1: editing only an inner line of a multi-line ESLint directive fails at that line", () => {
@@ -113,13 +115,13 @@ test("D2: suppressions of non-size rules pass", () => {
     "# ruff: disable[PLR09]",
     "# ruff: disable[plr0915]",
     "# RUFF: disable[PLR0915]",
-    "x = 1  # ruff: disable[PLR0915]", // own-line comments only
+    ["x = 1  # ruff: disable[PLR0915]", "# ruff: disable[PLR0915]"], // own-line comments only
     "# ruff: disable[PLR0915 E501]",
     "# ruff: disable[E501] # ruff: disable[PLR0915]",
     "// eslint max-lines-per-function: off",
     "/** eslint max-lines-per-function: off */",
   ])
-    assert.equal(banned(t), false, t);
+    assert.equal(banned(...[t].flat()), false, t);
 });
 
 test("D2: pylint pragmas that do not silence a size message pass", () => {
@@ -167,7 +169,8 @@ test("D2: multi-line comments ESLint does not read as a size directive pass", ()
 });
 
 test("bannedLines returns the line numbers", () => {
-  assert.deepEqual(bannedLines(new Map([[3, "a"], [7, "x  # noqa"], [9, "//nolint"]])), [7, 9]);
+  const comments = [{ start: 7, end: 7, text: "# noqa" }, { start: 9, end: 9, text: "//nolint" }];
+  assert.deepEqual(bannedLines(new Map([[3, "a"], [7, "x  # noqa"], [9, "//nolint"]]), comments, "a.py", "\n".repeat(6) + "x  # noqa\n\n//nolint\n"), [7, 9]);
 });
 
 test("D1/D2 end to end: an added banned comment fails at its line; a coded noqa passes", () => {

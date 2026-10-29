@@ -15,5 +15,6 @@
     {"name": "sort_keys", "start": 47, "end": 48, "isComponent": false},
     {"name": "sort_keys>lambda:anon", "start": 48, "end": 48, "isComponent": false},
     {"name": "lambda:typed", "start": 51, "end": 51, "isComponent": false}
-  ]
+  ],
+  "comments": []
 }

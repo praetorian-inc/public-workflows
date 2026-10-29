@@ -3,15 +3,24 @@
 Usage: python3 -I extract_py.py <file>...
 
 Prints one JSON object mapping each path, as given, to
-{"functions": [{"name", "start", "end", "isComponent"}], "error"?}.
+{"functions": [{"name", "start", "end", "isComponent"}],
+ "comments": [{"start", "end", "text"}], "error"?}.
+Comments are tokenize's COMMENT tokens, so `#` inside a string is not one.
+They are read in the declared encoding, in the encoding flake8 and pylint
+detect on the raw bytes, and, like ruff, as UTF-8; a file whose declared
+or raw-detected encoding adds or removes line breaks gets "error". A
+raw-detected encoding that cannot decode the file adds no view.
 Parse-only: the sources are read and parsed with ast, never executed.
 """
 
 import ast
+import io
 import json
 import sys
+import tokenize
 
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+UTF8 = ("utf-8", "utf-8-sig")
 
 
 def _start_line(node):
@@ -62,6 +71,69 @@ def _collect(node, prefix, enclosing, hints, out):
             _collect(child, prefix, enclosing, hints, out)
 
 
+def _declared(data, enc):
+    """data decoded in enc, refusing a codec that adds or removes line breaks."""
+    text = data.decode(enc)
+    if enc in UTF8:
+        return text
+    try:
+        pieces = [line.decode(enc) for line in data.split(b"\n")]
+    except UnicodeDecodeError as exc:
+        raise ValueError("declared encoding moves line breaks") from exc
+    if "\n".join(pieces) != text or any("\r" in p or "\n" in p for p in pieces):
+        raise ValueError("declared encoding moves line breaks")
+    return text
+
+
+def _detect(data):
+    """detect_encoding on data, or None when it cannot detect one."""
+    try:
+        return tokenize.detect_encoding(io.BytesIO(data).readline)[0]
+    except SyntaxError:
+        return None
+
+
+def _views(data, source):
+    """Each text a linter may read, all in data's (normalized) line numbering:
+    the declared encoding; the encoding flake8 and pylint detect on the raw
+    source, where a lone \\r does not end a line; and UTF-8 as ruff reads it.
+
+    Raises ValueError when the declared or raw-detected encoding adds or
+    removes line breaks; a raw-detected one that cannot decode adds no view.
+    """
+    enc = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
+    views = [_declared(data, enc)]
+    raw = _detect(source)
+    if raw not in (None, enc) and raw not in UTF8:
+        try:
+            views.append(_declared(data, raw))
+        except UnicodeDecodeError:
+            pass  # pylint and flake8 refuse it too, so it hides no pragma
+    if enc not in UTF8:
+        try:
+            views.append(data.decode("utf-8"))
+        except UnicodeDecodeError:
+            pass
+    return list(dict.fromkeys(views))
+
+
+def _comments(source):
+    """Every comment in every view, in source order, as 1-based lines and raw text.
+
+    ast ends a line at \\r\\n, \\r or \\n, but tokenize reads \\n-split lines,
+    so endings are normalized first. That is done on bytes because CPython's
+    tokenizer normalizes line endings on bytes before it decodes.
+    """
+    data = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    found = {
+        (tok.start[0], tok.end[0], tok.string)
+        for view in _views(data, source)
+        for tok in tokenize.generate_tokens(io.StringIO(view).readline)
+        if tok.type == tokenize.COMMENT
+    }
+    return [{"start": s, "end": e, "text": t} for s, e, t in sorted(found)]
+
+
 def extract_file(path):
     """Return the per-file result for one path; errors never raise."""
     try:
@@ -70,9 +142,11 @@ def extract_file(path):
         tree = ast.parse(source, filename=path)
         functions = []
         _collect(tree, "", "", _lambda_hints(tree), functions)
-    except (OSError, SyntaxError, ValueError, RecursionError) as exc:
-        return {"functions": [], "error": f"{type(exc).__name__}: {exc}"}
-    return {"functions": functions}
+        comments = _comments(source)
+    except (OSError, SyntaxError, ValueError, RecursionError, tokenize.TokenError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        return {"functions": [], "comments": [], "error": error}
+    return {"functions": functions, "comments": comments}
 
 
 def main(argv):

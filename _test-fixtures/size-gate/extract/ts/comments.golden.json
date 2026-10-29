@@ -1,0 +1,8 @@
+{
+  "functions": [],
+  "comments": [
+    { "start": 2, "end": 2, "text": "// real" },
+    { "start": 5, "end": 6, "text": "/* a block\n   over two lines */" },
+    { "start": 7, "end": 7, "text": "/* tail */" }
+  ]
+}

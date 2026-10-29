@@ -164,10 +164,11 @@ export function readDiff(root, base, specs) {
   return { status, added, renames, atBase };
 }
 
-// A file's text at a ref, or null when the ref has no such file.
-export function showBlob(root, ref, p) {
+// A file's text at a ref, or null when the ref has no such file. Pass
+// encoding "buffer" for its raw bytes.
+export function showBlob(root, ref, p, encoding = "utf8") {
   try {
-    return git(root, ["show", `${ref}:${p}`], { stdio: ["ignore", "pipe", "ignore"] });
+    return git(root, ["show", `${ref}:${p}`], { encoding, stdio: ["ignore", "pipe", "ignore"] });
   } catch {
     return null;
   }

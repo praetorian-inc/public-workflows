@@ -11,5 +11,9 @@
     {"name": "Outer>func:run>func:inner", "start": 32, "end": 32, "isComponent": false},
     {"name": "Outer>func:anon", "start": 35, "end": 35, "isComponent": false},
     {"name": "run", "start": 38, "end": 38, "isComponent": false}
+  ],
+  "comments": [
+    {"start": 5, "end": 5, "text": "// Plain is a doc-commented function."},
+    {"start": 6, "end": 6, "text": "// Its start is the func line, not this comment."}
   ]
 }
