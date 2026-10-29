@@ -3,13 +3,17 @@
 Usage: python3 -I extract_py.py <file>...
 
 Prints one JSON object mapping each path, as given, to
-{"functions": [{"name", "start", "end", "isComponent"}], "error"?}.
+{"functions": [{"name", "start", "end", "isComponent"}],
+ "comments": [{"start", "end", "text"}], "error"?}.
+Comments are tokenize's COMMENT tokens, so `#` inside a string is not one.
 Parse-only: the sources are read and parsed with ast, never executed.
 """
 
 import ast
+import io
 import json
 import sys
+import tokenize
 
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -62,6 +66,16 @@ def _collect(node, prefix, enclosing, hints, out):
             _collect(child, prefix, enclosing, hints, out)
 
 
+def _comments(source):
+    """Every comment in source order, as 1-based physical lines and raw text."""
+    tokens = tokenize.tokenize(io.BytesIO(source).readline)
+    return [
+        {"start": tok.start[0], "end": tok.end[0], "text": tok.string}
+        for tok in tokens
+        if tok.type == tokenize.COMMENT
+    ]
+
+
 def extract_file(path):
     """Return the per-file result for one path; errors never raise."""
     try:
@@ -70,9 +84,13 @@ def extract_file(path):
         tree = ast.parse(source, filename=path)
         functions = []
         _collect(tree, "", "", _lambda_hints(tree), functions)
-    except (OSError, SyntaxError, ValueError, RecursionError) as exc:
-        return {"functions": [], "error": f"{type(exc).__name__}: {exc}"}
-    return {"functions": functions}
+        comments = _comments(source)
+    except (
+        OSError, SyntaxError, ValueError, RecursionError, tokenize.TokenError
+    ) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        return {"functions": [], "comments": [], "error": error}
+    return {"functions": functions, "comments": comments}
 
 
 def main(argv):

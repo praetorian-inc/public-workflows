@@ -21,7 +21,8 @@ FIXTURES = os.path.normpath(
 
 GOOD_SOURCE = "def good():\n    return 1\n"
 GOOD_ENTRY = {
-    "functions": [{"name": "good", "start": 1, "end": 2, "isComponent": False}]
+    "functions": [{"name": "good", "start": 1, "end": 2, "isComponent": False}],
+    "comments": [],
 }
 
 
@@ -130,6 +131,49 @@ class LambdaTest(unittest.TestCase):
         )
 
 
+COMMENT_SOURCE = """\
+#!/usr/bin/env python3
+# coding: utf-8
+x = 1  # noqa: E501
+text = '# noqa'
+msg = f"{x!r} # no"
+nested = f"{'# not either'}"
+doc = \"\"\"
+# pylint: disable=R0915
+\"\"\"
+    # pylint: disable=too-many-statements
+"""
+
+
+class CommentTest(unittest.TestCase):
+    def test_only_real_comments_are_reported_with_their_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = write(directory, "comments.py", COMMENT_SOURCE)
+            out = run_extractor(self, source)
+        self.assertEqual(
+            out[source]["comments"],
+            [
+                {"start": 1, "end": 1, "text": "#!/usr/bin/env python3"},
+                {"start": 2, "end": 2, "text": "# coding: utf-8"},
+                {"start": 3, "end": 3, "text": "# noqa: E501"},
+                {"start": 10, "end": 10, "text": "# pylint: disable=too-many-statements"},
+            ],
+        )
+
+    def test_declared_latin1_source_reports_its_comments(self):
+        latin1 = b"# -*- coding: latin-1 -*-\nname = 'caf\xe9'  # caf\xe9\n"
+        with tempfile.TemporaryDirectory() as directory:
+            source = write(directory, "latin1.py", latin1)
+            out = run_extractor(self, source)
+        self.assertEqual(
+            out[source]["comments"],
+            [
+                {"start": 1, "end": 1, "text": "# -*- coding: latin-1 -*-"},
+                {"start": 2, "end": 2, "text": "# caf\u00e9"},
+            ],
+        )
+
+
 class PerFileErrorTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -141,6 +185,7 @@ class PerFileErrorTest(unittest.TestCase):
 
     def assert_error_entry(self, entry):
         self.assertEqual(entry["functions"], [])
+        self.assertEqual(entry["comments"], [])
         self.assertIsInstance(entry.get("error"), str)
         self.assertNotEqual(entry["error"].strip(), "")
 
