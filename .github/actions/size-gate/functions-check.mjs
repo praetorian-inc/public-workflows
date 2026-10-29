@@ -32,8 +32,10 @@ function sides(root, base, diff) {
       if (measured(p, text)) head.push({ file: p, origin: s.code === "A" ? null : s.from, text });
     }
     if (s.code !== "A") {
-      const text = showBlob(root, base, s.from);
-      if (measured(s.from, text)) old.push({ file: s.from, text });
+      // The extractor reads the original bytes, as it does a HEAD file.
+      const bytes = showBlob(root, base, s.from, "buffer");
+      const text = bytes?.toString("utf8") ?? null;
+      if (measured(s.from, text)) old.push({ file: s.from, text, bytes });
     }
   }
   return { head, old };
@@ -46,7 +48,7 @@ function extractSides(root, { head, old }, goExtractor) {
     head.forEach((h) => (h.abs = path.join(root, h.file)));
     old.forEach((b, i) => {
       b.abs = path.join(tmp, `${i}${path.extname(b.file)}`);
-      writeFileSync(b.abs, b.text);
+      writeFileSync(b.abs, b.bytes);
     });
     const out = extractAll([...head, ...old].map((x) => x.abs), goExtractor);
     for (const x of [...head, ...old]) Object.assign(x, out.get(x.abs));
