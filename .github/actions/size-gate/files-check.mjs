@@ -1,10 +1,10 @@
 // The file rule (LAB-7587): new files over 300 lines fail, unbaselined files
 // over 300 fail, the baseline ratchet holds, and added or changed files over
-// 200 lines warn, and added lines may not disable size lints. Ported from guard#9602's check().
+// 200 lines warn. Ported from guard#9602's check(); the disable-comment ban
+// reads parsed comments, so it lives in functions-check.mjs.
 // A hand-written file may not exempt itself by gaining a generated header.
 import { FILE_MAX, FILE_WARN } from "./config.mjs";
 import { oversized, ratchet } from "./baseline.mjs";
-import { bannedLines } from "./disable-ban.mjs";
 import { showBlob } from "./git.mjs";
 import { readRegular } from "./measure.mjs";
 import { exemptByText, inScope } from "./scope.mjs";
@@ -45,11 +45,8 @@ export function checkFiles({ root, base, loc, diff, baseline, baseBaseline, base
   ];
   const errors = pairs.map(([file, msg]) => ({ file, msg }));
   const warnings = [];
-  for (const [p, lines] of diff.added) {
+  for (const p of diff.added.keys()) {
     const n = loc.get(p);
-    if (n === undefined) continue;
-    for (const line of bannedLines(lines, readRegular(root, p)))
-      errors.push({ file: p, line, msg: "adds a size-lint disable comment; split the code instead." });
     if (n > FILE_WARN && n <= FILE_MAX)
       warnings.push({ file: p, msg: `is ${n} lines, over the ${FILE_WARN}-line soft limit (hard limit ${FILE_MAX}).` });
   }
