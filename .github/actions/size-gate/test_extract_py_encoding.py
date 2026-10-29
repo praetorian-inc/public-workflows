@@ -96,6 +96,18 @@ class RawEncodingViewTest(unittest.TestCase):
             spans(entry), [(1, 1, "# coding: latin-1"), (3, 3, "# café")]
         )
 
+    def test_n1_raw_cookie_codec_that_cannot_decode_is_not_failed(self):
+        data = '#!/usr/bin/env python\rs = "café"\r# coding: ascii\r'.encode("utf-8")
+        entry = extract(self, data)
+        self.assertNotIn("error", entry)
+        self.assertIn((1, 1, "#!/usr/bin/env python"), spans(entry))
+
+    def test_n1_cr_only_cookie_below_code_reports_raw_view_comment(self):
+        data = b'#!/usr/bin/env python\rimport os; x = "+ACIAIw- noqa"\r# coding: utf-7\r'
+        entry = extract(self, data)
+        self.assertNotIn("error", entry)
+        self.assertIn((2, 2, '# noqa"'), spans(entry))
+
 
 if __name__ == "__main__":
     unittest.main()

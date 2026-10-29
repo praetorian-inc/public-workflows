@@ -8,7 +8,8 @@ Prints one JSON object mapping each path, as given, to
 Comments are tokenize's COMMENT tokens, so `#` inside a string is not one.
 They are read in the declared encoding, in the encoding flake8 and pylint
 detect on the raw bytes, and, like ruff, as UTF-8; a file whose declared
-encoding adds or removes line breaks gets "error".
+or raw-detected encoding adds or removes line breaks gets "error". A
+raw-detected encoding that cannot decode the file adds no view.
 Parse-only: the sources are read and parsed with ast, never executed.
 """
 
@@ -75,7 +76,10 @@ def _declared(data, enc):
     text = data.decode(enc)
     if enc in UTF8:
         return text
-    pieces = [line.decode(enc) for line in data.split(b"\n")]
+    try:
+        pieces = [line.decode(enc) for line in data.split(b"\n")]
+    except UnicodeDecodeError as exc:
+        raise ValueError("declared encoding moves line breaks") from exc
     if "\n".join(pieces) != text or any("\r" in p or "\n" in p for p in pieces):
         raise ValueError("declared encoding moves line breaks")
     return text
@@ -94,13 +98,17 @@ def _views(data, source):
     the declared encoding; the encoding flake8 and pylint detect on the raw
     source, where a lone \\r does not end a line; and UTF-8 as ruff reads it.
 
-    Raises ValueError when a declared encoding adds or removes line breaks.
+    Raises ValueError when the declared or raw-detected encoding adds or
+    removes line breaks; a raw-detected one that cannot decode adds no view.
     """
     enc = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
     views = [_declared(data, enc)]
     raw = _detect(source)
     if raw not in (None, enc) and raw not in UTF8:
-        views.append(_declared(data, raw))
+        try:
+            views.append(_declared(data, raw))
+        except UnicodeDecodeError:
+            pass  # pylint and flake8 refuse it too, so it hides no pragma
     if enc not in UTF8:
         try:
             views.append(data.decode("utf-8"))
