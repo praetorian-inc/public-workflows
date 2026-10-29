@@ -1,0 +1,9 @@
+{
+  "name": "size-gate",
+  "private": true,
+  "type": "module",
+  "description": "Shared file and function size gate (LAB-7587)",
+  "dependencies": {
+    "typescript": "5.9.3"
+  }
+}

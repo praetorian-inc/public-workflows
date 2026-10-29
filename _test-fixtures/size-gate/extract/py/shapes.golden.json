@@ -1,0 +1,19 @@
+{
+  "functions": [
+    {"name": "lambda:square", "start": 3, "end": 3, "isComponent": false},
+    {"name": "plain", "start": 6, "end": 7, "isComponent": false},
+    {"name": "fetch", "start": 10, "end": 11, "isComponent": false},
+    {"name": "decorated", "start": 14, "end": 17, "isComponent": false},
+    {"name": "Widget.method", "start": 21, "end": 25, "isComponent": false},
+    {"name": "Widget.method.<locals>.helper", "start": 22, "end": 23, "isComponent": false},
+    {"name": "Widget.size", "start": 27, "end": 29, "isComponent": false},
+    {"name": "Widget.load", "start": 31, "end": 32, "isComponent": false},
+    {"name": "outer", "start": 35, "end": 44, "isComponent": false},
+    {"name": "outer.<locals>.inner", "start": 36, "end": 38, "isComponent": false},
+    {"name": "outer.<locals>.inner>lambda:handler", "start": 37, "end": 37, "isComponent": false},
+    {"name": "outer.<locals>.Local.km", "start": 41, "end": 42, "isComponent": false},
+    {"name": "sort_keys", "start": 47, "end": 48, "isComponent": false},
+    {"name": "sort_keys>lambda:anon", "start": 48, "end": 48, "isComponent": false},
+    {"name": "lambda:typed", "start": 51, "end": 51, "isComponent": false}
+  ]
+}

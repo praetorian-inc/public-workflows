@@ -1,0 +1,15 @@
+{
+  "functions": [
+    {"name": "Plain", "start": 7, "end": 9, "isComponent": false},
+    {"name": "S.Ptr", "start": 15, "end": 15, "isComponent": false},
+    {"name": "T.Gen", "start": 17, "end": 19, "isComponent": false},
+    {"name": "func:handler", "start": 21, "end": 22, "isComponent": false},
+    {"name": "Outer", "start": 24, "end": 36, "isComponent": false},
+    {"name": "Outer>func:cb", "start": 25, "end": 27, "isComponent": false},
+    {"name": "Outer>func:sort.Slice", "start": 28, "end": 30, "isComponent": false},
+    {"name": "Outer>func:run", "start": 31, "end": 34, "isComponent": false},
+    {"name": "Outer>func:run>func:inner", "start": 32, "end": 32, "isComponent": false},
+    {"name": "Outer>func:anon", "start": 35, "end": 35, "isComponent": false},
+    {"name": "run", "start": 38, "end": 38, "isComponent": false}
+  ]
+}

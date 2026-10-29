@@ -1,0 +1,21 @@
+{
+  "functions": [
+    { "name": "plain", "start": 1, "end": 3, "isComponent": false },
+    { "name": "over", "start": 7, "end": 9, "isComponent": false },
+    { "name": "Svc.handler", "start": 14, "end": 16, "isComponent": false },
+    { "name": "Svc.constructor", "start": 18, "end": 20, "isComponent": false },
+    { "name": "Svc.run", "start": 22, "end": 26, "isComponent": false },
+    { "name": "Svc.run>inner", "start": 24, "end": 24, "isComponent": false },
+    { "name": "get Svc.size", "start": 28, "end": 30, "isComponent": false },
+    { "name": "set Svc.size", "start": 32, "end": 34, "isComponent": false },
+    { "name": "Svc.abstractish", "start": 37, "end": 37, "isComponent": false },
+    { "name": "api.fetch", "start": 41, "end": 43, "isComponent": false },
+    { "name": "api.load", "start": 44, "end": 46, "isComponent": false },
+    { "name": "Outer", "start": 49, "end": 57, "isComponent": false },
+    { "name": "Outer>inner", "start": 50, "end": 52, "isComponent": false },
+    { "name": "Outer>map", "start": 53, "end": 53, "isComponent": false },
+    { "name": "Outer>setTimeout", "start": 54, "end": 54, "isComponent": false },
+    { "name": "Outer>setTimeout", "start": 55, "end": 55, "isComponent": false },
+    { "name": "default", "start": 59, "end": 59, "isComponent": false }
+  ]
+}

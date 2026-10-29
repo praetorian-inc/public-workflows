@@ -1,0 +1,218 @@
+name: Size gate (Callable)
+# Shared file and function size gate for Go, TypeScript/TSX and Python
+# (LAB-7587). Files: 300 lines, with a ratcheting baseline for legacy files.
+# Functions: 50 lines (150 for a TSX component), checked only for functions a
+# PR adds or changes; a function that was already over at the merge-base is
+# grandfathered at its base length. Rules and the baseline recipe are in the
+# README under `size-gate.yml`.
+#
+# Caller template:
+#
+#   on:
+#     pull_request:        # no branches: filter, so stacked PRs are gated too
+#     push:
+#       branches: [main]
+#     workflow_dispatch:
+#   permissions:
+#     contents: read
+#   jobs:
+#     size:
+#       uses: praetorian-inc/public-workflows/.github/workflows/size-gate.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#       with:
+#         baseline-path: .github/size-baseline.json
+#
+# Failure policy: the gate fails closed. A failed checkout, toolchain setup,
+# npm ci, extractor crash, unparseable HEAD file or an unmet
+# min-scanned-files floor is a red job, never a silent pass.
+
+on:
+  workflow_call:
+    inputs:
+      baseline-path:
+        description: "Baseline JSON in the caller repo, relative to its root."
+        required: false
+        type: string
+        default: ".github/size-baseline.json"
+
+      include-paths:
+        description: "Newline-separated git pathspec globs that limit the scope. Empty means the whole repo."
+        required: false
+        type: string
+        default: ""
+
+      exclude-paths:
+        description: "Newline-separated git pathspec globs removed from the scope."
+        required: false
+        type: string
+        default: ""
+
+      min-scanned-files:
+        description: "Fail when fewer in-scope files than this are measured (the scope is wrong)."
+        required: false
+        type: number
+        default: 1
+
+      python-version:
+        description: "Python version for the Python extractor (its ast module parses the caller's .py files)."
+        required: false
+        type: string
+        default: "3.13"
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+      harden-runner-allowed-endpoints:
+        description: "Newline-separated allowed endpoints for block mode. Recommended for block mode: github.com:443, api.github.com:443, raw.githubusercontent.com:443, release-assets.githubusercontent.com:443, nodejs.org:443, go.dev:443, dl.google.com:443, registry.npmjs.org:443."
+        required: false
+        type: string
+        default: ""
+
+      timeout-minutes:
+        description: "Job timeout in minutes."
+        required: false
+        type: number
+        default: 15
+
+    outputs:
+      violations:
+        description: "Number of ::error annotations the gate emitted."
+        value: ${{ jobs.size.outputs.violations }}
+      warnings:
+        description: "Number of ::warning annotations the gate emitted."
+        value: ${{ jobs.size.outputs.warnings }}
+      base-sha:
+        description: "The merge-base commit the PR was compared with."
+        value: ${{ jobs.size.outputs.base-sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  size:
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    outputs:
+      violations: ${{ steps.check.outputs.violations }}
+      warnings: ${{ steps.check.outputs.warnings }}
+      base-sha: ${{ steps.check.outputs.base-sha }}
+    steps:
+      - name: Harden Runner
+        if: ${{ inputs.enable-harden-runner }}
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
+          disable-sudo-and-containers: true
+
+      - name: Clear _pw
+        run: rm -rf _pw
+
+      # The caller goes into repo/, not the workspace root: the untracked-file
+      # listing would otherwise pick up _pw/. Full history so the merge-base
+      # with the PR base resolves.
+      - name: Checkout caller
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The gate sources at THIS reusable's commit. github.workflow_sha is the
+      # caller's commit and would 404 against public-workflows. No
+      # continue-on-error: without the gate there is no check (fail closed).
+      - name: Checkout gate (same SHA as this reusable)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: _pw
+          persist-credentials: false
+
+      # An empty job.workflow_sha would let checkout fall back to the default
+      # branch and gate with the wrong code, so prove the commit (A01).
+      - name: Verify gate checkout matches job.workflow_sha
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "$WORKFLOW_SHA" ]; then
+            echo "::error::job.workflow_sha is empty; cannot verify the size-gate checkout"
+            exit 1
+          fi
+          got="$(git -C _pw rev-parse HEAD)"
+          if [ "$got" != "$WORKFLOW_SHA" ]; then
+            echo "::error::size-gate checkout is ${got}, expected job.workflow_sha ${WORKFLOW_SHA}"
+            exit 1
+          fi
+          echo "size-gate checkout verified at ${got}"
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c  # v6.4.0
+        with:
+          go-version-file: _pw/.github/actions/size-gate/extract-go/go.mod
+          cache: false
+
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      # The extractor runs bare `python3` from PATH, so prove PATH resolves to
+      # the interpreter setup-python installed, not the runner image's.
+      - name: Verify python3 is the pinned interpreter
+        shell: bash
+        env:
+          WANT_PYTHON: ${{ steps.python.outputs.python-version }}
+        run: |
+          set -euo pipefail
+          got="$(python3 -I -c 'import platform; print(platform.python_version())')"
+          if [ "$got" != "$WANT_PYTHON" ]; then
+            echo "::error::python3 on PATH is ${got}, expected ${WANT_PYTHON} from setup-python"
+            exit 1
+          fi
+          echo "python3 is ${got}"
+
+      - name: Install the TypeScript parser
+        run: npm ci --ignore-scripts --prefix _pw/.github/actions/size-gate
+
+      - name: Build the Go extractor
+        shell: bash
+        working-directory: _pw/.github/actions/size-gate/extract-go
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/extract-go" .
+          echo "SIZE_GATE_GO_EXTRACTOR=$RUNNER_TEMP/extract-go" >> "$GITHUB_ENV"
+
+      - name: Check sizes
+        id: check
+        shell: bash
+        env:
+          SIZE_GATE_BASELINE: ${{ inputs.baseline-path }}
+          SIZE_GATE_INCLUDE: ${{ inputs.include-paths }}
+          SIZE_GATE_EXCLUDE: ${{ inputs.exclude-paths }}
+          SIZE_GATE_MIN_SCANNED: ${{ inputs.min-scanned-files }}
+          SIZE_GATE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+          SIZE_GATE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          node _pw/.github/actions/size-gate/cli.mjs check --root repo

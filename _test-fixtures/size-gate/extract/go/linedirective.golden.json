@@ -1,0 +1,6 @@
+{
+  "functions": [
+    {"name": "Long", "start": 7, "end": 13, "isComponent": false},
+    {"name": "After", "start": 15, "end": 16, "isComponent": false}
+  ]
+}

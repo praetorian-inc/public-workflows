@@ -593,6 +593,73 @@ Nerva (workspace mode off) also passes `gowork: "off"`.
 
 **Notes:** the caller preserves its own `concurrency` group and `permissions` model — this workflow only requires `contents: read`. No `paths:` filter on `on:` (docs-only PRs skip the repo's ci.yml; the drift gate is exactly what docs-only PRs must not skip). No `branches:` filter on `pull_request` — `on.pull_request.branches` matches the BASE, so `branches: [main]` would skip stacked PRs.
 
+### `size-gate.yml` — file and function size gate (callable) (LAB-7587)
+
+Fails a PR that makes Go, TypeScript/TSX or Python code too large. It applies one rule set to every language; there are no per-language lint configs to keep in step. Files are capped at 300 lines, with a ratcheting baseline for legacy files. Functions are capped at 50 lines, or 150 for a TSX component, and only the functions a PR adds or changes are checked. The gate fails closed: a failed checkout, toolchain setup, `npm ci`, extractor crash, malformed baseline, unresolvable in-scope symlink, unparseable HEAD file (any parse diagnostic, in every language) or unmet `min-scanned-files` floor turns the job red.
+
+**Minimal caller:**
+
+```yaml
+name: Size Gate
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  size:
+    uses: praetorian-inc/public-workflows/.github/workflows/size-gate.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+    with:
+      baseline-path: .github/size-baseline.json
+```
+
+**Inputs:**
+
+| Input | Default | Purpose |
+|---|---|---|
+| `baseline-path` | `.github/size-baseline.json` | Baseline file in the caller repo. A missing file is an empty baseline. When the merge-base has no baseline, each entry must name a file that existed at the merge-base (or was renamed from one), at no more than its merge-base length |
+| `include-paths` | `""` (whole repo) | Newline-separated git pathspec globs that limit the scope |
+| `exclude-paths` | `""` | Newline-separated git pathspec globs removed from the scope |
+| `min-scanned-files` | `1` | Fails when fewer in-scope files are measured, so a wrong scope cannot pass vacuously |
+| `python-version` | `3.13` | CPython `X.Y` or `X.Y.Z` for the Python extractor, installed with `actions/setup-python`. `ast` differs between versions, so the gate does not use the runner image's `python3`. The default is in the `ubuntu-24.04` toolcache; a version that is not needs the block-mode endpoints below |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block` |
+| `harden-runner-allowed-endpoints` | `""` | Newline-separated allowed endpoints for block mode. Recommended for block mode: `github.com:443`, `api.github.com:443`, `raw.githubusercontent.com:443`, `release-assets.githubusercontent.com:443`, `nodejs.org:443`, `go.dev:443`, `dl.google.com:443`, `registry.npmjs.org:443` |
+| `timeout-minutes` | `15` | Job timeout |
+
+**Outputs:** `violations` (error count), `warnings` (warning count), `base-sha` (the merge-base the PR was compared with).
+
+**Rules:**
+
+- **Scope.** `.go`, `.ts`, `.tsx` and `.py` files, narrowed by `include-paths` and `exclude-paths`. Tests are exempt (`_test.go`, `.test.ts(x)`, `.spec.ts(x)`, `test_*.py`, `*_test.py`, `conftest.py`, and `tests/`, `testdata/`, `fixtures/`, `__tests__/` directories). Also exempt: `.d.ts`, `.pb.go`, `vendor/`, `node_modules/`, `generated/`, `mocks/`, `e2e/`, and Go files with a `// Code generated … DO NOT EDIT.` header. Adding that header to a file that lacked it at the merge-base fails.
+- **Files.** A file over 300 lines fails unless the baseline lists it. A baselined file may shrink but not grow. When it shrinks, its entry must be lowered to the new length in the same PR. When it reaches 300 or fewer, its entry must be removed. A PR cannot add a baseline entry or raise one. A PR that introduces the baseline cannot grandfather a new file, or a file beyond its merge-base length. That length is the raw line count, even for a file that was exempt at the merge-base: a test file renamed to a non-test name, or a generated file whose header was stripped, may be listed at its full merge-base length. The baseline is JSON whose `files` object maps each path to its line count; a `files` that is not an object, or an entry that is not a non-negative integer, fails the gate, at HEAD or at the merge-base. Added or changed files of 201–300 lines get a warning. Lines break where each language's parser breaks them: `\n` for Go; `\n`, `\r\n` and `\r` for Python; those plus U+2028 and U+2029 for TypeScript.
+- **Functions ("may change, not grow").** A new function over its limit fails. An existing function that a PR pushes over its limit fails. A function that was already over its limit at the merge-base may be edited, but fails if it gets longer, even when its HEAD limit is higher (a grandfathered function that gains JSX does not get the 150-line component limit). Unchanged functions are not checked. A TSX component is a function whose own body contains JSX. A component that loses its JSX drops to the 50-line limit, unless it was already over its limit at the merge-base, in which case it may change but not grow.
+- **Moves.** A function moved to another file in the same directory and language keeps its allowance, so you can split a legacy file in place. A move to another directory or another language (`.ts` and `.tsx` are one language here), including renaming the whole file, or a rename during the move, counts as a new function. The match is strict when it is ambiguous: the same name in two changed base files, or one base function copied into two HEAD files. Every ambiguous copy is checked as a new function, and the message names the files. A function kept in place keeps its allowance, and a copy of it in a sibling file or the same file is checked as new. A name that occurs more than once in one file (Go `init`, say), at the merge-base or HEAD, is matched by its body, not by its position: such a function keeps an allowance only when its body is unchanged from a same-named merge-base function in that file; otherwise its match is ambiguous and it is checked as new. To split across directories, split within the directory first, then move the pieces in a later PR.
+- **Symlinks.** A symlink with an in-scope name fails unless it resolves, inside the checkout, to a tracked (or untracked, not ignored) file that is itself in scope: matched by `include-paths`, not matched by `exclude-paths`, and not exempt by the built-in rules (test files, test-only directories such as `testdata/` or `fixtures/`, and `vendor/`, `node_modules/`, mocks and generated directories). That target is then measured on its own path, so a target with a Go generated-code header is exempt like any generated file. Such a link fails if it dangles or leaves the checkout. A symlink to a directory fails, whatever its own name and even when `include-paths` does not match it, unless the directory is inside the checkout, holds no symlinks, and every file under it that is in scope (by the same rules, `include-paths` and `exclude-paths` included) by its own path or by its path through the link is itself such an in-scope path. A directory link that exposes nothing in scope passes. Every file link the gate lists and every directory link in the repo is checked, not only the ones the PR changes: a bad link already in the repo fails every PR once the gate is adopted.
+- **No disable comments.** Added lines may not silence size rules. The gate refuses:
+  - Go: bare `//nolint`, `//nolint:funlen|revive|all`, and `revive:disable`.
+  - ESLint: a bare `eslint-disable` (any variant), one naming `max-lines` or `max-lines-per-function`, and an `/* eslint … */` config naming either rule. A block comment that spans several lines counts too: it fails at its first added line, or at the edited line when only an inner line changed.
+  - ruff and flake8: bare `# noqa`, `# noqa: PLR0915|C0302|R0915`, the file-wide `# ruff: noqa` and `# flake8: noqa`, and an own-line `# ruff: disable[PLR0915]`.
+  - pylint: the pragma is read as pylint reads it. The gate refuses `disable`, `disable-next` or `disable-msg` naming `all`, the categories `R` or `C`, `too-many-lines` or `too-many-statements`, or `R0915`, `C0302`, `design` or `format` in any case. It also refuses `skip-file` and `disable-all`.
+
+  A comment the tool would ignore passes: a code prefix such as `PLR09`, an uppercase symbolic name, or `// eslint …` in a line comment. So does a disable for any other rule. The one exception is a lowercase `# noqa: plr0915`, which ruff ignores but the gate still refuses.
+
+**Regenerating the baseline.** The baseline only matters when you adopt the gate, or when you delete or shrink a legacy file. It needs no extractors:
+
+```
+git clone --depth 1 --branch vX.Y.Z https://github.com/praetorian-inc/public-workflows /tmp/pw
+node /tmp/pw/.github/actions/size-gate/cli.mjs baseline --root . --baseline .github/size-baseline.json \
+  [--include '<glob>']... [--exclude '<glob>']...
+```
+
+It writes every in-scope file over 300 lines. Pass the same globs that the caller passes as `include-paths` and `exclude-paths`. CI's ratchet refuses any raise, whoever runs the writer.
+
+**Notes:** no `branches:` filter on `pull_request`, because `on.pull_request.branches` matches the BASE and would skip stacked PRs. No `paths:` filter either. The gate checks out the caller into `repo/` with full history, so the merge-base resolves. It checks out its own sources at `job.workflow_sha` into `_pw/`, and fails if that SHA is empty or the checkout landed on a different commit. Parsing never runs caller code (go/parser, the TypeScript parser and Python `ast`), so the gate is safe on fork PRs. The parsers run on pinned toolchains: Node 22, the Go version in `extract-go/go.mod`, and the `python-version` input (default 3.13). The job fails if `python3` on PATH is not the interpreter `actions/setup-python` installed. Callers must use `pull_request`, not `pull_request_target`, because the latter checks out the base branch. On `workflow_dispatch` there is no event base, so the gate compares HEAD with its merge-base with the first usable candidate: `origin/HEAD`, then `origin/<SIZE_GATE_DEFAULT_BRANCH>`, which the workflow sets to the caller's default branch (`github.event.repository.default_branch`; a name `git check-ref-format` rejects is ignored with a notice), then `origin/main`, then `HEAD~1`. On a push whose `event.before` is zero or unreachable, it logs a notice and does the same. A candidate whose merge-base with HEAD is HEAD itself is skipped. On a default-branch push with no usable `event.before`, the default-branch candidates are therefore skipped, and the gate falls through to the next one: `HEAD~1` when the default branch is `main`, which checks only the tip commit's changes. A commit with no parent and no other candidate compares with itself, so only the whole-tree checks apply: unbaselined files over 300 lines, and baseline entries that no longer match their file (grown, shrunk, back within 300 lines, or gone).
+
 ### `agents-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
 Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped.

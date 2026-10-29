@@ -10,6 +10,8 @@ _test-fixtures/**/*-*
 !_test-fixtures/skills-bad/**
 !_test-fixtures/ts-release/
 !_test-fixtures/ts-release/**
+!_test-fixtures/size-gate/
+!_test-fixtures/size-gate/**
 # ...but still ignore ts-release build artifacts from local self-test runs.
 _test-fixtures/ts-release/dist/
 _test-fixtures/ts-release/*.tgz
