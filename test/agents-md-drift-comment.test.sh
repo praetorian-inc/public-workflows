@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 #
 # Tests for the drift-comment path in .github/workflows/agents-md-drift.yml
-# (ENG-5663).
+# (ENG-5663, LAB-7596).
 #
-# The model step is a read-only analyst that returns its verdict as
-# `--json-schema` structured output; a deterministic `run:` step after it
-# creates or updates the single drift comment. Two things are proven here:
+# JEV decides which instruction-file sections are stale; the model step is a
+# read-only drafter that returns proposed edits as `--json-schema` structured
+# output; a deterministic `run:` step after it creates or updates the single
+# drift comment through `cli.mjs render`. Two things are proven here:
 #
 #   1. The post step's real `run:` block — EXTRACTED from the workflow YAML at
-#      run time, never mirrored — creates, updates, or skips correctly when
-#      executed against a stub `gh` on PATH that records every call and serves
-#      canned, paginated comment lists.
+#      run time, never mirrored — creates, updates, resolves, or skips
+#      correctly when executed against a stub `gh` on PATH that records every
+#      call and serves canned, paginated comment lists, with the real drift
+#      modules (this checkout, linked as `_pw`) and a canned JEV score file.
 #   2. The model step's real `claude_args`, TOKENIZED (not grepped), grants the
 #      model no tool that can post or edit a comment, disallows `gh api` and
-#      `gh pr comment`, and carries a valid `--json-schema` whose required
-#      fields are the ones the post step reads; and the post step is a plain
-#      `run:` step after the model step, gated on it.
+#      `gh pr comment`, and carries a valid drafts `--json-schema`; the post
+#      step is a plain `run:` step after the model step, gated on the pairs
+#      verdict; and the JEV key reaches only the score step.
 #
-# Requires: bash, python3 with PyYAML, jq.
+# Requires: bash, python3 with PyYAML, jq, node.
 #
 # Usage: bash test/agents-md-drift-comment.test.sh
 #
@@ -47,7 +49,7 @@ assert_eq() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "$2" "$3"; fi; }
 
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-for dep in python3 jq; do
+for dep in python3 jq node; do
   command -v "$dep" >/dev/null 2>&1 || { echo "ERROR: $dep is required" >&2; exit 1; }
 done
 
@@ -163,12 +165,13 @@ if schema is not None:
     props = schema.get("properties", {})
     req = set(schema.get("required", []))
     check("schema is an object schema", schema.get("type") == "object", "object", schema.get("type"))
-    check("schema requires drift_found + comment_body",
-          req == {"drift_found", "comment_body"}, "drift_found,comment_body", sorted(req))
-    check("drift_found is boolean", props.get("drift_found", {}).get("type") == "boolean",
-          "boolean", props.get("drift_found"))
-    check("comment_body is string", props.get("comment_body", {}).get("type") == "string",
-          "string", props.get("comment_body"))
+    check("schema requires drafts", req == {"drafts"}, "drafts", sorted(req))
+    items = props.get("drafts", {}).get("items", {})
+    check("drafts is an array", props.get("drafts", {}).get("type") == "array", "array", props.get("drafts"))
+    check("each draft requires id + draft", set(items.get("required", [])) == {"id", "draft"},
+          "draft,id", sorted(items.get("required", [])))
+    check("draft entries are closed objects", items.get("additionalProperties") is False,
+          "False", items.get("additionalProperties"))
 
 # ── Post step shape ──
 body = post.get("run", "")
@@ -181,7 +184,7 @@ cond = str(post.get("if", ""))
 # ── Evaluate the post step's if: the way Actions does ──
 # A minimal evaluator for the expression subset a step condition uses:
 # ! && || ( ) == != , string/bool/null literals, steps.<id>.outcome|conclusion,
-# and the status functions. Strings compare case-insensitively, and a condition
+# steps.<id>.outputs.<name> (missing = ''), and the status functions. Strings compare case-insensitively, and a condition
 # naming no status function is implicitly `success() && (...)`, as in Actions.
 # Anything outside the subset raises, so an unrecognised condition fails loudly.
 class ExprError(Exception):
@@ -254,6 +257,8 @@ def evaluate(src, ctx):
             parts = v.split(".")
             if len(parts) == 3 and parts[0] == "steps" and parts[2] in ("outcome", "conclusion"):
                 return ctx["steps"].get(parts[1], {}).get(parts[2], "success")
+            if len(parts) == 4 and parts[0] == "steps" and parts[2] == "outputs":
+                return ctx["steps"].get(parts[1], {}).get("outputs", {}).get(parts[3], "")
             raise ExprError("unsupported context %s" % v)
         raise ExprError("unexpected token %r" % ((k, v),))
 
@@ -293,41 +298,73 @@ def evaluate(src, ctx):
     return bool(r)
 
 
-# Expected run/skip table: publish whatever the model step concluded (success
-# OR failure, so a crashed analysis still surfaces its no-result warning), but
-# never when it was skipped (scope said nothing to check) or the run was
-# cancelled. The model step has no continue-on-error, so its failure fails the
-# job: success() false, failure() true.
-for outcome in ("success", "failure", "skipped"):
-    for cancelled in (False, True):
-        want_run = (not cancelled) and outcome in ("success", "failure")
-        ctx = {
-            "steps": {model_id: {"outcome": outcome, "conclusion": outcome}},
-            "cancelled()": cancelled,
-            "success()": not cancelled and outcome != "failure",
-            "failure()": outcome == "failure",
-            "always()": True,
-        }
-        label = "post step if: %s when %s%s" % (
-            "runs" if want_run else "skips", outcome, ", run cancelled" if cancelled else "")
+def ctx_for(outputs, cancelled, failed=False):
+    return {
+        "steps": {k: {"outcome": "success", "conclusion": "success", "outputs": v} for k, v in outputs.items()},
+        "cancelled()": cancelled,
+        "success()": not cancelled and not failed,
+        "failure()": failed,
+        "always()": True,
+    }
+
+
+def table(label, cond, cases):
+    for outputs, cancelled, want_run, why, *failed in cases:
+        failed = bool(failed and failed[0])
+        name = "%s if: %s when %s%s%s" % (label, "runs" if want_run else "skips", why,
+                                         ", run cancelled" if cancelled else "", ", an earlier step failed" if failed else "")
         try:
-            got = evaluate(cond, ctx)
+            got = evaluate(cond, ctx_for(outputs, cancelled, failed))
         except ExprError as e:
-            check(label, False, "evaluable condition", "%s (%s)" % (cond, e))
+            check(name, False, "evaluable condition", "%s (%s)" % (cond, e))
             continue
-        check(label, got == want_run, "run" if want_run else "skip", "%s for if: %s" % (
-            "run" if got else "skip", cond))
+        check(name, got == want_run, "run" if want_run else "skip", "%s for if: %s" % ("run" if got else "skip", cond))
+
+
+# Post whenever the pairs step reached a verdict: 'ok' (JEV scored, or JEV was
+# unavailable and an existing comment gets the notice) or 'none' (no pairs, so
+# open findings resolve). Never when the pairs step was unavailable or skipped,
+# nor when the run was cancelled.
+cases = []
+for status in ("ok", "none", "unavailable", ""):
+    for cancelled in (False, True):
+        cases.append(({"pairs": {"status": status}}, cancelled, (not cancelled) and status in ("ok", "none"),
+                      "pairs status '%s'" % status))
+# A failed earlier step (not cancelled) must not suppress the post: the comment
+# still has to carry the verdict, so the condition cannot rely on success().
+cases.append(({"pairs": {"status": "ok"}}, False, True, "pairs status 'ok'", True))
+table("post step", cond, cases)
+
+# The drafter runs only for JEV-scored runs with at least one high finding.
+table("model step", str(model.get("if", "")), [
+    ({"score": {"jev": "ok", "high": "2"}}, False, True, "JEV ok, 2 high"),
+    ({"score": {"jev": "ok", "high": "0"}}, False, False, "JEV ok, 0 high"),
+    ({"score": {"jev": "unavailable", "high": ""}}, False, False, "JEV unavailable"),
+    ({}, False, False, "score skipped"),
+])
+
 env = post.get("env", {}) or {}
 want = "${{ steps.%s.outputs.structured_output }}" % model_id
 check("post step receives structured_output via env", env.get("STRUCTURED_OUTPUT") == want,
       want, env.get("STRUCTURED_OUTPUT"))
-check("post step has GH_TOKEN", "GH_TOKEN" in env, "GH_TOKEN", sorted(env))
-for k in ("REPO", "PR_NUMBER"):
+for k, v in (("PAIRS_STATUS", "${{ steps.pairs.outputs.status }}"), ("JEV_STATUS", "${{ steps.score.outputs.jev }}")):
+    check("post step env %s" % k, env.get(k) == v, v, env.get(k))
+for k in ("GH_TOKEN", "REPO", "PR_NUMBER", "HEAD_SHA"):
     check("post step env has %s" % k, k in env, k, sorted(env))
-if schema is not None:
-    read = set(re.findall(r"\.([A-Za-z_][A-Za-z0-9_]*)", body)) & set(schema.get("properties", {}))
-    check("post step reads exactly the schema's required fields",
-          read == set(schema.get("required", [])), sorted(schema.get("required", [])), sorted(read))
+
+# The JEV key reaches exactly one step, the score step, from the optional secret.
+# Every key of every step in every job counts (run:, if:, with:, env:).
+holders = [st.get("id") or st.get("name") for job in wf["jobs"].values() for st in job.get("steps", [])
+           if "TYPESAFE_JEV_API_KEY" in json.dumps(st)]
+check("only the score step sees the JEV key", holders == ["score"], ["score"], holders)
+_, score = find(lambda s: s.get("id") == "score")
+check("score step reads secrets.TYPESAFE_JEV_API_KEY",
+      score is not None and (score.get("env") or {}).get("TYPESAFE_JEV_API_KEY") == "${{ secrets.TYPESAFE_JEV_API_KEY }}",
+      "${{ secrets.TYPESAFE_JEV_API_KEY }}", score and score.get("env"))
+# PyYAML (YAML 1.1) loads the bare `on:` key as boolean True.
+secrets = (wf.get(True) or wf.get("on"))["workflow_call"]["secrets"]
+check("TYPESAFE_JEV_API_KEY secret is optional", secrets.get("TYPESAFE_JEV_API_KEY", {}).get("required") is False,
+      "required: false", secrets.get("TYPESAFE_JEV_API_KEY"))
 
 (out / "post.sh").write_text(body)
 PY
@@ -389,6 +426,19 @@ STUB
 chmod +x "$WORKDIR/bin/gh"
 
 # ── Runner helpers ───────────────────────────────────────────────────────────
+# The post step runs `node _pw/.github/actions/agents-md-drift/cli.mjs render`
+# from the job's working directory, where the score step left
+# .agents-md-drift/scored.json. Link this checkout as _pw and write a canned
+# score file: one high pair (a finding, id f1) and one middle pair.
+ln -s "$REPO_ROOT" "$WORKDIR/_pw"
+mkdir -p "$WORKDIR/.agents-md-drift"
+cat > "$WORKDIR/.agents-md-drift/scored.json" <<'JSON'
+{"scored": [
+  {"id": "p1", "file": "Makefile", "agents_md": "AGENTS.md", "heading": "Build", "section": "## Build\nRun `make build`.", "distance": 0, "score": 0.91, "band": "high"},
+  {"id": "p2", "file": "Makefile", "agents_md": "AGENTS.md", "heading": "Layout", "section": "## Layout\nsrc/ holds code.", "distance": 0, "score": 0.40, "band": "middle"}
+], "overflow": []}
+JSON
+
 LOG=""; GHLOG=""; PAGES=""; RC=0
 
 pages() { # pages <json-page-1> [<json-page-2> ...] — fresh canned listing
@@ -398,7 +448,7 @@ pages() { # pages <json-page-1> [<json-page-2> ...] — fresh canned listing
   for p in "$@"; do printf '%s' "$p" > "$PAGES/page-$k.json"; k=$((k + 1)); done
 }
 
-run_post() { # run_post <structured_output> [extra env assignments...]
+run_post() { # run_post <structured_output> [extra env assignments, which override the defaults...]
   local so="$1"; shift
   GHLOG="$WORKDIR/gh.$RANDOM$RANDOM.log"
   LOG="$GHLOG.out"
@@ -408,7 +458,8 @@ run_post() { # run_post <structured_output> [extra env assignments...]
     cd "$WORKDIR" || exit 1
     env PATH="$WORKDIR/bin:$PATH" \
       GH_LOG="$GHLOG" GH_PAGES="$PAGES" \
-      GH_TOKEN=dummy REPO=o/r PR_NUMBER=7 \
+      GH_TOKEN=dummy REPO=o/r PR_NUMBER=7 HEAD_SHA=abc1234 \
+      PAIRS_STATUS=ok JEV_STATUS=ok \
       STRUCTURED_OUTPUT="$so" "$@" \
       bash --noprofile --norc -eo pipefail "$EXTRACT/post.sh"
   ) > "$LOG" 2>&1
@@ -422,58 +473,56 @@ payload() { # payload body of the first write
   n=$(grep -nvE '^GET ' "$GHLOG" | head -1 | cut -d: -f1)
   jq -r '.body' "$GHLOG.$((n - 1)).json"
 }
-logged_warning() { grep -q '^::warning' "$LOG"; }
+logged() { grep -q "^::$1" "$LOG"; }
+has() { # has <label> <needle> — the first write's body contains needle
+  if payload | grep -qF -- "$2"; then ok "$1"; else bad "$1" "body contains: $2" "$(payload | head -c 400)"; fi
+}
+lacks() {
+  if payload | grep -qF -- "$2"; then bad "$1" "body without: $2" "$(payload | head -c 400)"; else ok "$1"; fi
+}
 
-comment() { # comment <id> <login> <body> -> one JSON comment object
+comment() { # comment <id-json> <login> <body> -> one JSON comment object
   jq -cn --argjson id "$1" --arg l "$2" --arg b "$3" '{id: $id, user: {login: $l}, body: $b}'
 }
 
-so() { # so <drift_found> <comment_body>
-  jq -cn --argjson d "$1" --arg b "$2" '{drift_found: $d, comment_body: $b}'
-}
-
+DRAFTS='{"drafts":[{"id":"f1","draft":"## Build\nRun `make build-all`."}]}'
 BOT='github-actions[bot]'
-BODY="$MARKER"$'\n\nCode changes in this PR may have made documentation stale:\n\n### `AGENTS.md`\n| Section | Issue | Evidence |\n|---|---|---|\n| "Build" | make target renamed | Makefile |\n'
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 1 — no drift: nothing is written"
-pages "[$(comment 111 "$BOT" "$MARKER old")]"
-run_post "$(so false "")"
+section "Case 1 — no candidate pairs, no comment: nothing is written"
+pages "[$(comment 5 octocat 'LGTM')]"
+run_post "" PAIRS_STATUS=none JEV_STATUS=
 assert_eq "case1 exit code" "0" "$RC"
 assert_eq "case1 API writes" "0" "$(writes)"
-if logged_warning; then bad "case1 emits no ::warning" "no ::warning" "$(cat "$LOG")"; else ok "case1 emits no ::warning"; fi
-
-# A non-empty body must not be posted when drift_found is false — the
-# drift_found exit, not the empty-body warning, is what stops it here.
-section "Case 1b — no drift but a non-empty body: still nothing is written"
-pages "[$(comment 111 "$BOT" "$MARKER old")]"
-run_post "$(so false "$BODY")"
-assert_eq "case1b exit code" "0" "$RC"
-assert_eq "case1b API writes" "0" "$(writes)"
-if logged_warning; then bad "case1b emits no ::warning" "no ::warning" "$(cat "$LOG")"; else ok "case1b emits no ::warning"; fi
+if logged warning; then bad "case1 emits no ::warning" "no ::warning" "$(cat "$LOG")"; else ok "case1 emits no ::warning"; fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 2 — drift, no existing comment: exactly one create"
+section "Case 2 — a JEV finding, no existing comment: exactly one create"
 pages "[$(comment 5 octocat 'LGTM')]"
-run_post "$(so true "$BODY")"
+run_post "$DRAFTS"
 assert_eq "case2 exit code" "0" "$RC"
 assert_eq "case2 API writes" "1" "$(writes)"
 assert_eq "case2 create call" "POST repos/o/r/issues/7/comments" "$(write1)"
-assert_eq "case2 body posted verbatim" "$BODY" "$(payload)"$'\n'
+case "$(payload)" in "$MARKER"*) ok "case2 body starts with the marker" ;; *) bad "case2 body starts with the marker" "$MARKER..." "$(payload | head -1)" ;; esac
+has "case2 lists the finding's section" '`AGENTS.md` § `Build`'
+has "case2 carries the drafted edit" 'make build-all'
+has "case2 lists the middle pair for a human ruling" '### Needs a human ruling'
+has "case2 carries the hidden state block" '<!-- agents-md-drift-state:'
 if grep -q 'paginate=y' "$GHLOG"; then ok "case2 comment listing paginates"; else bad "case2 comment listing paginates" "paginate=y" "$(cat "$GHLOG")"; fi
+POSTED="$(payload)"
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 3 — drift + existing new-marker comment: PATCH that id"
+section "Case 3 — finding + existing new-marker comment: PATCH that id"
 pages "[$(comment 5 octocat 'LGTM'),$(comment 111 "$BOT" "$MARKER"$'\n\nold')]"
-run_post "$(so true "$BODY")"
+run_post "$DRAFTS"
 assert_eq "case3 exit code" "0" "$RC"
 assert_eq "case3 API writes" "1" "$(writes)"
 assert_eq "case3 update call" "PATCH repos/o/r/issues/comments/111" "$(write1)"
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 4 — drift + legacy-marker comment: PATCH it (migrates the heading)"
+section "Case 4 — finding + legacy-marker comment: PATCH it (migrates the heading)"
 pages "[$(comment 222 "$BOT" "$LEGACY_MARKER"$'\n\nold')]"
-run_post "$(so true "$BODY")"
+run_post "$DRAFTS"
 assert_eq "case4 API writes" "1" "$(writes)"
 assert_eq "case4 update call" "PATCH repos/o/r/issues/comments/222" "$(write1)"
 case "$(payload)" in "$MARKER"*) ok "case4 new body carries the new marker" ;; *) bad "case4 new body carries the new marker" "$MARKER..." "$(payload | head -1)" ;; esac
@@ -481,84 +530,86 @@ case "$(payload)" in "$MARKER"*) ok "case4 new body carries the new marker" ;; *
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 5 — existing comment only on page 2: found via pagination"
 pages "[$(comment 1 octocat a)]" "[$(comment 333 "$BOT" "$MARKER"$'\n\nold')]"
-run_post "$(so true "$BODY")"
+run_post "$DRAFTS"
 assert_eq "case5 update call" "PATCH repos/o/r/issues/comments/333" "$(write1)"
 assert_eq "case5 API writes" "1" "$(writes)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 6 — two prior drift comments: only the oldest is updated"
 pages "[$(comment 444 "$BOT" "$MARKER a"),$(comment 555 "$BOT" "$MARKER b")]"
-run_post "$(so true "$BODY")"
+run_post "$DRAFTS"
 assert_eq "case6 API writes" "1" "$(writes)"
 assert_eq "case6 update call" "PATCH repos/o/r/issues/comments/444" "$(write1)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 7 — a human's comment carrying the marker is never overwritten"
 pages "[$(comment 666 octocat "$MARKER"$'\n\nhuman notes')]"
-run_post "$(so true "$BODY")"
+run_post "$DRAFTS"
 assert_eq "case7 API writes" "1" "$(writes)"
 assert_eq "case7 create (not PATCH of 666)" "POST repos/o/r/issues/7/comments" "$(write1)"
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 8 — missing structured output (model errored / hit max-turns)"
-pages '[]'
-run_post ""
+section "Case 8 — a later push with no candidate pairs resolves the open finding"
+pages "[$(comment 777 "$BOT" "$POSTED")]"
+run_post "" PAIRS_STATUS=none JEV_STATUS= HEAD_SHA=def5678
 assert_eq "case8 exit code" "0" "$RC"
-assert_eq "case8 API calls" "0" "$(wc -l < "$GHLOG" | tr -d ' ')"
-if logged_warning && grep -q 'no structured output' "$LOG"; then
-  ok "case8 emits the no-result ::warning"
-else
-  bad "case8 emits the no-result ::warning" "::warning ... no structured output ..." "$(cat "$LOG")"
-fi
+assert_eq "case8 update call" "PATCH repos/o/r/issues/comments/777" "$(write1)"
+has "case8 marks it resolved at the new sha" 'Resolved at def5678'
+has "case8 says nothing is outstanding" 'No findings outstanding.'
+has "case8 keeps the original finding text" 'make build-all'
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 9 — garbage / off-schema structured output"
-for g in 'not json at all' '{"drift_found":"yes","comment_body":"x"}' '{"drift_found":true}' '[1,2]'; do
+section "Case 9 — JEV unavailable, existing comment: notice added, finding kept open"
+pages "[$(comment 777 "$BOT" "$POSTED")]"
+run_post "" JEV_STATUS=unavailable HEAD_SHA=def5678
+assert_eq "case9 exit code" "0" "$RC"
+assert_eq "case9 update call" "PATCH repos/o/r/issues/comments/777" "$(write1)"
+has "case9 body carries the notice" 'JEV was unavailable at def5678'
+lacks "case9 does not resolve the finding" 'Resolved at'
+has "case9 keeps the finding" '`AGENTS.md` § `Build`'
+if logged notice; then ok "case9 emits a ::notice"; else bad "case9 emits a ::notice" "::notice ..." "$(cat "$LOG")"; fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 10 — JEV unavailable, no comment: a notice alone never creates one"
+pages "[$(comment 5 octocat 'LGTM')]"
+run_post "" JEV_STATUS=unavailable
+assert_eq "case10 exit code" "0" "$RC"
+assert_eq "case10 API writes" "0" "$(writes)"
+if logged notice; then ok "case10 emits a ::notice"; else bad "case10 emits a ::notice" "::notice ..." "$(cat "$LOG")"; fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 11 — missing or garbage drafts: finding posted without an edit"
+for g in '' 'not json at all' '{"drafts":"x"}' '[1,2]'; do
+  pages '[]'
   run_post "$g"
-  assert_eq "case9 [$g] exit code" "0" "$RC"
-  assert_eq "case9 [$g] API calls" "0" "$(wc -l < "$GHLOG" | tr -d ' ')"
-  if logged_warning; then ok "case9 [$g] emits a ::warning"; else bad "case9 [$g] emits a ::warning" "::warning ..." "$(cat "$LOG")"; fi
+  assert_eq "case11 [$g] exit code" "0" "$RC"
+  assert_eq "case11 [$g] create call" "POST repos/o/r/issues/7/comments" "$(write1)"
+  has "case11 [$g] says no edit was drafted" 'No proposed edit was drafted'
+  if logged warning; then ok "case11 [$g] emits a ::warning"; else bad "case11 [$g] emits a ::warning" "::warning ..." "$(cat "$LOG")"; fi
 done
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 10 — drift with an empty body: warn, post nothing"
-run_post "$(so true $'  \n ')"
-assert_eq "case10 API writes" "0" "$(writes)"
-if logged_warning; then ok "case10 emits a ::warning"; else bad "case10 emits a ::warning" "::warning ..." "$(cat "$LOG")"; fi
-
-# ═════════════════════════════════════════════════════════════════════════════
-section "Case 11 — body missing the heading: marker is forced, next run finds it"
-pages '[]'
-run_post "$(so true $'\n  Code changes in this PR may have made documentation stale.\n')"
-assert_eq "case11 create call" "POST repos/o/r/issues/7/comments" "$(write1)"
-posted="$(payload)"
-case "$posted" in "$MARKER"*) ok "case11 posted body starts with the marker" ;; *) bad "case11 posted body starts with the marker" "$MARKER..." "$(printf '%s' "$posted" | head -1)" ;; esac
-# Re-run against what was just posted: it must be found and PATCHed.
-pages "[$(comment 777 "$BOT" "$posted")]"
-run_post "$(so true 'still stale')"
-assert_eq "case11 re-run updates, no duplicate" "PATCH repos/o/r/issues/comments/777" "$(write1)"
-assert_eq "case11 re-run API writes" "1" "$(writes)"
-
-# ═════════════════════════════════════════════════════════════════════════════
-section "Case 12 — leading whitespace before the heading is not doubled"
-pages '[]'
-run_post "$(so true $'\n\n'"$BODY")"
-assert_eq "case12 body normalized to start at the heading" "$BODY" "$(payload)"$'\n'
-
-# ═════════════════════════════════════════════════════════════════════════════
-section "Case 13 — oversize body is capped under GitHub's 65536-char limit"
+section "Case 12 — oversize previous body is capped under GitHub's 65536-char limit"
 big="$MARKER"$'\n\n'"$(head -c 70000 /dev/zero | tr '\0' 'x')"
-run_post "$(so true "$big")"
-assert_eq "case13 API writes" "1" "$(writes)"
+pages "[$(comment 888 "$BOT" "$big")]"
+run_post "" JEV_STATUS=unavailable
+assert_eq "case12 API writes" "1" "$(writes)"
 len=$(jq -r '.body | length' "$GHLOG.$(( $(grep -nvE '^GET ' "$GHLOG" | head -1 | cut -d: -f1) - 1 )).json")
-if [ "$len" -le 65536 ]; then ok "case13 body length $len <= 65536"; else bad "case13 body length" "<= 65536" "$len"; fi
-case "$(payload)" in "$MARKER"*) ok "case13 capped body keeps the marker" ;; *) bad "case13 capped body keeps the marker" "$MARKER..." "?" ;; esac
+if [ "$len" -le 65536 ]; then ok "case12 body length $len <= 65536"; else bad "case12 body length" "<= 65536" "$len"; fi
+case "$(payload)" in "$MARKER"*) ok "case12 capped body keeps the marker" ;; *) bad "case12 capped body keeps the marker" "$MARKER..." "?" ;; esac
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 14 — a failed API write fails the step (no silent success)"
+section "Case 13 — a failed API write fails the step (no silent success)"
 pages '[]'
-run_post "$(so true "$BODY")" GH_FAIL_WRITE=1
+run_post "$DRAFTS" GH_FAIL_WRITE=1
+if [ "$RC" -ne 0 ]; then ok "case13 exit code non-zero ($RC)"; else bad "case13 exit code" "non-zero" "$RC"; fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 14 — a non-numeric comment id from the listing fails the step, writes nothing"
+pages "[$(comment '"1;x"' "$BOT" "$MARKER old")]"
+run_post "$DRAFTS"
 if [ "$RC" -ne 0 ]; then ok "case14 exit code non-zero ($RC)"; else bad "case14 exit code" "non-zero" "$RC"; fi
+assert_eq "case14 API writes" "0" "$(writes)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n──────────────────────────────────────────────\n'

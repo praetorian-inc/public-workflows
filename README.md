@@ -662,7 +662,18 @@ It writes every in-scope file over 300 lines. Pass the same globs that the calle
 
 ### `agents-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
-Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped.
+Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. Same-repo-only (fork PRs blocked); draft PRs and bot authors skipped.
+
+**How it decides (LAB-7596):**
+
+1. **Pre-filter.** A zero-cost shell job skips the check when no instruction file exists, the PR is docs/config-only, or no changed file has an instruction-file ancestor. If the PR diff cannot be computed, it posts a notice and passes.
+2. **Candidate pairs.** Each changed code file is paired with every `##` and `###` section of every instruction file that governs it: each ancestor `AGENTS.md` and content-carrying `CLAUDE.md`, nearest first. At most `max_pairs` pairs are checked, nearest instruction file first. The rest are listed under "Not checked (pair cap)", grouped by file and instruction file, and never dropped silently.
+3. **JEV decides.** Each pair is scored by the pinned Typesafe JEV model (`jev-1.13.0`, `https://api.typesafe.ai/v1/systemone`) with two staleness questions, one per request, about 20 in flight. The PR diff and the instruction-file section are sent as data, never as part of the question. The score is the higher of the two answers. **≥ 0.80** is a drift finding; **≥ 0.25** is listed under "Needs a human ruling" and never fails anything. The questions and thresholds live in `.github/actions/agents-md-drift/questions.mjs` and were calibrated together on a human-ruled set kept in an internal repository.
+4. **The model only drafts.** For findings only, Claude (Haiku, read-only tools) drafts an edit that corrects or deletes the false statement. It never posts and never decides.
+5. **One comment, posted deterministically.** A post step creates or updates a single drift comment in place. A finding that is no longer stale is marked "Resolved at `<sha>`" with its text kept. A comment with nothing open says "No findings outstanding." No comment is created for a PR that never had a finding, a human-ruling pair or an unchecked pair.
+6. **JEV unavailable** (no `TYPESAFE_JEV_API_KEY`, or a request that still fails after retries): a `::notice` and a job-summary line, then a pass. An existing drift comment gets a notice line and its findings are left as they were; no comment is created to carry the notice.
+
+**Runtime:** two JEV requests per pair at 20 concurrent. A run at the default cap (2000 pairs, 4000 requests) takes roughly 7–17 minutes at 2–5 s per request; a typical PR of a few hundred pairs takes 1–3 minutes.
 
 **Minimal caller** (drop this in `.github/workflows/agents-md-drift.yml` of a consumer repo):
 
@@ -685,6 +696,7 @@ jobs:
       pull-requests: write
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      TYPESAFE_JEV_API_KEY: ${{ secrets.TYPESAFE_JEV_API_KEY }}
 ```
 
 **Inputs** (all optional):
@@ -692,15 +704,17 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `skip_extensions` | `.md,.markdown,.rst,.txt,.yml,.yaml,.json,.toml,.png,.jpg,.jpeg,.svg,.gif,.webp,.ico,.lock` | File extensions ignored when deciding whether code (vs docs/config) changed |
-| `model` | `claude-haiku-4-5-20251001` | Claude model for the semantic drift check |
-| `max_turns` | `45` | Max Claude conversation turns for drift analysis |
+| `model` | `claude-haiku-4-5-20251001` | Claude model that drafts the proposed edit for each finding |
+| `max_turns` | `45` | Max Claude conversation turns for drafting |
+| `max_pairs` | `2000` | Most candidate pairs sent to JEV per run; the rest are listed as not checked |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
-| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode |
+| `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode; the check calls `api.github.com:443`, `github.com:443`, `api.anthropic.com:443` and `api.typesafe.ai:443` |
 
 **Secrets:**
 
 - `ANTHROPIC_API_KEY` — required.
+- `TYPESAFE_JEV_API_KEY` — optional. Without it every run posts a notice and passes.
 
 ### `agents-md-audit.yml` — instruction-file audit against the authoring standard (ENG-7538)
 

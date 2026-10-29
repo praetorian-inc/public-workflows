@@ -10,7 +10,10 @@
 #
 # Two `run:` blocks are exercised:
 #   * jobs['pre-filter'].steps[id=check]  — the whole pre-filter
-#   * jobs['drift-check'].steps[id=scope] — its fail-open inventory branch
+#   * jobs['drift-check'].steps[id=history] — its best-effort history fetch
+#
+# The candidate pairs themselves are built by
+# .github/actions/agents-md-drift/pairs.mjs and tested there with node:test.
 #
 # Runtime notes:
 #   * The fixtures have full local history, so `git merge-base` succeeds
@@ -68,7 +71,7 @@ def step_run(job, step_id):
 
 for job, step_id, name in (
     ("pre-filter", "check", "prefilter.sh"),
-    ("drift-check", "scope", "scope.sh"),
+    ("drift-check", "history", "history.sh"),
 ):
     body = step_run(job, step_id)
     if "${{" in body:
@@ -83,9 +86,9 @@ wc = wf[True] if True in wf else wf["on"]
 (out / "skip_extensions.txt").write_text(
     wc["workflow_call"]["inputs"]["skip_extensions"]["default"]
 )
-print("  extracted: prefilter.sh (%d lines), scope.sh (%d lines)" % (
+print("  extracted: prefilter.sh (%d lines), history.sh (%d lines)" % (
     len(step_run("pre-filter", "check").splitlines()),
-    len(step_run("drift-check", "scope").splitlines()),
+    len(step_run("drift-check", "history").splitlines()),
 ))
 PY
 
@@ -94,7 +97,7 @@ printf '  skip_extensions default: %s\n' "$SKIP_EXT"
 
 # ── Syntax gates ─────────────────────────────────────────────────────────────
 section "Syntax checks"
-for s in prefilter.sh scope.sh; do
+for s in prefilter.sh history.sh; do
   if bash -n "$EXTRACT/$s" 2>"$WORKDIR/$s.syn"; then
     ok "bash -n $s"
   else
@@ -169,7 +172,7 @@ run_prefilter() { # run_prefilter <repo> <base_sha> <head_sha>
   RC=$?
 }
 
-run_scope() { # run_scope <repo> <base_sha> <head_sha> <pre_filter_result> <relevant_mds>
+run_history() { # run_history <repo> <base_sha> <head_sha>
   OUT="$WORKDIR/out.$$.$RANDOM"
   LOG="$OUT.log"
   : > "$OUT"
@@ -178,11 +181,8 @@ run_scope() { # run_scope <repo> <base_sha> <head_sha> <pre_filter_result> <rele
     GH_TOKEN=dummy \
     BASE_SHA="$2" \
     HEAD_SHA="$3" \
-    BASE_REF=main \
-    PRE_FILTER_RESULT="$4" \
-    RELEVANT_MDS="$5" \
     GITHUB_OUTPUT="$OUT" \
-      bash "$EXTRACT/scope.sh"
+      bash "$EXTRACT/history.sh"
   ) > "$LOG" 2>&1
   RC=$?
 }
@@ -310,8 +310,8 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 8 — pre-filter fail-open: unresolvable base SHA => full inventory"
-r="$(newrepo fail-open)"
+section "Case 8 — undiffable PR: unresolvable base SHA => notice and skip (no whole-file fallback)"
+r="$(newrepo not-checked)"
 put "$r" CLAUDE.md "$STUB"
 put "$r" AGENTS.md $'# root\nroot instructions\n'
 put "$r" ui/src/components/CLAUDE.md "$STUB"
@@ -321,36 +321,39 @@ base="$(snap "$r" base)"
 put "$r" ui/src/components/foo.go $'package components\n\nfunc New() {}\n'
 head="$(snap "$r" head)"
 run_prefilter "$r" "0000000000000000000000000000000000000000" "$head"
-assert_eq "case8 should_run"   "true" "$(outv should_run)"
-assert_eq "case8 relevant_mds" "AGENTS.md,ui/src/components/AGENTS.md" "$(outv relevant_mds)"
-if grep -q "fail-open" "$LOG"; then
-  ok "case8 emitted the fail-open warning"
+assert_eq "case8 exit code"    "0"     "$RC"
+assert_eq "case8 should_run"   "false" "$(outv should_run)"
+assert_eq "case8 relevant_mds" ""      "$(outv relevant_mds)"
+if grep -q "^::notice title=Instruction-file drift: not checked::" "$LOG"; then
+  ok "case8 emitted the not-checked notice"
 else
-  bad "case8 emitted the fail-open warning" "a ::warning ...fail-open..." "$(cat "$LOG")"
+  bad "case8 emitted the not-checked notice" "::notice title=Instruction-file drift: not checked::..." "$(cat "$LOG")"
 fi
+if grep -q "^::warning" "$LOG"; then bad "case8 emits no ::warning" "no ::warning" "$(cat "$LOG")"; else ok "case8 emits no ::warning"; fi
 # Unused, but proves the base SHA above really is absent from this fixture.
 : "$base"
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 9 — drift-check scope step fail-open => full inventory"
-r="$(newrepo scope-fail-open)"
-put "$r" CLAUDE.md "$STUB"
-put "$r" AGENTS.md $'# root\nroot instructions\n'
-put "$r" ui/src/components/CLAUDE.md "$STUB"
-put "$r" ui/src/components/AGENTS.md $'# components\ncomponent instructions\n'
-put "$r" ui/src/components/foo.go $'package components\n'
-base="$(snap "$r" base)"
-put "$r" ui/src/components/foo.go $'package components\n\nfunc New() {}\n'
-head="$(snap "$r" head)"
-run_scope "$r" "$base" "$head" failure ""
-assert_eq "case9 scope relevant_mds" "AGENTS.md,ui/src/components/AGENTS.md" "$(outv relevant_mds)"
-assert_eq "case9 scope skip"         ""                                      "$(outv skip)"
-assert_eq "case9 scope exit code"    "0"                                     "$RC"
+section "Case 9 — drift-check history step: reachable merge base => exit 0, no outputs"
+run_history "$r" "$base" "$head"
+assert_eq "case9 history exit code" "0" "$RC"
+assert_eq "case9 history writes no step outputs" "" "$(cat "$OUT")"
+if grep -q "merge base not reachable" "$LOG"; then
+  bad "case9 history does not report a reachable base as unreachable" "no 'merge base not reachable'" "$(cat "$LOG")"
+else
+  ok "case9 history does not report a reachable base as unreachable"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
-section "Case 10 — drift-check scope step passes a supplied list straight through"
-run_scope "$r" "$base" "$head" success "ui/src/components/AGENTS.md"
-assert_eq "case10 scope relevant_mds" "ui/src/components/AGENTS.md" "$(outv relevant_mds)"
+section "Case 10 — drift-check history step: unreachable base is never fatal"
+run_history "$r" "0000000000000000000000000000000000000000" "$head"
+assert_eq "case10 history exit code" "0" "$RC"
+assert_eq "case10 history writes no step outputs" "" "$(cat "$OUT")"
+if grep -q "merge base not reachable" "$LOG"; then
+  ok "case10 history logs the unreachable merge base"
+else
+  bad "case10 history logs the unreachable merge base" "merge base not reachable ..." "$(cat "$LOG")"
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 11 — root-level code change hits the \".\" special case"
