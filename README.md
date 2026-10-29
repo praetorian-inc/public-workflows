@@ -646,7 +646,7 @@ jobs:
   - ruff and flake8: bare `# noqa`, `# noqa: PLR0915|C0302|R0915`, the file-wide `# ruff: noqa` and `# flake8: noqa`, and an own-line `# ruff: disable[PLR0915]`.
   - pylint: the pragma is read as pylint reads it. The gate refuses `disable`, `disable-next` or `disable-msg` naming `all`, the categories `R` or `C`, `too-many-lines` or `too-many-statements`, or `R0915`, `C0302`, `design` or `format` in any case. It also refuses `skip-file` and `disable-all`.
 
-  A comment the tool would ignore passes: a code prefix such as `PLR09`, an uppercase symbolic name, or `// eslint …` in a line comment. So does a disable for any other rule. The one exception is a lowercase `# noqa: plr0915`, which ruff ignores but the gate still refuses.
+  A comment the tool would ignore passes: a code prefix such as `PLR09`, an uppercase symbolic name, or `// eslint …` in a line comment. So does a disable for any other rule. The one exception is a lowercase `# noqa: plr0915`, which ruff ignores but the gate still refuses. Only real comments are read, as each language's parser finds them: text inside a string, a regex or JSX passes, such as `msg := "//nolint"`. A file that does not parse already fails, so its comments are not checked.
 
 **Regenerating the baseline.** The baseline only matters when you adopt the gate, or when you delete or shrink a legacy file. It needs no extractors:
 
