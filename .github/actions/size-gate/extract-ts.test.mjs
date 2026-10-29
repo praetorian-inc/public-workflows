@@ -37,8 +37,12 @@ test("a file that does not parse is a per-file error; exit 0", () => {
     writeFileSync(good, "function g() {\n  return 1;\n}\n");
     const out = run(bad, good);
     assert.deepEqual(out[bad].functions, []);
+    assert.deepEqual(out[bad].comments, []);
     assert.match(out[bad].error, /./);
-    assert.deepEqual(out[good], { functions: [{ name: "g", start: 1, end: 3, isComponent: false }] });
+    assert.deepEqual(out[good], {
+      functions: [{ name: "g", start: 1, end: 3, isComponent: false }],
+      comments: [],
+    });
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
@@ -49,7 +53,11 @@ test("a recoverable syntax error is a per-file error too, as in Go and Python", 
   try {
     const stray = join(d, "stray.ts");
     writeFileSync(stray, "function f() {\n  return 1;\n}\n}\nfunction g() {\n  return 2;\n}\n");
-    assert.deepEqual(run(stray)[stray], { functions: [], error: "Declaration or statement expected." });
+    assert.deepEqual(run(stray)[stray], {
+      functions: [],
+      comments: [],
+      error: "Declaration or statement expected.",
+    });
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
@@ -58,4 +66,5 @@ test("a recoverable syntax error is a per-file error too, as in Go and Python", 
 test("a missing file is a per-file error", () => {
   const out = run("/nonexistent/x.ts");
   assert.match(out["/nonexistent/x.ts"].error, /./);
+  assert.deepEqual(out["/nonexistent/x.ts"].comments, []);
 });

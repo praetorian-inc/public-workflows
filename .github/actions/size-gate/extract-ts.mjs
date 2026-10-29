@@ -94,21 +94,44 @@ function collect(sf) {
   return out;
 }
 
+// Every comment in source order, found the way ts-api-utils forEachComment
+// finds them: leading trivia of each token, plus trailing trivia except at
+// end of file. JSDoc nodes repeat their parent token's leading comments, and
+// JsxText is text, so neither is scanned. The scanner skips a shebang.
+function comments(sf) {
+  const text = sf.getFullText();
+  const seen = new Map();
+  const add = (pos, end) => {
+    if (!seen.has(pos)) {
+      seen.set(pos, { start: lineOf(sf, pos), end: lineOf(sf, end), text: text.slice(pos, end) });
+    }
+  };
+  const visit = (node) => {
+    if (ts.isJSDoc(node) || node.kind === K.JsxText) return;
+    const children = node.getChildren(sf);
+    if (children.length > 0) return children.forEach(visit);
+    ts.forEachLeadingCommentRange(text, node.pos, add);
+    if (node.kind !== K.EndOfFileToken) ts.forEachTrailingCommentRange(text, node.end, add);
+  };
+  visit(sf);
+  return [...seen.entries()].sort(([a], [b]) => a - b).map(([, c]) => c);
+}
+
 function extractFile(path) {
   let text;
   try {
     text = readFileSync(path, "utf8");
   } catch (err) {
-    return { functions: [], error: `cannot read: ${err.message}` };
+    return { functions: [], comments: [], error: `cannot read: ${err.message}` };
   }
   const kind = path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, kind);
   // Any diagnostic fails, as in Go and Python: recovery can cut a function short.
   const diags = sf.parseDiagnostics ?? [];
   if (diags.length > 0) {
-    return { functions: [], error: ts.flattenDiagnosticMessageText(diags[0].messageText, "\n") };
+    return { functions: [], comments: [], error: ts.flattenDiagnosticMessageText(diags[0].messageText, "\n") };
   }
-  return { functions: collect(sf) };
+  return { functions: collect(sf), comments: comments(sf) };
 }
 
 const result = {};

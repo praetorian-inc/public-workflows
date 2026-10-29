@@ -13,7 +13,7 @@ import (
 const fixtureDir = "../../../../_test-fixtures/size-gate/extract/go"
 
 func TestGoldens(t *testing.T) {
-	for _, name := range []string{"shapes", "duplicates", "linedirective"} {
+	for _, name := range []string{"shapes", "duplicates", "linedirective", "comments"} {
 		t.Run(name, func(t *testing.T) {
 			src := filepath.Join(fixtureDir, name+".go")
 			want := readGolden(t, filepath.Join(fixtureDir, name+".golden.json"))
@@ -33,6 +33,9 @@ func TestParseErrorIsPerFile(t *testing.T) {
 	if got[bad].Error == "" || got[bad].Functions == nil || len(got[bad].Functions) != 0 {
 		t.Fatalf("broken file: want error and empty functions, got %+v", got[bad])
 	}
+	if got[bad].Comments == nil || len(got[bad].Comments) != 0 {
+		t.Fatalf("broken file: want empty comments, got %+v", got[bad].Comments)
+	}
 	if len(got[good].Functions) != 6 || got[good].Error != "" {
 		t.Fatalf("good file not extracted: %+v", got[good])
 	}
@@ -47,6 +50,9 @@ func TestMissingFile(t *testing.T) {
 	if got[missing].Functions == nil {
 		t.Fatal("functions must be an empty array, not null")
 	}
+	if got[missing].Comments == nil || len(got[missing].Comments) != 0 {
+		t.Fatal("comments must be an empty array, not null")
+	}
 }
 
 func TestRunWritesJSON(t *testing.T) {
@@ -58,7 +64,7 @@ func TestRunWritesJSON(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 
-	want := `{"` + empty + `":{"functions":[]}}`
+	want := `{"` + empty + `":{"functions":[],"comments":[]}}`
 	if strings.TrimSpace(out.String()) != want {
 		t.Fatalf("stdout:\n got %s\nwant %s", out.String(), want)
 	}

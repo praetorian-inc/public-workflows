@@ -1,0 +1,8 @@
+{
+  "functions": [
+    { "name": "P", "start": 1, "end": 8, "isComponent": true }
+  ],
+  "comments": [
+    { "start": 5, "end": 5, "text": "/* real */" }
+  ]
+}

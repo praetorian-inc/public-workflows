@@ -17,5 +17,6 @@
     { "name": "Outer>setTimeout", "start": 54, "end": 54, "isComponent": false },
     { "name": "Outer>setTimeout", "start": 55, "end": 55, "isComponent": false },
     { "name": "default", "start": 59, "end": 59, "isComponent": false }
-  ]
+  ],
+  "comments": []
 }
