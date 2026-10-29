@@ -1,10 +1,10 @@
-// End-to-end file-rule scenarios F1-F11 and B1 for every language (LAB-7587).
+// End-to-end file-rule scenarios F1-F17 and B1 for every language (LAB-7587).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { EXT, LANGS, baselineJson as bj, check, commit, file, fn, initRepo, makeRepo, runCli, source, write } from "./scenario-kit.mjs";
+import { EXT, LANGS, baselineJson as bj, check, commit, file, fn, initRepo, makeRepo, run, runCli, source, write } from "./scenario-kit.mjs";
 
 const B = ".github/size-baseline.json";
 // Every repo carries one small in-scope file so the liveness floor holds.
@@ -196,3 +196,22 @@ test("B1: baseline mode writes exactly the files over 300 with their lengths", (
   });
   assert.deepEqual(Object.keys(body.files), ["a.go", "c/d.py"]);
 });
+
+// guard#9701: the base branch moved after base.sha; the merge ref carries
+// those commits, and none of them may be attributed to the PR.
+for (const lang of LANGS) {
+  test(`${lang} F17: on pull_request, base-branch commits after base.sha are not the PR's`, () => {
+    const [p, f] = [`d/a.${EXT[lang]}`, `d/f.${EXT[lang]}`];
+    const root = initRepo();
+    const fork = commit(root, { [`keep.${EXT[lang]}`]: file(lang, 3), [p]: file(lang, 400), [B]: bj({ [p]: 400 }), [f]: source(lang, fn(lang, "F", 60)) });
+    run(root, "checkout", "-q", "-b", "feature");
+    commit(root, { [`keep.${EXT[lang]}`]: file(lang, 4) });
+    run(root, "checkout", "-q", "main");
+    commit(root, { [p]: file(lang, 401), [B]: bj({ [p]: 401 }), [f]: source(lang, fn(lang, "F", 61)) });
+    run(root, "merge", "-q", "--no-ff", "-m", "merge", "feature");
+    const r = check({ root, base: fork }, { GITHUB_EVENT_NAME: "pull_request" });
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /::notice::HEAD is the pull_request merge ref; comparing with its first parent/);
+    assert.equal(check({ root, base: fork }, { GITHUB_EVENT_NAME: "push" }).code, 1);
+  });
+}

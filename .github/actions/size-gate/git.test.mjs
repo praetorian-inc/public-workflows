@@ -22,6 +22,39 @@ test("resolveBase: SIZE_GATE_BASE goes through merge-base with HEAD", () => {
   assert.deepEqual(logs, []);
 });
 
+// GitHub's pull_request merge ref: "Merge <head> into <base tip>", first parent
+// the base branch tip, while base.sha (SIZE_GATE_BASE) stays at the fork point.
+function mergeRef(root) {
+  const fork = commit(root, { "a.go": "package a\n" });
+  run(root, "checkout", "-q", "-b", "feature");
+  commit(root, { "b.go": "package a\n" });
+  run(root, "checkout", "-q", "main");
+  const mainTip = commit(root, { "c.go": "package a\n" });
+  run(root, "merge", "-q", "--no-ff", "-m", "merge", "feature");
+  return { fork, mainTip };
+}
+
+test("resolveBase: on pull_request a merge-ref HEAD compares with its first parent, not a stale SIZE_GATE_BASE", () => {
+  const root = initRepo();
+  const { fork, mainTip } = mergeRef(root);
+  const logs = [];
+  assert.equal(resolveBase(root, fork, (m) => logs.push(m), "", true), mainTip);
+  assert.deepEqual(logs, [`::notice::HEAD is the pull_request merge ref; comparing with its first parent ${mainTip}, not SIZE_GATE_BASE '${fork}'.`]);
+});
+
+test("resolveBase: off pull_request, a merge HEAD still goes through merge-base with SIZE_GATE_BASE", () => {
+  const root = initRepo();
+  const { fork } = mergeRef(root);
+  assert.equal(resolveBase(root, fork, () => {}, "", false), fork);
+});
+
+test("resolveBase: on pull_request a HEAD with one parent goes through merge-base with SIZE_GATE_BASE", () => {
+  const root = initRepo();
+  const fork = commit(root, { "a.go": "package a\n" });
+  commit(root, { "b.go": "package a\n" });
+  assert.equal(resolveBase(root, fork, () => {}, "", true), fork);
+});
+
 test("resolveBase: a zero or unknown SIZE_GATE_BASE falls through to origin, then HEAD~1", () => {
   const root = initRepo();
   const first = commit(root, { "a.go": "package a\n" });

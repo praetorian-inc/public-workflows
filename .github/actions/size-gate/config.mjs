@@ -46,6 +46,8 @@ export function parseConfig(argv, env) {
     minScanned: count(f["--min-scanned"] ?? (env.SIZE_GATE_MIN_SCANNED || "1"), "min-scanned-files"),
     base: env.SIZE_GATE_BASE || "",
     defaultBranch: env.SIZE_GATE_DEFAULT_BRANCH || "",
+    // The runner sets GITHUB_EVENT_NAME to the caller's event in every step.
+    pullRequest: env.GITHUB_EVENT_NAME === "pull_request",
     goExtractor: env.SIZE_GATE_GO_EXTRACTOR || "",
   };
 }

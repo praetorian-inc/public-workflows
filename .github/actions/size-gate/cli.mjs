@@ -33,7 +33,7 @@ function runBaseline(cfg) {
 
 function runCheck(cfg, env) {
   const specs = pathspecs(cfg.include, cfg.exclude);
-  const base = resolveBase(cfg.root, cfg.base, log, cfg.defaultBranch);
+  const base = resolveBase(cfg.root, cfg.base, log, cfg.defaultBranch, cfg.pullRequest);
   const paths = listFiles(cfg.root, specs);
   const loc = measure(cfg, paths);
   const diff = readDiff(cfg.root, base, specs);
