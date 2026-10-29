@@ -94,11 +94,36 @@ function collect(sf) {
   return out;
 }
 
+const isJsxElementOrFragment = (n) => n.kind === K.JsxElement || n.kind === K.JsxFragment;
+
+// Whether trivia after this token can hold a comment, or is JsxText instead.
+// Ported from ts-api-utils src/comments.ts canHaveTrailingTrivia:
+// https://github.com/JoshuaKGoldberg/ts-api-utils/blob/e59a11b8d93e85e5049d2ec335c9c7134dfd7e73/src/comments.ts
+function canHaveTrailingTrivia(token) {
+  const p = token.parent;
+  if (token.kind === K.CloseBraceToken) return p.kind !== K.JsxExpression || !isJsxElementOrFragment(p.parent);
+  if (token.kind !== K.GreaterThanToken) return true;
+  switch (p.kind) {
+    case K.JsxClosingElement:
+    case K.JsxClosingFragment:
+      return !isJsxElementOrFragment(p.parent.parent); // only after the top element
+    case K.JsxOpeningElement:
+      return token.end !== p.end; // a type-argument ">"; else the body follows
+    case K.JsxOpeningFragment:
+      return false;
+    case K.JsxSelfClosingElement:
+      return token.end !== p.end || !isJsxElementOrFragment(p.parent);
+  }
+  return true;
+}
+
 // Every comment in source order, found the way ts-api-utils forEachComment
 // finds them: leading trivia of each token, plus trailing trivia except at
 // end of file. JSDoc nodes repeat their parent token's leading comments, and
-// JsxText is text, so neither is scanned. The scanner skips a shebang.
+// JsxText is text, so neither is scanned; nor is the trailing trivia of a JSX
+// ">" or "}", which is JsxText too. The scanner skips a shebang.
 function comments(sf) {
+  const jsx = sf.languageVariant === ts.LanguageVariant.JSX;
   const text = sf.getFullText();
   const seen = new Map();
   const add = (pos, end) => {
@@ -111,7 +136,7 @@ function comments(sf) {
     const children = node.getChildren(sf);
     if (children.length > 0) return children.forEach(visit);
     ts.forEachLeadingCommentRange(text, node.pos, add);
-    if (node.kind !== K.EndOfFileToken) ts.forEachTrailingCommentRange(text, node.end, add);
+    if (node.kind !== K.EndOfFileToken && (!jsx || canHaveTrailingTrivia(node))) ts.forEachTrailingCommentRange(text, node.end, add);
   };
   visit(sf);
   return [...seen.entries()].sort(([a], [b]) => a - b).map(([, c]) => c);

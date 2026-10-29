@@ -68,3 +68,30 @@ test("a missing file is a per-file error", () => {
   assert.match(out["/nonexistent/x.ts"].error, /./);
   assert.deepEqual(out["/nonexistent/x.ts"].comments, []);
 });
+
+// JSX text after a ">" or "}" is text, not a comment (plan rev2 §2 J1-J3).
+function commentsOf(src) {
+  const d = mkdtempSync(join(tmpdir(), "extract-ts-"));
+  try {
+    const f = join(d, "a.tsx");
+    writeFileSync(f, src);
+    return run(f)[f].comments.map(({ start, text }) => [start, text]);
+  } finally {
+    rmSync(d, { recursive: true, force: true });
+  }
+}
+
+test("J1/J2: JSX text that looks like a comment is not a comment", () => {
+  assert.deepEqual(commentsOf("const a = <p>/* eslint-disable max-lines */</p>;\n"), []);
+  assert.deepEqual(commentsOf("const b = (x: number) => <p>{x}// nolint here</p>;\n"), []);
+});
+
+test("J3: real comments next to JSX are still found, at their lines", () => {
+  for (const [src, want] of [
+    ["const a = <p>{/* eslint-disable max-lines */}</p>;\n", [1, "/* eslint-disable max-lines */"]],
+    ['const b = <div // eslint-disable-line max-lines\n a="1"></div>;\n', [1, "// eslint-disable-line max-lines"]],
+    ["\nconst el = <p/>; // nolint\n", [2, "// nolint"]],
+    ["function f() {\n  return <p></p> /* eslint-disable */;\n}\n", [2, "/* eslint-disable */"]],
+  ])
+    assert.deepEqual(commentsOf(src), [want], src);
+});

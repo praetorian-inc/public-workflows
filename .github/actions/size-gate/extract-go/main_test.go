@@ -70,6 +70,18 @@ func TestRunWritesJSON(t *testing.T) {
 	}
 }
 
+// G1: go/scanner counts "\n" only, so a comment's line is git's line and the
+// gate needs no conversion for Go (plan rev2 §5).
+func TestCommentLineCountsNewlinesOnly(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "cr.go")
+	writeFile(t, src, "package p\n\rvar x = 1\r\r//nolint\n")
+	got := extract([]string{src})[src]
+	want := []comment{{Start: 2, End: 2, Text: "//nolint"}}
+	if !reflect.DeepEqual(got.Comments, want) {
+		t.Fatalf("comments: got %+v, want %+v", got.Comments, want)
+	}
+}
+
 func readGolden(t *testing.T, path string) fileResult {
 	t.Helper()
 	data, err := os.ReadFile(path)

@@ -1,6 +1,6 @@
 // Size-lint disable comments the gate refuses on an added line (LAB-7587).
 // The Go and ESLint forms are ported from guard#9602; the Python forms are new.
-import { splitLines } from "./measure.mjs";
+import { gitLines, splitLines } from "./measure.mjs";
 
 const DISABLE = [
   /\/\/\s*nolint(?![\w:])/, // bare //nolint disables every linter, funlen and revive included
@@ -70,23 +70,26 @@ function sizeDirective(value) {
 
 const disables = (t) => silencesPylint(t) || DISABLE.some((re) => re.test(t));
 
-// The line numbers among added lines (Map line -> text) that carry one, read
-// from the parser's comments of the file at path p, so a string is never one.
-// A multi-line directive counts once, at its first added line. Only ruff's
-// regex reads what precedes a comment, so a comment after code gets "x " first.
-export function bannedLines(added, comments, p) {
+// The git line numbers among added lines (Map line -> text) that carry one,
+// read from the parser's comments of the file at path p, so a string is never
+// one. `text` is the file the comments were parsed from: their parser lines
+// become git's "\n" lines through it. A multi-line directive counts once, at
+// its first added line. Only ruff's regex reads what precedes a comment, so a
+// comment after code on its parser line gets "x " first.
+export function bannedLines(added, comments, p, text) {
   const lines = [...added.keys()].sort((a, b) => a - b);
+  const [g, src] = [gitLines(p, text), splitLines(p, text)];
   const hits = new Set();
   for (const c of comments) {
     if (c.text.startsWith("/*") && sizeDirective(c.text.slice(2, -2))) {
-      const first = lines.find((n) => c.start <= n && n <= c.end);
+      const first = lines.find((n) => g[c.start - 1] <= n && n <= g[c.end - 1]);
       if (first !== undefined) hits.add(first);
       continue;
     }
     splitLines(p, c.text).forEach((seg, k) => {
-      const n = c.start + k;
+      const n = g[c.start - 1 + k];
       if (!added.has(n)) return;
-      const after = k === 0 && added.get(n).trim() !== seg.trim();
+      const after = k === 0 && !/^\s*#/.test(src[c.start - 1]);
       if (disables(after ? `x ${seg}` : seg)) hits.add(n);
     });
   }

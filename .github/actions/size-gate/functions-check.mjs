@@ -97,7 +97,7 @@ function banErrors(head, diff) {
   for (const h of head) {
     const added = diff.added.get(h.file);
     if (h.error || !added) continue;
-    for (const line of bannedLines(added, h.comments, h.file))
+    for (const line of bannedLines(added, h.comments, h.file, h.text))
       errors.push({ file: h.file, line, msg: "adds a size-lint disable comment; split the code instead." });
   }
   return errors;

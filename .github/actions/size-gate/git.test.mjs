@@ -110,7 +110,7 @@ test("readDiff: a symlink that becomes a regular file (status T) reports its add
   assert.match(run(root, "diff", "--name-status", base), /^T\tx\.go$/m);
   const d = readDiff(root, base, []);
   assert.deepEqual(d.status.get("x.go"), { code: "M", from: "x.go" });
-  assert.deepEqual([...bannedLines(d.added.get("x.go"), [{ start: 3, end: 3, text: "//nolint" }], "x.go")], [3]);
+  assert.deepEqual([...bannedLines(d.added.get("x.go"), [{ start: 3, end: 3, text: "//nolint" }], "x.go", "package x\n\nvar y = 1 //nolint\n")], [3]);
 });
 
 test("readDiff and listFiles honor include and exclude pathspecs", () => {

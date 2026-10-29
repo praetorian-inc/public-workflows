@@ -7,10 +7,10 @@ import { check, file, makeRepo, run } from "./scenario-kit.mjs";
 
 // Each case is one comment, split by its path: .ts for /* */, .py for #, .go otherwise.
 const pathFor = (t) => (t.startsWith("/*") ? "a.ts" : t.startsWith("#") ? "a.py" : "a.go");
-const banned = (text, comment = text) => bannedLines(new Map([[1, text]]), [{ start: 1, end: 1, text: comment }], pathFor(comment)).length === 1;
+const banned = (text, comment = text) => bannedLines(new Map([[1, text]]), [{ start: 1, end: 1, text: comment }], pathFor(comment), text).length === 1;
 // A block comment with every line added, or only line `only` (an inner-line edit).
 const bannedIn = (text, only, lines = splitLines("a.ts", text)) =>
-  bannedLines(new Map(lines.map((t, i) => [i + 1, t]).filter(([n]) => only === undefined || n === only)), [{ start: 1, end: lines.length, text }], "a.ts");
+  bannedLines(new Map(lines.map((t, i) => [i + 1, t]).filter(([n]) => only === undefined || n === only)), [{ start: 1, end: lines.length, text }], "a.ts", text);
 
 test("D1: every banned form, one per pattern", () => {
   for (const t of [
@@ -170,7 +170,7 @@ test("D2: multi-line comments ESLint does not read as a size directive pass", ()
 
 test("bannedLines returns the line numbers", () => {
   const comments = [{ start: 7, end: 7, text: "# noqa" }, { start: 9, end: 9, text: "//nolint" }];
-  assert.deepEqual(bannedLines(new Map([[3, "a"], [7, "x  # noqa"], [9, "//nolint"]]), comments, "a.py"), [7, 9]);
+  assert.deepEqual(bannedLines(new Map([[3, "a"], [7, "x  # noqa"], [9, "//nolint"]]), comments, "a.py", "\n".repeat(6) + "x  # noqa\n\n//nolint\n"), [7, 9]);
 });
 
 test("D1/D2 end to end: an added banned comment fails at its line; a coded noqa passes", () => {
