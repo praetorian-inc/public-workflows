@@ -6,6 +6,8 @@ Prints one JSON object mapping each path, as given, to
 {"functions": [{"name", "start", "end", "isComponent"}],
  "comments": [{"start", "end", "text"}], "error"?}.
 Comments are tokenize's COMMENT tokens, so `#` inside a string is not one.
+They are read in the declared encoding and, like ruff, as UTF-8; a file whose
+declared encoding adds or removes line breaks gets "error".
 Parse-only: the sources are read and parsed with ast, never executed.
 """
 
@@ -16,6 +18,7 @@ import sys
 import tokenize
 
 FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+UTF8 = ("utf-8", "utf-8-sig")
 
 
 def _start_line(node):
@@ -66,22 +69,48 @@ def _collect(node, prefix, enclosing, hints, out):
             _collect(child, prefix, enclosing, hints, out)
 
 
+def _declared(data, enc):
+    """data decoded in enc, refusing a codec that adds or removes line breaks."""
+    text = data.decode(enc)
+    if enc in UTF8:
+        return text
+    pieces = [line.decode(enc) for line in data.split(b"\n")]
+    if "\n".join(pieces) != text or any("\r" in p or "\n" in p for p in pieces):
+        raise ValueError("declared encoding moves line breaks")
+    return text
+
+
+def _views(data):
+    """Each text a linter may read: the declared encoding, and UTF-8 as ruff reads it.
+
+    Raises ValueError when the declared encoding adds or removes line breaks.
+    """
+    enc = tokenize.detect_encoding(io.BytesIO(data).readline)[0]
+    declared = _declared(data, enc)
+    if enc in UTF8:
+        return [declared]
+    try:
+        utf8 = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return [declared]
+    return [declared] if utf8 == declared else [declared, utf8]
+
+
 def _comments(source):
-    """Every comment in source order, as 1-based physical lines and raw text.
+    """Every comment in every view, in source order, as 1-based lines and raw text.
 
     ast ends a line at \\r\\n, \\r or \\n, but tokenize reads \\n-split lines,
-    so endings are normalized first; on bytes, because PEP 263 encodings are
-    ASCII-compatible. A file ast accepted never fails here: [] instead.
+    so endings are normalized first. That is done on bytes because CPython's
+    tokenizer normalizes line endings on bytes before it decodes.
     """
-    lines = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    try:
-        return [
-            {"start": tok.start[0], "end": tok.end[0], "text": tok.string}
-            for tok in tokenize.tokenize(io.BytesIO(lines).readline)
-            if tok.type == tokenize.COMMENT
-        ]
-    except (SyntaxError, ValueError, RecursionError, tokenize.TokenError):
-        return []
+    data = source.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    found = {
+        (tok.start[0], tok.end[0], tok.string)
+        for view in _views(data)
+        for tok in tokenize.generate_tokens(io.StringIO(view).readline)
+        if tok.type == tokenize.COMMENT
+    }
+    return [{"start": s, "end": e, "text": t} for s, e, t in sorted(found)]
 
 
 def extract_file(path):
@@ -93,7 +122,7 @@ def extract_file(path):
         functions = []
         _collect(tree, "", "", _lambda_hints(tree), functions)
         comments = _comments(source)
-    except (OSError, SyntaxError, ValueError, RecursionError) as exc:
+    except (OSError, SyntaxError, ValueError, RecursionError, tokenize.TokenError) as exc:
         error = f"{type(exc).__name__}: {exc}"
         return {"functions": [], "comments": [], "error": error}
     return {"functions": functions, "comments": comments}
