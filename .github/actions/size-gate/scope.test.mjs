@@ -123,6 +123,8 @@ test("parseConfig: flags, env fallbacks and defaults", () => {
   assert.deepEqual(c.include, ["a/**", "b/**"]);
   assert.deepEqual(c.exclude, ["c/**"]);
   assert.equal(c.minScanned, 1);
+  assert.equal(c.pullRequest, false);
+  assert.equal(parseConfig(["check"], { GITHUB_EVENT_NAME: "pull_request" }).pullRequest, true);
   const e = parseConfig(["baseline"], {
     SIZE_GATE_BASELINE: "x/b.json",
     SIZE_GATE_INCLUDE: "a/**\n\n  b/**  \n",
