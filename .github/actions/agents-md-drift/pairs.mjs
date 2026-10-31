@@ -6,7 +6,20 @@
 import { git, showBlob } from "../size-gate/git.mjs";
 import { cap } from "./questions.mjs";
 
-const FENCE = /^\s*(```|~~~)/;
+// CommonMark fenced code blocks: an opener is 3+ backticks or tildes after at
+// most three spaces (a backtick opener's info string has no backtick); only a
+// run of the same character, at least as long, with nothing but whitespace
+// after it, closes it.
+const OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const opener = (l) => {
+  const m = OPEN.exec(l);
+  return m && !(m[1][0] === "`" && m[2].includes("`")) ? m[1] : null;
+};
+const closes = (l, open) => {
+  const m = CLOSE.exec(l);
+  return m !== null && m[1][0] === open[0] && m[1].length >= open.length;
+};
 const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
 
 // [{ heading, level, text }] for the ## and ### sections of a markdown text. A
@@ -15,10 +28,11 @@ const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
 export function sections(md) {
   const lines = md.split("\n");
   const hs = [];
-  let fence = false;
+  let fence = null;
   lines.forEach((l, i) => {
-    if (FENCE.test(l)) fence = !fence;
-    else if (!fence) {
+    if (fence) {
+      if (closes(l, fence)) fence = null;
+    } else if ((fence = opener(l)) === null) {
       const m = HEADING.exec(l);
       if (m) hs.push({ i, level: m[1].length, heading: m[2].trim() });
     }

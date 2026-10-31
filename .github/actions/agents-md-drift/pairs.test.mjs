@@ -15,6 +15,26 @@ test("sections: ## and ### only, nested ### inside its ## parent, fenced heading
   assert.equal(s[2].text, "## B ##\nb");
 });
 
+// CommonMark fence rules: a fence closes only on the same character, at least
+// as long as the opener, with nothing but whitespace after it and at most three
+// spaces of indent. A backtick opener's info string cannot contain a backtick.
+test("sections: a fence closes only on a matching CommonMark closing fence", () => {
+  const headings = (lines) => sections(lines.join("\n")).map((x) => x.heading);
+  // A shorter run inside a longer fence is text.
+  assert.deepEqual(headings(["## A", "````", "```", "## in", "```", "````", "## B"]), ["A", "B"]);
+  // The other fence character is text.
+  assert.deepEqual(headings(["## A", "~~~", "```", "## in", "~~~", "## B"]), ["A", "B"]);
+  // A line with an info string never closes a fence.
+  assert.deepEqual(headings(["## A", "```", "```js", "## in", "```", "## B"]), ["A", "B"]);
+  // A backtick run whose info string holds a backtick is not an opener.
+  assert.deepEqual(headings(["## A", "``` a`b", "## B"]), ["A", "B"]);
+  // Four spaces of indent is not a fence (opener or closer).
+  assert.deepEqual(headings(["## A", "    ```", "## B"]), ["A", "B"]);
+  assert.deepEqual(headings(["## A", "```", "    ```", "## in", "   ```", "## B"]), ["A", "B"]);
+  // Trailing whitespace after a closer is allowed.
+  assert.deepEqual(headings(["## A", "~~~~ sh", "## in", "~~~~~  ", "## B"]), ["A", "B"]);
+});
+
 test("carriesContent drops an empty or pointer-only CLAUDE.md, never an AGENTS.md", () => {
   assert.equal(carriesContent("x/CLAUDE.md", " @AGENTS.md \n"), false);
   assert.equal(carriesContent("CLAUDE.md", ""), false);
