@@ -1,5 +1,5 @@
 // Test fixtures for the size gate (LAB-7587): throwaway git repositories and
-// generated source text, so no 301-line fixture file is ever committed.
+// generated source text, so no 501-line fixture file is ever committed.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -116,4 +116,4 @@ export function goExtractor() {
 export const check = (repo, env = {}, args = []) =>
   runCli(repo.root, ["check", ...args], { SIZE_GATE_BASE: repo.base, SIZE_GATE_GO_EXTRACTOR: goExtractor(), ...env });
 
-export const baselineJson = (files) => JSON.stringify({ limit: 300, generatedBy: "test", files }, null, 2) + "\n";
+export const baselineJson = (files) => JSON.stringify({ limit: 500, generatedBy: "test", files }, null, 2) + "\n";

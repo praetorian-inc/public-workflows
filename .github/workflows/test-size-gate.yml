@@ -3,9 +3,9 @@ name: Test size-gate
 #   unit:    extractor goldens (Go, TS/TSX, Python), the node:test suites
 #            including the end-to-end scenario matrix, and actionlint.
 #   dogfood: runs the reusable workflow on the gate's own sources, scoped to
-#            .github/actions/size-gate/ (the whole-repo scope fails on
-#            collect_leaderboard_metrics.py, 343 lines, which has no baseline
-#            here). Only .go/.ts/.tsx/.py files are measured and tests are
+#            .github/actions/size-gate/ (chosen when the file limit was 300,
+#            at which the whole-repo scope failed on the unbaselined
+#            343-line collect_leaderboard_metrics.py). Only .go/.ts/.tsx/.py files are measured and tests are
 #            exempt, so the floor is the two extractor sources.
 
 on:

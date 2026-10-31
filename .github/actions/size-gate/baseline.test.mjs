@@ -11,26 +11,26 @@ const B = "b.json";
 const r = (loc, baseline, baseBaseline, renames = new Map(), baseLines = undefined) =>
   ratchet({ loc: new Map(Object.entries(loc)), baseline, baseBaseline, renames, baselinePath: B, baseLines });
 
-test("oversized keeps files over 300, sorted by path", () => {
-  assert.deepEqual(Object.entries(oversized(new Map([["z", 301], ["a", 900], ["m", 300]]))), [["a", 900], ["z", 301]]);
+test("oversized keeps files over 500, sorted by path", () => {
+  assert.deepEqual(Object.entries(oversized(new Map([["z", 501], ["a", 900], ["m", 500]]))), [["a", 900], ["z", 501]]);
 });
 
 test("ratchet: an entry that matches its file and the base passes", () => {
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, { a: 400 }), []);
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, null), []);
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, { a: 600 }), []);
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, null), []);
 });
 
 test("ratchet: every tree-side failure", () => {
-  assert.deepEqual(r({}, { a: 400 }, null), [["a", "is listed in b.json but no longer exists or is out of scope. Remove the entry."]]);
-  assert.deepEqual(r({ a: 300 }, { a: 400 }, null), [["a", "is now 300 lines, within the 300-line limit. Remove its entry from b.json."]]);
-  assert.deepEqual(r({ a: 401 }, { a: 400 }, null), [["a", "grew to 401 lines; b.json allows 400. Baselined files may not grow."]]);
-  assert.deepEqual(r({ a: 399 }, { a: 400 }, null), [["a", "shrank to 399 lines. Lower its b.json entry from 400 to 399 in this PR."]]);
+  assert.deepEqual(r({}, { a: 600 }, null), [["a", "is listed in b.json but no longer exists or is out of scope. Remove the entry."]]);
+  assert.deepEqual(r({ a: 500 }, { a: 600 }, null), [["a", "is now 500 lines, within the 500-line limit. Remove its entry from b.json."]]);
+  assert.deepEqual(r({ a: 601 }, { a: 600 }, null), [["a", "grew to 601 lines; b.json allows 600. Baselined files may not grow."]]);
+  assert.deepEqual(r({ a: 599 }, { a: 600 }, null), [["a", "shrank to 599 lines. Lower its b.json entry from 600 to 599 in this PR."]]);
 });
 
 test("ratchet: the baseline only shrinks, following renames", () => {
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, {}), [["a", "was added to b.json; the baseline can only shrink."]]);
-  assert.deepEqual(r({ a: 410 }, { a: 410 }, { a: 400 }), [["a", "b.json entry rose from 400 to 410; the baseline can only shrink."]]);
-  assert.deepEqual(r({ n: 400 }, { n: 400 }, { o: 400 }, new Map([["n", "o"]])), []);
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, {}), [["a", "was added to b.json; the baseline can only shrink."]]);
+  assert.deepEqual(r({ a: 610 }, { a: 610 }, { a: 600 }), [["a", "b.json entry rose from 600 to 610; the baseline can only shrink."]]);
+  assert.deepEqual(r({ n: 600 }, { n: 600 }, { o: 600 }, new Map([["n", "o"]])), []);
 });
 
 test("readBaseline: missing is null, broken JSON throws", () => {
@@ -64,12 +64,12 @@ test("readBaseline and readBaseBaseline refuse a files map that is not path -> l
 
 test("ratchet: with no merge-base baseline, entries are bounded by the merge-base files", () => {
   const none = "did not exist at the merge-base, which has no b.json; a new file cannot be baselined.";
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, null, new Map(), {}), [["a", none]]);
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, null, new Map(), { a: 250 }),
-    [["a", "b.json allows 400 lines but it was 250 at the merge-base, which has no b.json; a baseline entry cannot exceed it."]]);
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, null, new Map(), { a: 400 }), []);
-  assert.deepEqual(r({ n: 400 }, { n: 400 }, null, new Map([["n", "o"]]), { o: 410 }), []);
-  assert.deepEqual(r({ a: 400 }, { a: 400 }, { a: 400 }, new Map(), {}), [], "a merge-base baseline decides alone");
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, null, new Map(), {}), [["a", none]]);
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, null, new Map(), { a: 250 }),
+    [["a", "b.json allows 600 lines but it was 250 at the merge-base, which has no b.json; a baseline entry cannot exceed it."]]);
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, null, new Map(), { a: 600 }), []);
+  assert.deepEqual(r({ n: 600 }, { n: 600 }, null, new Map([["n", "o"]]), { o: 610 }), []);
+  assert.deepEqual(r({ a: 600 }, { a: 600 }, { a: 600 }, new Map(), {}), [], "a merge-base baseline decides alone");
 });
 
 test("baseLengths: the merge-base length of each entry's file, following renames", () => {

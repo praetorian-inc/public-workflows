@@ -9,23 +9,23 @@ const run = (loc, d, baseline = {}) =>
   checkFiles({ loc: new Map(Object.entries(loc)), diff: d, baseline, baseBaseline: null, baselinePath: "b.json" });
 
 test("a new oversized file and an old unbaselined one get different messages", () => {
-  const { errors } = run({ n: 301, o: 302 }, diff({ atBase: ["o"] }));
+  const { errors } = run({ n: 501, o: 502 }, diff({ atBase: ["o"] }));
   assert.deepEqual(errors, [
-    { file: "n", msg: "new file is 301 lines; the limit is 300. Split it." },
-    { file: "o", msg: "is 302 lines and not in b.json; the limit is 300. Shrink it to 300 or fewer." },
+    { file: "n", msg: "new file is 501 lines; the limit is 500. Split it." },
+    { file: "o", msg: "is 502 lines and not in b.json; the limit is 500. Shrink it to 500 or fewer." },
   ]);
 });
 
 test("a renamed oversized file is not new", () => {
-  const { errors } = run({ n: 301 }, diff({ renames: [["n", "o"]] }));
+  const { errors } = run({ n: 501 }, diff({ renames: [["n", "o"]] }));
   assert.match(errors[0].msg, /not in b\.json/);
 });
 
-test("warnings: only added or changed files of 201-300 lines", () => {
-  const { warnings, errors } = run({ a: 201, b: 300, c: 200, d: 250 }, diff({ added: ["a", "b", "c"] }));
+test("warnings: only added or changed files of 401-500 lines", () => {
+  const { warnings, errors } = run({ a: 401, b: 500, c: 400, d: 450 }, diff({ added: ["a", "b", "c"] }));
   assert.deepEqual(errors, []);
   assert.deepEqual(warnings.map((w) => w.file), ["a", "b"]);
-  assert.equal(warnings[0].msg, "is 201 lines, over the 200-line soft limit (hard limit 300).");
+  assert.equal(warnings[0].msg, "is 401 lines, over the 400-line soft limit (hard limit 500).");
 });
 
 test("annotations escape the message and the file property", () => {

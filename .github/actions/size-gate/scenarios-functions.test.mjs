@@ -104,9 +104,9 @@ for (const lang of ["ts", "py"]) {
     const grown = check(repo(lang, { [p]: cr(source(lang, fn(lang, "F", 40))) }, { [p]: cr(source(lang, fn(lang, "F", 60))) }));
     assert.equal(grown.code, 1, grown.out);
     assert.match(grown.out, /`F` grew to 60 lines; the limit is 50/);
-    const big = check(repo(lang, {}, { [p]: cr(file(lang, 301)) }));
+    const big = check(repo(lang, {}, { [p]: cr(file(lang, 501)) }));
     assert.equal(big.code, 1, big.out);
-    assert.match(big.out, /new file is 301 lines; the limit is 300/);
+    assert.match(big.out, /new file is 501 lines; the limit is 500/);
   });
 }
 
