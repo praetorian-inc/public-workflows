@@ -2,11 +2,10 @@ name: Test size-gate
 # Tests for the shared size gate (LAB-7587).
 #   unit:    extractor goldens (Go, TS/TSX, Python), the node:test suites
 #            including the end-to-end scenario matrix, and actionlint.
-#   dogfood: runs the reusable workflow on the gate's own sources, scoped to
-#            .github/actions/size-gate/ (chosen when the file limit was 300,
-#            at which the whole-repo scope failed on the unbaselined
-#            343-line collect_leaderboard_metrics.py). Only .go/.ts/.tsx/.py files are measured and tests are
-#            exempt, so the floor is the two extractor sources.
+#   dogfood: runs the reusable workflow on this whole repo, the way a normal
+#            caller does, with no baseline file. Only .go/.ts/.tsx/.py files
+#            are measured and tests are exempt, so the floor is the 19 files
+#            that leaves.
 
 on:
   # Escape hatch: both real triggers are paths:-filtered.
@@ -104,6 +103,4 @@ jobs:
       contents: read
     uses: ./.github/workflows/size-gate.yml
     with:
-      include-paths: ".github/actions/size-gate/**"
-      baseline-path: ".github/actions/size-gate/.size-baseline.json"
-      min-scanned-files: 2
+      min-scanned-files: 19
