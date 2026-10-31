@@ -41,9 +41,9 @@ export const HIGH = 0.8;
 export const MIDDLE = 0.25;
 
 // The calibration set pins this digest; a mismatch means the set was not rerun.
-export const DIGEST = "535c2010b7102fa9ddb80e55e58845ad3adf55d308dec44a33ca19d641d6eceb";
+export const DIGEST = "0273dae56d37174f1ab7a626d9d1b6e283f8250cef933df004ab8abeba54f687";
 export const questionsDigest = () =>
-  createHash("sha256").update(JSON.stringify([JEV_MODEL, DIFF_CAP, REQUESTS])).digest("hex");
+  createHash("sha256").update(JSON.stringify([JEV_MODEL, DIFF_CAP, TRUNCATION_MARKER, REQUESTS])).digest("hex");
 
 export const scoreOf = (answers) => Math.max(...answers);
 export const bandOf = (score) => (score >= HIGH ? "high" : score >= MIDDLE ? "middle" : "low");

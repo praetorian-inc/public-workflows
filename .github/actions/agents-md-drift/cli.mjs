@@ -3,10 +3,11 @@
 //   node cli.mjs score   ask JEV about them      (TYPESAFE_JEV_API_KEY)
 //   node cli.mjs render  the comment body        (PAIRS_STATUS, JEV_STATUS, HEAD_SHA, STRUCTURED_OUTPUT,
 //                                                 PREVIOUS_FILE, PAYLOAD_FILE)
-// Each step reads and writes files in WORK_DIR (default .agents-md-drift) and
+// Each step reads and writes files in $RUNNER_TEMP/agents-md-drift and
 // step outputs in $GITHUB_OUTPUT. Nothing here fails the check: every failure
 // is a notice and a pass.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { escapeData } from "../size-gate/report.mjs";
@@ -17,8 +18,13 @@ import { REQUESTS } from "./questions.mjs";
 
 const DEFAULT_MAX_PAIRS = 2000;
 
+// The steps run from the PR's checkout, which the PR controls, so the work files
+// live in the runner's temp directory where a PR cannot plant or redirect them.
+// Every step of the job sees the same RUNNER_TEMP.
+const workDir = (env) => path.join(env.RUNNER_TEMP || tmpdir(), "agents-md-drift");
+
 function io(env, log) {
-  const dir = env.WORK_DIR || ".agents-md-drift";
+  const dir = workDir(env);
   const file = (n) => path.join(dir, n);
   return {
     log,

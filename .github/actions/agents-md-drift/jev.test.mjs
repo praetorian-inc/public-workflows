@@ -11,6 +11,12 @@ const pairs = [
 const diffs = { "a.go": "diff a", "b.go": "diff b" };
 const ok = (v) => ({ ok: true, status: 200, json: async () => ({ answers: { stale: { noul: v } } }) });
 const status = (s) => ({ ok: false, status: s, json: async () => ({}) });
+const withHeaders = (r, h) => ({ ...r, headers: new Headers(h) });
+// Records each backoff instead of waiting on a real clock.
+const clock = () => {
+  const waits = [];
+  return { waits, sleep: async (ms) => void waits.push(ms) };
+};
 
 test("stateFor passes PR and instruction text as data fields", () => {
   assert.deepEqual(stateFor(pairs[0], diffs), { changed_file: "a.go", agents_md: "AGENTS.md", section_at_head: "## H\nx", diff: "diff a" });
@@ -50,9 +56,42 @@ test("5xx and network errors retry, then succeed", async () => {
     if (r instanceof Error) throw r;
     return r ?? ok(0.5);
   };
-  const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl, concurrency: 1 });
+  const { sleep } = clock();
+  const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl, concurrency: 1, sleep });
   assert.equal(res.ok, true);
   assert.equal(res.scored[0].band, "middle");
+});
+
+test("429 and 408 retry with exponential backoff; so does an unreadable body", async () => {
+  const run = async (replies) => {
+    const { waits, sleep } = clock();
+    const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => replies.shift() ?? ok(0.9), concurrency: 1, sleep });
+    return [res.ok, waits];
+  };
+  assert.deepEqual(await run([status(429), status(408)]), [true, [1000, 2000]]);
+  const cut = { ok: true, status: 200, json: async () => { throw new SyntaxError("cut"); } };
+  assert.deepEqual(await run([cut]), [true, [1000]]);
+});
+
+test("Retry-After is honoured in seconds or as a date, and capped", async () => {
+  const run = async (h) => {
+    const replies = [withHeaders(status(429), h)];
+    const { waits, sleep } = clock();
+    await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => replies.shift() ?? ok(0), concurrency: 1, sleep });
+    return waits[0];
+  };
+  assert.equal(await run({ "Retry-After": "7" }), 7000);
+  assert.equal(await run({ "Retry-After": "3600" }), 30000);
+  const d = await run({ "Retry-After": new Date(Date.now() + 5000).toUTCString() });
+  assert.ok(d > 3000 && d <= 5000, String(d));
+  assert.equal(await run({ "Retry-After": "soon" }), 1000);
+});
+
+test("another 4xx such as 404 is not retried either", async () => {
+  let calls = 0;
+  const { waits, sleep } = clock();
+  const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => (calls++, status(404)), concurrency: 1, sleep });
+  assert.deepEqual([res.reason, calls, waits.length], ["p1: HTTP 404", 1, 0]);
 });
 
 test("a 4xx is not retried and makes the whole run unavailable, without the key in the reason", async () => {
@@ -66,8 +105,10 @@ test("a 4xx is not retried and makes the whole run unavailable, without the key 
 
 test("three failed attempts give up; a non-numeric answer is unavailable", async () => {
   let calls = 0;
-  const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => (calls++, status(500)), concurrency: 1 });
+  const { waits, sleep } = clock();
+  const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => (calls++, status(500)), concurrency: 1, sleep });
   assert.deepEqual([res.ok, res.reason, calls], [false, "p1: HTTP 500", 3]);
+  assert.deepEqual(waits, [1000, 2000]);
   const bad = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
   assert.equal(bad.ok, false);
   assert.match(bad.reason, /noul/);

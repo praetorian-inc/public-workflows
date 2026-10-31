@@ -30,8 +30,12 @@ function setup(t) {
   const head = g("rev-parse", "HEAD");
   const out = path.join(root, "out.txt");
   writeFileSync(out, "");
+  // The runner's temp directory, outside the (untrusted) checkout.
+  const runnerTemp = mkdtempSync(path.join(tmpdir(), "drift-runner-temp-"));
+  t.after(() => rmSync(runnerTemp, { recursive: true, force: true }));
+  const work = path.join(runnerTemp, "agents-md-drift");
   const env = {
-    ROOT: root, WORK_DIR: path.join(root, ".agents-md-drift"), GITHUB_OUTPUT: out, GITHUB_STEP_SUMMARY: path.join(root, "summary.md"),
+    ROOT: root, RUNNER_TEMP: runnerTemp, GITHUB_OUTPUT: out, GITHUB_STEP_SUMMARY: path.join(root, "summary.md"),
     BASE_SHA: base, HEAD_SHA: head, SKIP_EXTENSIONS: ".md", PAYLOAD_FILE: path.join(root, "payload.json"), PREVIOUS_FILE: path.join(root, "previous.md"),
   };
   const outputs = () => Object.fromEntries(readFileSync(out, "utf8").trim().split("\n").filter(Boolean).map((l) => l.split(/=(.*)/s).slice(0, 2)));
@@ -40,7 +44,7 @@ function setup(t) {
     writeFileSync(out, "");
     return main([cmd], { ...env, ...extra }, { log: (s) => logs.push(s), fetchImpl });
   };
-  return { root, env, outputs, logs, run };
+  return { root, work, env, outputs, logs, run };
 }
 
 // JEV says the Handlers section is stale for b.go and Style is not.
@@ -56,7 +60,7 @@ test("pairs → score → render posts one finding with its draft", async (t) =>
   assert.deepEqual(s.outputs(), { status: "ok", count: "2" });
   await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
   assert.deepEqual(s.outputs(), { jev: "ok", high: "1" });
-  const findings = JSON.parse(readFileSync(path.join(s.env.WORK_DIR, "findings.json"), "utf8"));
+  const findings = JSON.parse(readFileSync(path.join(s.work, "findings.json"), "utf8"));
   assert.deepEqual(findings.map((f) => [f.id, f.heading, f.files]), [["f1", "Handlers", ["b.go"]]]);
   assert.match(findings[0].diffs["b.go"], /\+b/);
   assert.match(readFileSync(s.env.GITHUB_STEP_SUMMARY, "utf8"), /2 pair\(s\) scored: 1 finding/);
@@ -65,6 +69,27 @@ test("pairs → score → render posts one finding with its draft", async (t) =>
   const { body } = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8"));
   assert.match(body, /Every handler is listed: a, b\./);
   assert.ok(!s.logs.join("\n").includes(KEY));
+});
+
+// The work files live under $RUNNER_TEMP, never in the PR checkout the steps
+// run from, so a PR cannot plant or redirect them.
+test("work files live under RUNNER_TEMP, and a work dir planted in the checkout is ignored", async (t) => {
+  const s = setup(t);
+  const cwd = process.cwd();
+  process.chdir(s.root);
+  t.after(() => process.chdir(cwd));
+  const planted = path.join(s.root, ".agents-md-drift");
+  mkdirSync(planted);
+  const decoy = { scored: [{ id: "p1", file: "x.go", agents_md: "AGENTS.md", heading: "Planted", section: "## Planted", score: 0.99, band: "high" }], overflow: [] };
+  writeFileSync(path.join(planted, "scored.json"), JSON.stringify(decoy));
+  await s.run("pairs");
+  assert.equal(existsSync(path.join(s.work, "pairs.json")), true);
+  assert.equal(existsSync(path.join(planted, "pairs.json")), false);
+  await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
+  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", STRUCTURED_OUTPUT: "" });
+  const { body } = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8"));
+  assert.match(body, /`Handlers`/);
+  assert.doesNotMatch(body, /Planted/);
 });
 
 test("no key: score is unavailable; render leaves no new comment and notices", async (t) => {
@@ -109,7 +134,7 @@ test("pairs: only skipped files changed is none; the cap overflows into the comm
   assert.deepEqual(s.outputs(), { status: "none", count: "0" });
   await s.run("pairs", { MAX_PAIRS: "1" });
   assert.deepEqual(s.outputs(), { status: "ok", count: "1" });
-  const { overflow } = JSON.parse(readFileSync(path.join(s.env.WORK_DIR, "pairs.json"), "utf8"));
+  const { overflow } = JSON.parse(readFileSync(path.join(s.work, "pairs.json"), "utf8"));
   assert.deepEqual(overflow, [{ file: "b.go", agents_md: "AGENTS.md", sections: 1 }]);
 });
 

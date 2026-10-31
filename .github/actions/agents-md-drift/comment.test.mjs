@@ -103,3 +103,82 @@ test("withNotice updates an existing body in place and never creates one", () =>
   assert.deepEqual(parseState(twice), parseState(body));
   assert.ok(twice.startsWith(MARKER));
 });
+
+test("a repeated heading in one file is its own finding, and an old-format key still matches the first", () => {
+  const one = pair({ heading: "Notes", occurrence: 1, section: "## Notes\na" });
+  const two = pair({ id: "p2", heading: "Notes", occurrence: 2, section: "## Notes\nb", score: 0.85 });
+  const f = findingsOf([one, two]);
+  assert.deepEqual(f.map((x) => [x.id, x.heading, x.occurrence, x.section]), [
+    ["f1", "Notes", 1, "## Notes\na"],
+    ["f2", "Notes", 2, "## Notes\nb"],
+  ]);
+  const body = decide({ previous: "", scored: [one, two], overflow: [], drafts: drafts({ f1: "A.", f2: "B." }), sha: "h1" }).body;
+  assert.match(body, /#### `svc\/AGENTS\.md` § `Notes`\n/);
+  assert.match(body, /#### `svc\/AGENTS\.md` § `Notes` \(occurrence 2\)\n/);
+  // Only the second goes stale-free: it resolves alone.
+  const next = decide({ previous: body, scored: [one], overflow: [], drafts: null, sha: "h2" }).body;
+  assert.match(next, /- `svc\/AGENTS\.md` § `Notes` \(occurrence 2\): Resolved at h2/);
+  assert.equal(Object.values(parseState(next).findings).filter((x) => x.status === "open").length, 1);
+
+  // A comment written before occurrences existed keyed the first section by
+  // [agents_md, heading]; that finding is the same one, not a resolved twin.
+  const legacy = { findings: { [JSON.stringify(["svc/AGENTS.md", "Notes"])]: { agents_md: "svc/AGENTS.md", heading: "Notes", files: ["svc/a.go"], confidence: 0.9, draft: "", status: "open" } } };
+  const prev = `${MARKER}\n<!-- agents-md-drift-state:${Buffer.from(JSON.stringify(legacy)).toString("base64")} -->\n`;
+  const after = parseState(decide({ previous: prev, scored: [one], overflow: [], drafts: null, sha: "h3" }).body);
+  assert.deepEqual(Object.values(after.findings).map((x) => x.status), ["open"]);
+});
+
+const FOOTER = /\n\*Automated drift check: JEV [^\n]*\*$/;
+const fencesBalanced = (body) => (body.match(/^```+text$/gm) ?? []).length === (body.match(/^```+$/gm) ?? []).length;
+
+test("an oversize report shrinks structurally: the state block and every finding survive, never a raw cut", () => {
+  const scored = Array.from({ length: 40 }, (_, i) => pair({ id: `p${i}`, file: `f${i}.go`, heading: `H${i}`, score: 0.9 }));
+  const d = drafts(Object.fromEntries(scored.map((_, i) => [`f${i + 1}`, "d".repeat(3999) + "\n"])));
+  const { body } = decide({ previous: "", scored, overflow: [], drafts: d, sha: "h1" });
+  assert.ok(body.length <= MAX_CHARS, `length ${body.length}`);
+  assert.match(body, FOOTER);
+  assert.ok(fencesBalanced(body));
+  assert.equal(Object.keys(parseState(body).findings).length, 40);
+  assert.equal((body.match(/^#### /gm) ?? []).length, 40);
+  assert.match(body, /shortened to fit the GitHub comment size limit/);
+});
+
+test("many resolved findings with drafts never push the open ones or the state out", () => {
+  const findings = {};
+  for (let i = 0; i < 300; i++) {
+    findings[JSON.stringify(["AGENTS.md", `R${i}`])] = { agents_md: "AGENTS.md", heading: `R${i}`, files: ["x.go"], confidence: 0.9, draft: "r".repeat(4000), status: "resolved", resolved_at: "h0" };
+  }
+  const previous = `${MARKER}\n<!-- agents-md-drift-state:${Buffer.from(JSON.stringify({ findings })).toString("base64")} -->\n`;
+  const { body } = decide({ previous, scored: [pair({})], overflow: [], drafts: drafts({ f1: "Fix it." }), sha: "h1" });
+  assert.ok(body.length <= MAX_CHARS, `length ${body.length}`);
+  assert.match(body, FOOTER);
+  assert.ok(fencesBalanced(body));
+  const state = parseState(body);
+  assert.equal(state.findings[JSON.stringify(["svc/AGENTS.md", "Handlers"])].draft, "Fix it.");
+  assert.match(body, /#### `svc\/AGENTS\.md` § `Handlers`[\s\S]*Fix it\./);
+});
+
+test("the notice renders as a blockquote on its own line, replacing either notice shape", () => {
+  const body = decide({ previous: "", scored: [pair({})], overflow: [], drafts: null, sha: "h1" }).body;
+  const once = withNotice(body, "JEV was unavailable at h2");
+  assert.match(once, /\n\n<!-- agents-md-drift-notice -->\n> \*\*Notice:\*\* JEV was unavailable at h2\n/);
+  const twice = withNotice(once, "JEV was unavailable at h3");
+  assert.equal(twice.split("\n").length, once.split("\n").length);
+  // The single-line shape earlier comments carry is replaced too.
+  const old = body.replace(/(<!-- agents-md-drift-state:[^\n]*\n)/, "$1\n<!-- agents-md-drift-notice -->> **Notice:** JEV was unavailable at h0\n");
+  const fixed = withNotice(old, "JEV was unavailable at h4");
+  assert.equal((fixed.match(/Notice:/g) ?? []).length, 1);
+  assert.equal(fixed.split("\n").length, once.split("\n").length);
+});
+
+test("a notice on an oversize previous body re-renders from its state instead of cutting it", () => {
+  const body = decide({ previous: "", scored: [pair({})], overflow: [], drafts: drafts({ f1: "Fix it." }), sha: "h1" }).body;
+  const big = `${body}\n${"x".repeat(70000)}`;
+  const out = withNotice(big, "JEV was unavailable at h2");
+  assert.ok(out.length <= MAX_CHARS, `length ${out.length}`);
+  assert.ok(out.startsWith(MARKER));
+  assert.deepEqual(parseState(out), parseState(body));
+  assert.match(out, /> \*\*Notice:\*\* JEV was unavailable at h2/);
+  assert.match(out, /Checked at h1\./);
+  assert.match(out, FOOTER);
+});

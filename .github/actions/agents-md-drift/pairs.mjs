@@ -40,10 +40,9 @@ export const carriesContent = (p, text) =>
 export function governing(file, read) {
   const parts = file.split("/").slice(0, -1);
   const dirs = [""].concat(parts.map((_, k) => parts.slice(0, k + 1).join("/")));
-  const found = dirs.flatMap((d) =>
+  return dirs.reverse().flatMap((d) =>
     ["AGENTS.md", "CLAUDE.md"].map((n) => (d ? `${d}/${n}` : n)).filter((p) => carriesContent(p, read(p))),
   );
-  return found.reverse();
 }
 
 // The extension test the shell pre-filter uses: "." plus everything after the
@@ -86,7 +85,14 @@ export function buildPairs({ root, base, head, skipList, maxPairs }) {
     if (mds.length === 0) continue;
     diffs[file] = cap(git(root, ["-c", "core.quotePath=false", "diff", ...DIFF_FLAGS, range, "--", file]));
     mds.forEach((agents_md, distance) => {
-      for (const s of sections(read(agents_md))) all.push({ file, agents_md, heading: s.heading, section: s.text, distance });
+      // A heading text can repeat in one file; its occurrence number keeps
+      // each section a separate finding.
+      const seen = new Map();
+      for (const s of sections(read(agents_md))) {
+        const occurrence = (seen.get(s.heading) ?? 0) + 1;
+        seen.set(s.heading, occurrence);
+        all.push({ file, agents_md, heading: s.heading, occurrence, section: s.text, distance });
+      }
     });
   }
   return { diffs, ...capPairs(all, maxPairs) };

@@ -61,7 +61,7 @@ section "Static contract — model tool surface, schema, and post-step wiring"
 
 # Each check prints "PASS<TAB>name" or "FAIL<TAB>name<TAB>expected<TAB>actual";
 # the post step's run: body is written out for the behavioural cases below.
-python3 - "$WORKFLOW" "$EXTRACT" > "$WORKDIR/static.tsv" <<'PY' || { echo "ERROR: static extraction failed" >&2; exit 1; }
+python3 - "$WORKFLOW" "$EXTRACT" "$REPO_ROOT/.github/workflows/self-audit.yml" > "$WORKDIR/static.tsv" <<'PY' || { echo "ERROR: static extraction failed" >&2; exit 1; }
 import json
 import pathlib
 import re
@@ -413,6 +413,45 @@ secrets = (wf.get(True) or wf.get("on"))["workflow_call"]["secrets"]
 check("TYPESAFE_JEV_API_KEY secret is optional", secrets.get("TYPESAFE_JEV_API_KEY", {}).get("required") is False,
       "required: false", secrets.get("TYPESAFE_JEV_API_KEY"))
 
+# ── Work files live under RUNNER_TEMP, never in the PR checkout ──
+# cli.mjs writes findings.json to $RUNNER_TEMP/agents-md-drift; a path in the
+# checkout is one the PR itself can plant.
+prompt = model["with"].get("prompt", "")
+check("drafting prompt reads findings.json from runner.temp",
+      "${{ runner.temp }}/agents-md-drift/findings.json" in prompt,
+      "${{ runner.temp }}/agents-md-drift/findings.json", "not referenced")
+check("drafting prompt names no work file in the checkout", ".agents-md-drift/" not in prompt,
+      "no .agents-md-drift/ path", ".agents-md-drift/ referenced")
+check("drafting step may read the runner.temp work dir (--add-dir)",
+      flags.get("add-dir") == ["EXPR/agents-md-drift"]
+      and "--add-dir ${{ runner.temp }}/agents-md-drift" in model["with"]["claude_args"],
+      "--add-dir ${{ runner.temp }}/agents-md-drift", flags.get("add-dir"))
+
+# ── Timeouts: a stall surfaces as a step FAILURE, never a job-level cancel ──
+# A job cancel skips the post step, so the PR keeps a stale comment. Every step
+# that can stall carries its own cap, and the caps fit under the job's.
+UNCAPPED_OK = {"Harden Runner", "Clear _pw"}
+uncapped = [s.get("name") for s in steps
+            if s.get("name") not in UNCAPPED_OK and not isinstance(s.get("timeout-minutes"), int)]
+check("every drift-check step that can stall has timeout-minutes", not uncapped, "none", uncapped)
+caps = sum(s.get("timeout-minutes", 0) for s in steps if isinstance(s.get("timeout-minutes"), int))
+job_cap = wf["jobs"]["drift-check"].get("timeout-minutes", 0)
+check("drift-check job cap exceeds the sum of its step caps", job_cap > caps,
+      "> %d" % caps, job_cap)
+
+# ── Self-audit runs node-backed drift suites only after Node is set up ──
+# The comment suite runs cli.mjs and the module suite runs node --test; on a
+# runner image without Node either one fails for the wrong reason.
+audit = yaml.safe_load(open(sys.argv[3]))
+asteps = [s for job in audit["jobs"].values() for s in job.get("steps", [])]
+node_at = next((i for i, s in enumerate(asteps)
+                if str(s.get("uses", "")).startswith("actions/setup-node@")), None)
+needs_node = [i for i, s in enumerate(asteps)
+              if "agents-md-drift-comment.test.sh" in str(s.get("run", ""))
+              or "node --test" in str(s.get("run", ""))]
+early = [asteps[i].get("name") for i in needs_node if node_at is None or i < node_at]
+check("self-audit sets up Node before every node-backed drift suite", not early, "none", early)
+
 (out / "post.sh").write_text(body)
 PY
 
@@ -474,12 +513,20 @@ chmod +x "$WORKDIR/bin/gh"
 
 # ── Runner helpers ───────────────────────────────────────────────────────────
 # The post step runs `node _pw/.github/actions/agents-md-drift/cli.mjs render`
-# from the job's working directory, where the score step left
-# .agents-md-drift/scored.json. Link this checkout as _pw and write a canned
-# score file: one high pair (a finding, id f1) and one middle pair.
+# from the job's working directory (the PR checkout); the score step left
+# scored.json under $RUNNER_TEMP/agents-md-drift. Link this checkout as _pw and
+# write a canned score file there: one high pair (a finding, id f1) and one
+# middle pair. A decoy in the checkout's .agents-md-drift/ is what a PR could
+# plant; the post step must never read it.
 ln -s "$REPO_ROOT" "$WORKDIR/_pw"
-mkdir -p "$WORKDIR/.agents-md-drift"
+RUNNER_TEMP_DIR="$WORKDIR/runner-temp"
+mkdir -p "$RUNNER_TEMP_DIR/agents-md-drift" "$WORKDIR/.agents-md-drift"
 cat > "$WORKDIR/.agents-md-drift/scored.json" <<'JSON'
+{"scored": [
+  {"id": "p1", "file": "Makefile", "agents_md": "AGENTS.md", "heading": "PlantedByThePR", "section": "## PlantedByThePR", "distance": 0, "score": 0.99, "band": "high"}
+], "overflow": []}
+JSON
+cat > "$RUNNER_TEMP_DIR/agents-md-drift/scored.json" <<'JSON'
 {"scored": [
   {"id": "p1", "file": "Makefile", "agents_md": "AGENTS.md", "heading": "Build", "section": "## Build\nRun `make build`.", "distance": 0, "score": 0.91, "band": "high"},
   {"id": "p2", "file": "Makefile", "agents_md": "AGENTS.md", "heading": "Layout", "section": "## Layout\nsrc/ holds code.", "distance": 0, "score": 0.40, "band": "middle"}
@@ -505,7 +552,7 @@ run_post() { # run_post <structured_output> [extra env assignments, which overri
     cd "$WORKDIR" || exit 1
     env PATH="$WORKDIR/bin:$PATH" \
       GH_LOG="$GHLOG" GH_PAGES="$PAGES" \
-      GH_TOKEN=dummy REPO=o/r PR_NUMBER=7 HEAD_SHA=abc1234 \
+      GH_TOKEN=dummy REPO=o/r PR_NUMBER=7 HEAD_SHA=abc1234 RUNNER_TEMP="$RUNNER_TEMP_DIR" \
       PAIRS_STATUS=ok JEV_STATUS=ok \
       STRUCTURED_OUTPUT="$so" "$@" \
       bash --noprofile --norc -eo pipefail "$EXTRACT/post.sh"
@@ -555,6 +602,7 @@ has "case2 lists the finding's section" '`AGENTS.md` § `Build`'
 has "case2 carries the drafted edit" 'make build-all'
 has "case2 lists the middle pair for a human ruling" '### Needs a human ruling'
 has "case2 carries the hidden state block" '<!-- agents-md-drift-state:'
+lacks "case2 never reads a work file planted in the PR checkout" 'PlantedByThePR'
 if grep -q 'paginate=y' "$GHLOG"; then ok "case2 comment listing paginates"; else bad "case2 comment listing paginates" "paginate=y" "$(cat "$GHLOG")"; fi
 POSTED="$(payload)"
 

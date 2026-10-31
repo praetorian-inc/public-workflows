@@ -29,6 +29,11 @@ test("governing: every ancestor, nearest first, AGENTS.md before CLAUDE.md", () 
   assert.deepEqual(governing("top.go", (p) => files[p] ?? null), ["AGENTS.md"]);
 });
 
+test("governing: AGENTS.md before CLAUDE.md when both carry content in one directory", () => {
+  const files = { "AGENTS.md": "r", "CLAUDE.md": "## rc", "a/AGENTS.md": "a", "a/CLAUDE.md": "## ac" };
+  assert.deepEqual(governing("a/x.go", (p) => files[p] ?? null), ["a/AGENTS.md", "a/CLAUDE.md", "AGENTS.md", "CLAUDE.md"]);
+});
+
 test("skipped uses the shell pre-filter's extension rule", () => {
   assert.equal(skipped("a/b.md", [".md"]), true);
   assert.equal(skipped("Makefile", [".md"]), false);
@@ -103,6 +108,22 @@ test("buildPairs pairs each changed code file with every governing section", (t)
     ["svc/b.go", "AGENTS.md", 1],
     ["svc/my file.go", "AGENTS.md", 1],
   ]);
+});
+
+test("buildPairs numbers a repeated heading so each section keeps its own identity", (t) => {
+  const { root, g, put } = repo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  put("AGENTS.md", "## Notes\na\n## Other\n### Notes\nb\n## Notes\nc\n");
+  put("a.go", "package a\n");
+  g("add", "-A");
+  g("commit", "-qm", "base");
+  const base = g("rev-parse", "HEAD");
+  put("a.go", "package a // x\n");
+  g("add", "-A");
+  g("commit", "-qm", "head");
+  const head = g("rev-parse", "HEAD");
+  const { pairs } = buildPairs({ root, base, head, skipList: [], maxPairs: 10 });
+  assert.deepEqual(pairs.map((p) => [p.heading, p.occurrence]), [["Notes", 1], ["Other", 1], ["Notes", 2], ["Notes", 3]]);
 });
 
 test("buildPairs throws when git cannot answer", (t) => {
