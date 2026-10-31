@@ -5,10 +5,12 @@ name: Test size-gate
 #   dogfood: runs the reusable workflow on this whole repo, the way a normal
 #            caller does, with no baseline file. Only .go/.ts/.tsx/.py files
 #            are measured and tests are exempt, so the floor is the 19 files
-#            that leaves.
+#            that leaves. The triggers therefore also match every in-scope
+#            source file, so a new oversize file fails on the PR that adds it.
 
 on:
-  # Escape hatch: both real triggers are paths:-filtered.
+  # Escape hatch: both real triggers are paths:-filtered (size-gate paths plus
+  # every .go/.py/.ts/.tsx file), so anything else needs a manual run.
   workflow_dispatch:
   pull_request:
     paths:
@@ -16,6 +18,12 @@ on:
       - ".github/workflows/test-size-gate.yml"
       - ".github/actions/size-gate/**"
       - "_test-fixtures/size-gate/**"
+      # dogfood measures every in-scope source file in the repo, so a change
+      # to one anywhere must re-run it here rather than on a later PR.
+      - "**/*.go"
+      - "**/*.py"
+      - "**/*.ts"
+      - "**/*.tsx"
   push:
     branches: [main]
     paths:
@@ -23,6 +31,12 @@ on:
       - ".github/workflows/test-size-gate.yml"
       - ".github/actions/size-gate/**"
       - "_test-fixtures/size-gate/**"
+      # dogfood measures every in-scope source file in the repo, so a change
+      # to one anywhere must re-run it here rather than on a later PR.
+      - "**/*.go"
+      - "**/*.py"
+      - "**/*.ts"
+      - "**/*.tsx"
 
 permissions:
   contents: read
