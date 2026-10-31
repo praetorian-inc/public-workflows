@@ -94,18 +94,6 @@ test("JEV unavailable with an existing comment: notice in place, findings untouc
   assert.doesNotMatch(second, /Resolved at/);
 });
 
-test("no candidate pairs resolves an earlier finding", async (t) => {
-  const s = setup(t);
-  await s.run("pairs");
-  await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
-  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", STRUCTURED_OUTPUT: "" });
-  writeFileSync(s.env.PREVIOUS_FILE, JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body);
-  await s.run("render", { PAIRS_STATUS: "none", HEAD_SHA: "abc123" });
-  const body = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body;
-  assert.match(body, /No findings outstanding\./);
-  assert.match(body, /Resolved at abc123/);
-});
-
 test("pairs: a git failure or a bad max_pairs is a notice and status unavailable", async (t) => {
   const s = setup(t);
   await s.run("pairs", { BASE_SHA: "0000000" });
@@ -123,4 +111,28 @@ test("pairs: only skipped files changed is none; the cap overflows into the comm
   assert.deepEqual(s.outputs(), { status: "ok", count: "1" });
   const { overflow } = JSON.parse(readFileSync(path.join(s.env.WORK_DIR, "pairs.json"), "utf8"));
   assert.deepEqual(overflow, [{ file: "b.go", agents_md: "AGENTS.md", sections: 1 }]);
+});
+
+test("a later push that reverts the code: pairs is none and render resolves, or writes nothing", async (t) => {
+  const s = setup(t);
+  await s.run("pairs");
+  await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
+  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", STRUCTURED_OUTPUT: "" });
+  const first = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body;
+  const g = (...a) => execFileSync("git", a, { cwd: s.root, encoding: "utf8" }).trim();
+  g("rm", "-q", "b.go");
+  g("commit", "-qm", "revert");
+  const revert = g("rev-parse", "HEAD");
+  await s.run("pairs", { HEAD_SHA: revert });
+  assert.deepEqual(s.outputs(), { status: "none", count: "0" });
+  writeFileSync(s.env.PREVIOUS_FILE, first);
+  await s.run("render", { PAIRS_STATUS: "none", HEAD_SHA: revert });
+  const body = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body;
+  assert.match(body, /No findings outstanding\./);
+  assert.match(body, new RegExp(`Resolved at ${revert}`));
+  rmSync(s.env.PREVIOUS_FILE);
+  rmSync(s.env.PAYLOAD_FILE);
+  await s.run("render", { PAIRS_STATUS: "none", HEAD_SHA: revert });
+  assert.deepEqual(s.outputs(), { action: "none" });
+  assert.equal(existsSync(s.env.PAYLOAD_FILE), false);
 });

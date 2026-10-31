@@ -100,10 +100,14 @@ jobs:
   # ── Phase 1: Pre-filter ─────────────────────────────────────────────
   # Zero LLM and JEV cost. Decides whether any instruction file (AGENTS.md or
   # content-carrying CLAUDE.md) can be in scope for the PR's code changes.
-  # Skips the drift job entirely when:
+  # Skips JEV and the model when:
   #   - No instruction files exist in the repo
   #   - No code files changed (docs/config-only PR)
   #   - Changed files have no instruction-file ancestor in the directory tree
+  # Those three set `no_candidates=true`, so the drift job still runs with zero
+  # pairs: a later push that leaves no candidates resolves the findings of an
+  # existing drift comment, and creates no comment when there is none.
+  # Skips the drift job entirely when:
   #   - The PR diff cannot be computed (a notice, then a pass)
   #   - PR author is a bot
   pre-filter:
@@ -118,6 +122,7 @@ jobs:
       contents: read
     outputs:
       should_run: ${{ steps.check.outputs.should_run }}
+      no_candidates: ${{ steps.check.outputs.no_candidates }}
     steps:
       - name: Harden Runner
         if: ${{ inputs.enable-harden-runner }}
@@ -252,6 +257,7 @@ jobs:
 
           if [ -z "$code_changes" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "no_candidates=true" >> "$GITHUB_OUTPUT"
             echo "⊘ No code files changed — skipping drift check."
             exit 0
           fi
@@ -265,6 +271,7 @@ jobs:
 
           if [ -z "$all_mds" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "no_candidates=true" >> "$GITHUB_OUTPUT"
             echo "⊘ No instruction files in repo — skipping."
             exit 0
           fi
@@ -306,6 +313,7 @@ jobs:
 
           if [ -z "$relevant" ]; then
             echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "no_candidates=true" >> "$GITHUB_OUTPUT"
             echo "⊘ No instruction files in scope of changed code — skipping."
             exit 0
           fi
@@ -336,6 +344,8 @@ jobs:
     needs: pre-filter
     # A failed or timed-out pre-filter still runs this job: the pairs step
     # computes the diff itself and, if it cannot, emits a notice and passes.
+    # A pre-filter that found no candidates (`no_candidates`) also runs it:
+    # the pairs step yields `none` and the post step resolves any open findings.
     # `!cancelled()` keeps supersession cancels and skipped pre-filters
     # (draft/bot PRs) skipped. A pre-filter that hits its own `timeout-minutes`
     # reports `cancelled`, not `failure`; run-level cancellation is excluded by
@@ -343,6 +353,7 @@ jobs:
     if: >-
       !cancelled() &&
       (needs.pre-filter.outputs.should_run == 'true' ||
+       needs.pre-filter.outputs.no_candidates == 'true' ||
        needs.pre-filter.result == 'failure' ||
        needs.pre-filter.result == 'cancelled')
     runs-on: ubuntu-24.04

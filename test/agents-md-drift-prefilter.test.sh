@@ -27,7 +27,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
-WORKFLOW="$REPO_ROOT/.github/workflows/agents-md-drift.yml"
+WORKFLOW="${DRIFT_WORKFLOW:-$REPO_ROOT/.github/workflows/agents-md-drift.yml}"
 
 WORKDIR="$(mktemp -d)" || { echo "ERROR: mktemp failed" >&2; exit 1; }
 trap 'rm -rf -- "$WORKDIR"' EXIT
@@ -205,6 +205,7 @@ head="$(snap "$r" head)"
 run_prefilter "$r" "$base" "$head"
 assert_eq "case1 should_run"   "true" "$(outv should_run)"
 assert_eq "case1 relevant_mds" "ui/src/components/AGENTS.md" "$(outv relevant_mds)"
+assert_eq "case1 no_candidates" ""     "$(outv no_candidates)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 2 — unconverted repo (regression): nearest CLAUDE.md, as before"
@@ -271,6 +272,7 @@ head="$(snap "$r" head)"
 run_prefilter "$r" "$base" "$head"
 assert_eq "case6 should_run"   "false" "$(outv should_run)"
 assert_eq "case6 relevant_mds" ""      "$(outv relevant_mds)"
+assert_eq "case6 no_candidates" "true" "$(outv no_candidates)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 7a — Step 5 contrast: code-only change reaches analysis"
@@ -324,6 +326,8 @@ run_prefilter "$r" "0000000000000000000000000000000000000000" "$head"
 assert_eq "case8 exit code"    "0"     "$RC"
 assert_eq "case8 should_run"   "false" "$(outv should_run)"
 assert_eq "case8 relevant_mds" ""      "$(outv relevant_mds)"
+# Not checked is not "no candidates": the drift job must not resolve findings.
+assert_eq "case8 no_candidates" ""     "$(outv no_candidates)"
 if grep -q "^::notice title=Instruction-file drift: not checked::" "$LOG"; then
   ok "case8 emitted the not-checked notice"
 else
@@ -380,6 +384,33 @@ head="$(snap "$r" head)"
 run_prefilter "$r" "$base" "$head"
 assert_eq "case12 should_run"   "false" "$(outv should_run)"
 assert_eq "case12 relevant_mds" ""      "$(outv relevant_mds)"
+assert_eq "case12 no_candidates" "true" "$(outv no_candidates)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 13 — no instruction files in the repo => skip, no candidates"
+r="$(newrepo no-instructions)"
+put "$r" main.go $'package main\n'
+base="$(snap "$r" base)"
+put "$r" main.go $'package main\n\nfunc main() {}\n'
+head="$(snap "$r" head)"
+run_prefilter "$r" "$base" "$head"
+assert_eq "case13 should_run"    "false" "$(outv should_run)"
+assert_eq "case13 no_candidates" "true"  "$(outv no_candidates)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 14 — a later push reverts the code change => no candidates"
+r="$(newrepo reverted)"
+put "$r" AGENTS.md $'# root\nroot instructions\n'
+put "$r" main.go $'package main\n'
+base="$(snap "$r" base)"
+put "$r" main.go $'package main\n\nfunc main() {}\n'
+snap "$r" change >/dev/null
+put "$r" main.go $'package main\n'
+head="$(snap "$r" revert)"
+run_prefilter "$r" "$base" "$head"
+assert_eq "case14 exit code"     "0"     "$RC"
+assert_eq "case14 should_run"    "false" "$(outv should_run)"
+assert_eq "case14 no_candidates" "true"  "$(outv no_candidates)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n──────────────────────────────────────────────\n'

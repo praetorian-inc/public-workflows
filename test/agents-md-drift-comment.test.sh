@@ -184,7 +184,8 @@ cond = str(post.get("if", ""))
 # ── Evaluate the post step's if: the way Actions does ──
 # A minimal evaluator for the expression subset a step condition uses:
 # ! && || ( ) == != , string/bool/null literals, steps.<id>.outcome|conclusion,
-# steps.<id>.outputs.<name> (missing = ''), and the status functions. Strings compare case-insensitively, and a condition
+# steps.<id>.outputs.<name> (missing = ''), needs.<job>.result,
+# needs.<job>.outputs.<name> (missing = ''), and the status functions. Strings compare case-insensitively, and a condition
 # naming no status function is implicitly `success() && (...)`, as in Actions.
 # Anything outside the subset raises, so an unrecognised condition fails loudly.
 class ExprError(Exception):
@@ -259,6 +260,10 @@ def evaluate(src, ctx):
                 return ctx["steps"].get(parts[1], {}).get(parts[2], "success")
             if len(parts) == 4 and parts[0] == "steps" and parts[2] == "outputs":
                 return ctx["steps"].get(parts[1], {}).get("outputs", {}).get(parts[3], "")
+            if len(parts) == 3 and parts[0] == "needs" and parts[2] == "result":
+                return ctx["needs"][parts[1]]["result"]
+            if len(parts) == 4 and parts[0] == "needs" and parts[2] == "outputs":
+                return ctx["needs"][parts[1]].get("outputs", {}).get(parts[3], "")
             raise ExprError("unsupported context %s" % v)
         raise ExprError("unexpected token %r" % ((k, v),))
 
@@ -342,6 +347,48 @@ table("model step", str(model.get("if", "")), [
     ({"score": {"jev": "unavailable", "high": ""}}, False, False, "JEV unavailable"),
     ({}, False, False, "score skipped"),
 ])
+
+# JEV (and its key) runs only when the pairs step built pairs. The drift job now
+# also runs on no-candidate PRs, so this condition alone keeps JEV out of them.
+_, score_step = find(lambda s: s.get("id") == "score")
+table("score step", str((score_step or {}).get("if", "")), [
+    ({"pairs": {"status": "ok"}}, False, True, "pairs status 'ok'"),
+    ({"pairs": {"status": "none"}}, False, False, "pairs status 'none'"),
+    ({"pairs": {"status": "unavailable"}}, False, False, "pairs status 'unavailable'"),
+    ({}, False, False, "pairs skipped"),
+])
+
+# The drift-check job runs whenever its pairs step can reach a verdict: the
+# pre-filter found candidates, found NONE (so a later push that leaves no
+# candidates still resolves an existing comment's findings), or failed or timed
+# out. It skips when the diff could not be computed (should_run false, no
+# no_candidates), when the pre-filter was skipped (draft/bot PR), and when the
+# run was cancelled.
+job_cond = str(wf["jobs"]["drift-check"].get("if", ""))
+for outputs, result, cancelled, want_run, why in (
+    ({"should_run": "true"}, "success", False, True, "candidates found"),
+    ({"should_run": "false", "no_candidates": "true"}, "success", False, True, "no candidates (later push)"),
+    ({"should_run": "false"}, "success", False, False, "PR diff not computable"),
+    ({}, "failure", False, True, "pre-filter failed"),
+    ({}, "cancelled", False, True, "pre-filter timed out"),
+    ({}, "skipped", False, False, "pre-filter skipped"),
+    ({"should_run": "false", "no_candidates": "true"}, "success", True, False, "no candidates"),
+    ({"should_run": "true"}, "success", True, False, "candidates found"),
+):
+    name = "drift-check job if: %s when %s%s" % ("runs" if want_run else "skips", why,
+                                                ", run cancelled" if cancelled else "")
+    ctx = {"steps": {}, "needs": {"pre-filter": {"result": result, "outputs": outputs}},
+           "cancelled()": cancelled, "success()": not cancelled and result == "success",
+           "failure()": result == "failure", "always()": True}
+    try:
+        got = evaluate(job_cond, ctx)
+    except ExprError as e:
+        check(name, False, "evaluable condition", "%s (%s)" % (job_cond, e))
+        continue
+    check(name, got == want_run, "run" if want_run else "skip", "%s for if: %s" % ("run" if got else "skip", job_cond))
+pre_out = str((wf["jobs"]["pre-filter"].get("outputs") or {}).get("no_candidates", ""))
+check("pre-filter exports no_candidates from the check step",
+      pre_out == "${{ steps.check.outputs.no_candidates }}", "${{ steps.check.outputs.no_candidates }}", pre_out)
 
 env = post.get("env", {}) or {}
 want = "${{ steps.%s.outputs.structured_output }}" % model_id
