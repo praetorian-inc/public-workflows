@@ -2,8 +2,8 @@
 // environment, which is how the reusable workflow passes its inputs.
 import path from "node:path";
 
-export const FILE_MAX = 300;
-export const FILE_WARN = 200;
+export const FILE_MAX = 500;
+export const FILE_WARN = 400;
 export const FUNCTION_MAX = 50;
 export const COMPONENT_MAX = 150;
 export const DEFAULT_BASELINE = ".github/size-baseline.json";

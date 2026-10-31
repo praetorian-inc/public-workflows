@@ -7,7 +7,7 @@
 // Shared flags: --baseline <file> (default .github/size-baseline.json),
 // --include <glob>..., --exclude <glob>..., --min-scanned <n>. The workflow
 // passes the same values as SIZE_GATE_* environment variables.
-import { parseConfig, pathspecs, UsageError } from "./config.mjs";
+import { FILE_MAX, parseConfig, pathspecs, UsageError } from "./config.mjs";
 import { listFiles, readDiff, resolveBase } from "./git.mjs";
 import { measureTree, symlinkErrors } from "./measure.mjs";
 import { baseLengths, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
@@ -27,7 +27,7 @@ function measure(cfg, paths) {
 
 function runBaseline(cfg) {
   const n = writeBaseline(cfg.root, cfg.baselinePath, measure(cfg, listFiles(cfg.root, pathspecs(cfg.include, cfg.exclude))));
-  log(`wrote ${cfg.baselinePath}: ${n} files over 300 lines`);
+  log(`wrote ${cfg.baselinePath}: ${n} files over ${FILE_MAX} lines`);
   return 0;
 }
 
