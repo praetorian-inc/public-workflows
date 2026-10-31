@@ -43,10 +43,26 @@ function originBranch(root, branch, log) {
   }
 }
 
-// The merge-base of HEAD with the first usable candidate: SIZE_GATE_BASE (the
-// PR base or the pre-push commit), origin/HEAD, origin/<SIZE_GATE_DEFAULT_BRANCH>,
+// On pull_request the checkout is GitHub's merge ref, built on the base
+// branch's tip when the ref was made; base.sha is not refreshed when the base
+// moves. The first parent is the tree the PR was merged onto, or null when
+// HEAD is not a merge.
+function mergeRefParent(root) {
+  if (!isCommit(root, "HEAD^2")) return null;
+  return git(root, ["rev-parse", "HEAD^1"]).trim();
+}
+
+// On a pull_request merge ref, its first parent. Otherwise the merge-base of
+// HEAD with the first usable candidate: SIZE_GATE_BASE (the PR base or the
+// pre-push commit), origin/HEAD, origin/<SIZE_GATE_DEFAULT_BRANCH>,
 // origin/main, then HEAD~1. With none, HEAD itself, which checks nothing new.
-export function resolveBase(root, envBase, log, defaultBranch = "") {
+export function resolveBase(root, envBase, log, defaultBranch = "", pullRequest = false) {
+  const parent = pullRequest ? mergeRefParent(root) : null;
+  if (parent) {
+    if (envBase !== parent)
+      log(`::notice::HEAD is the pull_request merge ref; comparing with its first parent ${parent}, not SIZE_GATE_BASE '${escapeData(envBase)}'.`);
+    return parent;
+  }
   const head = git(root, ["rev-parse", "HEAD"]).trim();
   const mergeBase = (c) => git(root, ["merge-base", c, "HEAD"]).trim();
   const usable = envBase && !/^0+$/.test(envBase) && isCommit(root, envBase);

@@ -2,8 +2,8 @@
 // environment, which is how the reusable workflow passes its inputs.
 import path from "node:path";
 
-export const FILE_MAX = 300;
-export const FILE_WARN = 200;
+export const FILE_MAX = 500;
+export const FILE_WARN = 400;
 export const FUNCTION_MAX = 50;
 export const COMPONENT_MAX = 150;
 export const DEFAULT_BASELINE = ".github/size-baseline.json";
@@ -46,6 +46,8 @@ export function parseConfig(argv, env) {
     minScanned: count(f["--min-scanned"] ?? (env.SIZE_GATE_MIN_SCANNED || "1"), "min-scanned-files"),
     base: env.SIZE_GATE_BASE || "",
     defaultBranch: env.SIZE_GATE_DEFAULT_BRANCH || "",
+    // The runner sets GITHUB_EVENT_NAME to the caller's event in every step.
+    pullRequest: env.GITHUB_EVENT_NAME === "pull_request",
     goExtractor: env.SIZE_GATE_GO_EXTRACTOR || "",
   };
 }

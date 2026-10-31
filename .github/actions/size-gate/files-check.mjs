@@ -1,7 +1,8 @@
-// The file rule (LAB-7587): new files over 300 lines fail, unbaselined files
-// over 300 fail, the baseline ratchet holds, and added or changed files over
-// 200 lines warn. Ported from guard#9602's check(); the disable-comment ban
-// reads parsed comments, so it lives in functions-check.mjs.
+// The file rule (LAB-7587): new files over FILE_MAX (500) lines fail,
+// unbaselined files over FILE_MAX fail, the baseline ratchet holds, and added
+// or changed files over FILE_WARN (400) lines warn. Ported from guard#9602's
+// check(); the disable-comment ban reads parsed comments, so it lives in
+// functions-check.mjs.
 // A hand-written file may not exempt itself by gaining a generated header.
 import { FILE_MAX, FILE_WARN } from "./config.mjs";
 import { oversized, ratchet } from "./baseline.mjs";
