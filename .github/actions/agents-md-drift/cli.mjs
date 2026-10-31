@@ -61,7 +61,9 @@ function pairsCmd(env, x) {
     x.notice("Instruction-file drift: not checked", `no ## or ### section to pair in ${list}; changes those files govern were not checked against them.`);
     x.summary(`Instruction-file drift: not checked against ${list} (no ## or ### section).`);
   }
-  const status = built.pairs.length || built.overflow.length ? "ok" : "none";
+  // "none" resolves every open finding, so a sectionless file (which may have
+  // held one) keeps the run on the "ok" path, where its findings stay open.
+  const status = built.pairs.length || built.overflow.length || built.sectionless.length ? "ok" : "none";
   x.output("status", status);
   x.output("count", built.pairs.length);
   const requests = built.pairs.length * REQUESTS.length;
@@ -69,7 +71,7 @@ function pairsCmd(env, x) {
 }
 
 async function scoreCmd(env, x, fetchImpl) {
-  const { diffs, pairs, overflow } = x.read("pairs.json");
+  const { diffs, pairs, overflow, sectionless } = x.read("pairs.json");
   const started = Date.now();
   const res = await scorePairs({ pairs, diffs, key: env.TYPESAFE_JEV_API_KEY, fetchImpl });
   if (!res.ok) {
@@ -78,7 +80,7 @@ async function scoreCmd(env, x, fetchImpl) {
   }
   x.log(`Scored ${pairs.length} pair(s) in ${Math.round((Date.now() - started) / 1000)}s.`);
   const scored = res.scored.map(({ answers, ...p }) => p);
-  x.write("scored.json", { scored, overflow });
+  x.write("scored.json", { scored, overflow, sectionless });
   const findings = findingsOf(scored).map((f) => ({ id: f.id, agents_md: f.agents_md, heading: f.heading, section: f.section, files: f.files, diffs: Object.fromEntries(f.files.map((n) => [n, diffs[n]])) }));
   x.write("findings.json", findings);
   x.summary(summary({ scored, overflow }));
@@ -93,11 +95,11 @@ function renderCmd(env, x) {
   if (env.PAIRS_STATUS === "none") {
     body = decide({ previous, scored: [], overflow: [], drafts: null, sha }).body;
   } else if (env.JEV_STATUS === "ok") {
-    const { scored, overflow } = x.read("scored.json");
+    const { scored, overflow, sectionless } = x.read("scored.json");
     const expected = findingsOf(scored).length > 0;
     const drafts = expected ? parseDrafts(env.STRUCTURED_OUTPUT ?? "") : null;
     if (expected && !drafts) x.warning("Instruction-file drift: no drafts", "the drafting step returned no usable output; findings are posted without a proposed edit.");
-    body = decide({ previous, scored, overflow, drafts, sha }).body;
+    body = decide({ previous, scored, overflow, drafts, sha, sectionless }).body;
   } else if (env.PAIRS_STATUS !== "ok") {
     // "unavailable" was already noticed by the pairs step with its reason; an
     // empty status means that step never finished (a crash or its timeout).

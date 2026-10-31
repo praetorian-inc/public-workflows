@@ -51,7 +51,7 @@ async function ask({ key, fetchImpl, sleep, state, questions }) {
     }
     if (body !== undefined) {
       const v = body?.answers?.stale?.noul;
-      if (typeof v !== "number") throw new Error("response has no numeric answers.stale.noul");
+      if (typeof v !== "number" || v < 0 || v > 1) throw new Error("response has no answers.stale.noul between 0 and 1");
       return v;
     }
     if (res && !res.ok) {

@@ -15,6 +15,11 @@ test("sections: ## and ### only, nested ### inside its ## parent, fenced heading
   assert.equal(s[2].text, "## B ##\nb");
 });
 
+test("sections: a trailing # belongs to the heading unless a space sets it apart", () => {
+  const md = ["## C#", "c", "## F# ##", "f", "##", "e"].join("\n");
+  assert.deepEqual(sections(md).map((x) => x.heading), ["C#", "F#", ""]);
+});
+
 test("sections: an ATX heading may be indented up to three spaces, not four", () => {
   const md = ["   ## A", "a", " ### A.1", "x", "    ## code, not a heading", "## B", "b"].join("\n");
   assert.deepEqual(sections(md).map((x) => [x.heading, x.level]), [["A", 2], ["A.1", 3], ["B", 2]]);
@@ -52,6 +57,11 @@ test("governing: every ancestor, nearest first, AGENTS.md before CLAUDE.md", () 
   const files = { "AGENTS.md": "r", "a/AGENTS.md": "a", "a/CLAUDE.md": "@AGENTS.md", "a/b/CLAUDE.md": "## b" };
   assert.deepEqual(governing("a/b/c.go", (p) => files[p] ?? null), ["a/b/CLAUDE.md", "a/AGENTS.md", "AGENTS.md"]);
   assert.deepEqual(governing("top.go", (p) => files[p] ?? null), ["AGENTS.md"]);
+});
+
+test("governing: a pointer-only CLAUDE.md with no AGENTS.md beside it is kept", () => {
+  const files = { "AGENTS.md": "r", "a/CLAUDE.md": "@AGENTS.md" };
+  assert.deepEqual(governing("a/x.go", (p) => files[p] ?? null), ["a/CLAUDE.md", "AGENTS.md"]);
 });
 
 test("governing: AGENTS.md before CLAUDE.md when both carry content in one directory", () => {

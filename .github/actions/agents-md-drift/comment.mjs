@@ -66,10 +66,11 @@ export function parseDrafts(raw) {
 }
 
 // Current high findings are open. A previously open finding that is no longer
-// high is resolved at this sha, text kept, unless the pair cap left it unchecked.
-export function nextState(prev, findings, drafts, overflow, sha) {
+// high is resolved at this sha, text kept, unless it went unchecked: the pair
+// cap left its pairs out, or its instruction file now has no ## or ### section.
+export function nextState(prev, findings, drafts, overflow, sha, sectionless = []) {
   const out = {};
-  const unchecked = (f) => overflow.some((o) => o.agents_md === f.agents_md && f.files.includes(o.file));
+  const unchecked = (f) => sectionless.includes(f.agents_md) || overflow.some((o) => o.agents_md === f.agents_md && f.files.includes(o.file));
   for (const [k, f] of Object.entries(prev.findings)) {
     if (f.status === "open" && !unchecked(f)) out[k] = { ...f, status: "resolved", resolved_at: sha };
     else out[k] = f;
@@ -188,8 +189,8 @@ export function withNotice(previous, text) {
 }
 
 // { body } to write, or { body: null } when no comment should be written.
-export function decide({ previous, scored, overflow, drafts, sha }) {
-  const state = nextState(parseState(previous), findingsOf(scored), drafts, overflow, sha);
+export function decide({ previous, scored, overflow, drafts, sha, sectionless = [] }) {
+  const state = nextState(parseState(previous), findingsOf(scored), drafts, overflow, sha, sectionless);
   const middle = middleOf(scored);
   const open = Object.values(state.findings).some((f) => f.status === "open");
   if (!previous && !open && middle.length === 0 && overflow.length === 0) return { body: null };

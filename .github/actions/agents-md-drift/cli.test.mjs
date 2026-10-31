@@ -168,6 +168,28 @@ test("pairs: only skipped files changed is none; the cap overflows into the comm
   assert.deepEqual(overflow, [{ file: "b.go", agents_md: "AGENTS.md", sections: 1 }]);
 });
 
+test("pairs: a sectionless instruction file keeps the run on ok so its findings stay open", async (t) => {
+  const s = setup(t);
+  await s.run("pairs");
+  await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
+  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", STRUCTURED_OUTPUT: "" });
+  const first = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body;
+  const g = (...a) => execFileSync("git", a, { cwd: s.root, encoding: "utf8" }).trim();
+  writeFileSync(path.join(s.root, "AGENTS.md"), "# Title\nOnly a preamble.\n");
+  writeFileSync(path.join(s.root, "c.go"), "c\n");
+  g("add", "-A");
+  g("commit", "-qm", "flatten");
+  const next = g("rev-parse", "HEAD");
+  await s.run("pairs", { HEAD_SHA: next });
+  assert.deepEqual(s.outputs(), { status: "ok", count: "0" });
+  await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
+  writeFileSync(s.env.PREVIOUS_FILE, first);
+  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", HEAD_SHA: next, STRUCTURED_OUTPUT: "" });
+  const body = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body;
+  assert.match(body, /§ `Handlers`/);
+  assert.doesNotMatch(body, /Resolved at/);
+});
+
 test("a later push that reverts the code: pairs is none and render resolves, or writes nothing", async (t) => {
   const s = setup(t);
   await s.run("pairs");

@@ -20,8 +20,9 @@ const closes = (l, open) => {
   const m = CLOSE.exec(l);
   return m !== null && m[1][0] === open[0] && m[1].length >= open.length;
 };
-// An ATX heading may sit after at most three spaces, as a fence opener may.
-const HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+// An ATX heading may sit after at most three spaces, as a fence opener may. A
+// closing run of # counts only after a space, so `## C#` is the heading `C#`.
+const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 
 // [{ heading, level, text }] for the ## and ### sections of a markdown text. A
 // section runs to the next heading of the same or a higher level, so a ###
@@ -35,7 +36,7 @@ export function sections(md) {
       if (closes(l, fence)) fence = null;
     } else if ((fence = opener(l)) === null) {
       const m = HEADING.exec(l);
-      if (m) hs.push({ i, level: m[1].length, heading: m[2].trim() });
+      if (m) hs.push({ i, level: m[1].length, heading: (m[2] ?? "").trim() });
     }
   });
   return hs.flatMap((h, k) => {
@@ -51,12 +52,15 @@ export const carriesContent = (p, text) =>
   text !== null && (!/(^|\/)CLAUDE\.md$/.test(p) || !["@AGENTS.md", ""].includes(text.replace(/\s+/g, "")));
 
 // The instruction files governing `file`, nearest first: AGENTS.md then
-// CLAUDE.md in its directory, then in each ancestor up to the root.
+// CLAUDE.md in its directory, then in each ancestor up to the root. A pointer-only
+// CLAUDE.md whose AGENTS.md is missing is kept, as the shell pre-filter keeps it,
+// so it is reported as having no section instead of vanishing.
 export function governing(file, read) {
+  const brokenPointer = (p) => /(^|\/)CLAUDE\.md$/.test(p) && read(p) !== null && read(p.replace(/CLAUDE\.md$/, "AGENTS.md")) === null;
   const parts = file.split("/").slice(0, -1);
   const dirs = [""].concat(parts.map((_, k) => parts.slice(0, k + 1).join("/")));
   return dirs.reverse().flatMap((d) =>
-    ["AGENTS.md", "CLAUDE.md"].map((n) => (d ? `${d}/${n}` : n)).filter((p) => carriesContent(p, read(p))),
+    ["AGENTS.md", "CLAUDE.md"].map((n) => (d ? `${d}/${n}` : n)).filter((p) => carriesContent(p, read(p)) || brokenPointer(p)),
   );
 }
 

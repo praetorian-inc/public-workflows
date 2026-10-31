@@ -121,6 +121,14 @@ test("three failed attempts give up; a non-numeric answer is unavailable", async
   assert.match(bad.reason, /noul/);
 });
 
+test("a noul outside 0..1 is unavailable", async () => {
+  for (const v of [-0.1, 1.5]) {
+    const res = await scorePairs({ pairs: pairs.slice(0, 1), diffs, key: KEY, fetchImpl: async () => ok(v) });
+    assert.equal(res.ok, false);
+    assert.match(res.reason, /between 0 and 1/);
+  }
+});
+
 test("concurrency is bounded", async () => {
   let live = 0;
   let peak = 0;

@@ -69,6 +69,15 @@ test("a previous finding the pair cap left unchecked stays open", () => {
   assert.match(second, /### Not checked \(pair cap\)[\s\S]*- `svc\/a\.go` × `svc\/AGENTS\.md`: 3 section\(s\)/);
 });
 
+test("a previous finding whose instruction file lost its sections stays open", () => {
+  const first = decide({ previous: "", scored: [pair({})], overflow: [], drafts: null, sha: "h1" }).body;
+  const second = decide({ previous: first, scored: [], overflow: [], drafts: null, sha: "h2", sectionless: ["svc/AGENTS.md"] }).body;
+  assert.match(second, /#### `svc\/AGENTS\.md` § `Handlers`/);
+  assert.doesNotMatch(second, /Resolved at/);
+  const other = decide({ previous: first, scored: [], overflow: [], drafts: null, sha: "h2", sectionless: ["AGENTS.md"] }).body;
+  assert.match(other, /Resolved at h2/);
+});
+
 test("overflow alone creates the comment so no pair is dropped silently", () => {
   const { body } = decide({ previous: "", scored: [], overflow: [{ file: "x", agents_md: "AGENTS.md", sections: 1 }], drafts: null, sha: "h1" });
   assert.match(body, /No findings outstanding\.[\s\S]*### Not checked \(pair cap\)/);
