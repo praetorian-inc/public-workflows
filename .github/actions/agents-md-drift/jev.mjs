@@ -66,6 +66,9 @@ async function ask({ key, fetchImpl, sleep, state, questions }) {
 
 // { ok: true, scored: [{ ...pair, answers, score, band }] } or { ok: false, reason }.
 export async function scorePairs({ pairs, diffs, key, fetchImpl = fetch, concurrency = CONCURRENCY, sleep = realSleep }) {
+  // Nothing to ask (every pair over the cap) needs no key: the comment still
+  // lists what went unchecked.
+  if (pairs.length === 0) return { ok: true, scored: [] };
   if (!key) return { ok: false, reason: "TYPESAFE_JEV_API_KEY is not set" };
   const jobs = pairs.flatMap((p, i) => REQUESTS.map((questions, q) => ({ i, q, state: stateFor(p, diffs), questions })));
   const answers = pairs.map(() => []);

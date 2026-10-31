@@ -180,6 +180,14 @@ check("post run: body has no ${{ }} expressions", "${{" not in body, "none", "co
 check("post step runs after the model step", pi > mi, "> %s" % mi, pi)
 cond = str(post.get("if", ""))
 
+# The post step runs `node _pw/...cli.mjs render` with a write token, so its
+# condition keys on the Verify step's outcome; find that step by name.
+vi, verify = find(lambda s: str(s.get("name", "")).startswith("Verify drift sources match job.workflow_sha"))
+check("verify step exists", verify is not None)
+verify_id = (verify or {}).get("id")
+check("verify step has an id", bool(verify_id), "an id", verify_id)
+check("verify step runs before the post step", vi is not None and vi < pi, "< %s" % pi, vi)
+
 
 # ── Evaluate the post step's if: the way Actions does ──
 # A minimal evaluator for the expression subset a step condition uses:
@@ -257,7 +265,8 @@ def evaluate(src, ctx):
                 return ctx[v + "()"]
             parts = v.split(".")
             if len(parts) == 3 and parts[0] == "steps" and parts[2] in ("outcome", "conclusion"):
-                return ctx["steps"].get(parts[1], {}).get(parts[2], "success")
+                # A step absent from the context is null in Actions, never 'success'.
+                return ctx["steps"].get(parts[1], {}).get(parts[2])
             if len(parts) == 4 and parts[0] == "steps" and parts[2] == "outputs":
                 return ctx["steps"].get(parts[1], {}).get("outputs", {}).get(parts[3], "")
             if len(parts) == 3 and parts[0] == "needs" and parts[2] == "result":
@@ -303,9 +312,11 @@ def evaluate(src, ctx):
     return bool(r)
 
 
-def ctx_for(outputs, cancelled, failed=False):
+def ctx_for(outputs, cancelled, failed=False, outcomes=None):
+    outcomes = outcomes or {}
     return {
-        "steps": {k: {"outcome": "success", "conclusion": "success", "outputs": v} for k, v in outputs.items()},
+        "steps": {k: {"outcome": outcomes.get(k, "success"), "conclusion": outcomes.get(k, "success"),
+                      "outputs": outputs.get(k, {})} for k in set(outputs) | set(outcomes)},
         "cancelled()": cancelled,
         "success()": not cancelled and not failed,
         "failure()": failed,
@@ -314,30 +325,47 @@ def ctx_for(outputs, cancelled, failed=False):
 
 
 def table(label, cond, cases):
-    for outputs, cancelled, want_run, why, *failed in cases:
-        failed = bool(failed and failed[0])
+    for outputs, cancelled, want_run, why, *rest in cases:
+        failed = bool(rest and rest[0])
+        outcomes = rest[1] if len(rest) > 1 else None
         name = "%s if: %s when %s%s%s" % (label, "runs" if want_run else "skips", why,
                                          ", run cancelled" if cancelled else "", ", an earlier step failed" if failed else "")
         try:
-            got = evaluate(cond, ctx_for(outputs, cancelled, failed))
+            got = evaluate(cond, ctx_for(outputs, cancelled, failed, outcomes))
         except ExprError as e:
             check(name, False, "evaluable condition", "%s (%s)" % (cond, e))
             continue
         check(name, got == want_run, "run" if want_run else "skip", "%s for if: %s" % ("run" if got else "skip", cond))
 
 
-# Post whenever the pairs step reached a verdict: 'ok' (JEV scored, or JEV was
-# unavailable and an existing comment gets the notice) or 'none' (no pairs, so
-# open findings resolve). Never when the pairs step was unavailable or skipped,
-# nor when the run was cancelled.
+# Once the drift sources are verified, post on every status unless the run was
+# cancelled: 'ok' (JEV scored, or JEV was unavailable and an existing comment
+# gets the notice), 'none' (no pairs, so open findings resolve), and
+# 'unavailable' or '' (the pairs step could not compute the diff, crashed or
+# timed out: render only annotates an existing comment and never creates one).
+VERIFIED = {verify_id: "success"}
 cases = []
 for status in ("ok", "none", "unavailable", ""):
     for cancelled in (False, True):
-        cases.append(({"pairs": {"status": status}}, cancelled, (not cancelled) and status in ("ok", "none"),
-                      "pairs status '%s'" % status))
+        cases.append(({"pairs": {"status": status}}, cancelled, not cancelled,
+                      "verify ok, pairs status '%s'" % status, False, VERIFIED))
 # A failed earlier step (not cancelled) must not suppress the post: the comment
 # still has to carry the verdict, so the condition cannot rely on success().
-cases.append(({"pairs": {"status": "ok"}}, False, True, "pairs status 'ok'", True))
+cases.append(({"pairs": {"status": "ok"}}, False, True, "verify ok, pairs status 'ok'", True, VERIFIED))
+# The pairs step (continue-on-error) crashed or hit its timeout: no status, but
+# the sources were verified, so render may annotate the existing comment.
+cases.append(({"pairs": {"status": ""}}, False, True, "verify ok, pairs step failed/timed out",
+              True, dict(VERIFIED, pairs="failure")))
+# Unverified drift sources must never reach `node _pw/...cli.mjs render` with
+# the write token: a failed Verify skips the post (later steps, pairs included,
+# are then skipped, so pairs has no status) ...
+cases.append(({"pairs": {"status": ""}}, False, False, "verify failed, pairs status ''",
+              True, {verify_id: "failure"}))
+cases.append(({"pairs": {"status": "ok"}}, False, False, "verify failed, pairs status 'ok'",
+              True, {verify_id: "failure"}))
+# ... and so does a Verify skipped because the drift-source checkout failed.
+cases.append(({}, False, False, "verify skipped (drift-source checkout failed)",
+              True, {verify_id: "skipped"}))
 table("post step", cond, cases)
 
 # The drafter runs only for JEV-scored runs with at least one high finding.

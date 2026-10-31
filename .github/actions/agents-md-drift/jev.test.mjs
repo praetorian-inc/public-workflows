@@ -49,6 +49,13 @@ test("a missing key is unavailable without a request", async () => {
   assert.equal(calls, 0);
 });
 
+test("no pairs to ask is ok without a key or a request", async () => {
+  let calls = 0;
+  const res = await scorePairs({ pairs: [], diffs: {}, key: "", fetchImpl: async () => (calls++, ok(1)) });
+  assert.deepEqual(res, { ok: true, scored: [] });
+  assert.equal(calls, 0);
+});
+
 test("5xx and network errors retry, then succeed", async () => {
   const replies = [status(503), new TypeError("boom")];
   const fetchImpl = async () => {

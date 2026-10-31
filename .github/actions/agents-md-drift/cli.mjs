@@ -56,6 +56,11 @@ function pairsCmd(env, x) {
     return x.output("status", "unavailable");
   }
   x.write("pairs.json", built);
+  if (built.sectionless.length) {
+    const list = built.sectionless.join(", ");
+    x.notice("Instruction-file drift: not checked", `no ## or ### section to pair in ${list}; changes those files govern were not checked against them.`);
+    x.summary(`Instruction-file drift: not checked against ${list} (no ## or ### section).`);
+  }
   const status = built.pairs.length || built.overflow.length ? "ok" : "none";
   x.output("status", status);
   x.output("count", built.pairs.length);
@@ -93,6 +98,14 @@ function renderCmd(env, x) {
     const drafts = expected ? parseDrafts(env.STRUCTURED_OUTPUT ?? "") : null;
     if (expected && !drafts) x.warning("Instruction-file drift: no drafts", "the drafting step returned no usable output; findings are posted without a proposed edit.");
     body = decide({ previous, scored, overflow, drafts, sha }).body;
+  } else if (env.PAIRS_STATUS !== "ok") {
+    // "unavailable" was already noticed by the pairs step with its reason; an
+    // empty status means that step never finished (a crash or its timeout).
+    if (!env.PAIRS_STATUS) {
+      x.notice("Instruction-file drift: not checked", `the drift-pairs step did not finish at ${sha}; drift was not checked and existing findings were left as they were. Passing.`);
+      x.summary("Instruction-file drift: the drift-pairs step did not finish; drift was not checked.");
+    }
+    body = withNotice(previous, `candidate pairs were not computed at ${sha}; findings were not rechecked.`);
   } else {
     x.notice("Instruction-file drift: JEV unavailable", `JEV was unavailable at ${sha}; drift was not checked and existing findings were left as they were. Passing.`);
     body = withNotice(previous, `JEV was unavailable at ${sha}; findings were not rechecked.`);

@@ -15,6 +15,11 @@ test("sections: ## and ### only, nested ### inside its ## parent, fenced heading
   assert.equal(s[2].text, "## B ##\nb");
 });
 
+test("sections: an ATX heading may be indented up to three spaces, not four", () => {
+  const md = ["   ## A", "a", " ### A.1", "x", "    ## code, not a heading", "## B", "b"].join("\n");
+  assert.deepEqual(sections(md).map((x) => [x.heading, x.level]), [["A", 2], ["A.1", 3], ["B", 2]]);
+});
+
 // CommonMark fence rules: a fence closes only on the same character, at least
 // as long as the opener, with nothing but whitespace after it and at most three
 // spaces of indent. A backtick opener's info string cannot contain a backtick.
@@ -144,6 +149,24 @@ test("buildPairs numbers a repeated heading so each section keeps its own identi
   const head = g("rev-parse", "HEAD");
   const { pairs } = buildPairs({ root, base, head, skipList: [], maxPairs: 10 });
   assert.deepEqual(pairs.map((p) => [p.heading, p.occurrence]), [["Notes", 1], ["Other", 1], ["Notes", 2], ["Notes", 3]]);
+});
+
+test("buildPairs reports a governing file with no ## or ### section", (t) => {
+  const { root, g, put } = repo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  put("AGENTS.md", "# Title\nOnly a preamble.\n");
+  put("svc/AGENTS.md", "## Handlers\nlist: a\n");
+  put("svc/a.go", "package a\n");
+  g("add", "-A");
+  g("commit", "-qm", "base");
+  const base = g("rev-parse", "HEAD");
+  put("svc/a.go", "package a // x\n");
+  g("add", "-A");
+  g("commit", "-qm", "head");
+  const head = g("rev-parse", "HEAD");
+  const { pairs, sectionless } = buildPairs({ root, base, head, skipList: [], maxPairs: 10 });
+  assert.deepEqual(pairs.map((p) => [p.agents_md, p.heading]), [["svc/AGENTS.md", "Handlers"]]);
+  assert.deepEqual(sectionless, ["AGENTS.md"]);
 });
 
 test("buildPairs throws when git cannot answer", (t) => {

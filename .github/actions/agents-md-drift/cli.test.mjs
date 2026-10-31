@@ -119,6 +119,36 @@ test("JEV unavailable with an existing comment: notice in place, findings untouc
   assert.doesNotMatch(second, /Resolved at/);
 });
 
+test("a pairs step that never finished: render notices and only annotates an existing comment", async (t) => {
+  const s = setup(t);
+  await s.run("render", { PAIRS_STATUS: "" });
+  assert.deepEqual(s.outputs(), { action: "none" });
+  assert.equal(existsSync(s.env.PAYLOAD_FILE), false);
+  assert.ok(s.logs.some((l) => l.startsWith("::notice title=Instruction-file drift: not checked::the drift-pairs step did not finish")));
+  assert.match(readFileSync(s.env.GITHUB_STEP_SUMMARY, "utf8"), /drift-pairs step did not finish/);
+  await s.run("pairs");
+  await s.run("score", { TYPESAFE_JEV_API_KEY: KEY }, jev);
+  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", STRUCTURED_OUTPUT: "" });
+  writeFileSync(s.env.PREVIOUS_FILE, JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body);
+  for (const status of ["", "unavailable"]) {
+    await s.run("render", { PAIRS_STATUS: status });
+    const body = JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body;
+    assert.match(body, /Notice:\*\* candidate pairs were not computed at [0-9a-f]+; findings were not rechecked\./);
+    assert.match(body, /#### `AGENTS\.md` § `Handlers`/);
+    assert.doesNotMatch(body, /Resolved at/);
+  }
+});
+
+test("score with every pair over the cap needs no key and lists the overflow", async (t) => {
+  const s = setup(t);
+  await s.run("pairs", { MAX_PAIRS: "0" });
+  assert.deepEqual(s.outputs(), { status: "ok", count: "0" });
+  await s.run("score", {});
+  assert.deepEqual(s.outputs(), { jev: "ok", high: "0" });
+  await s.run("render", { PAIRS_STATUS: "ok", JEV_STATUS: "ok", STRUCTURED_OUTPUT: "" });
+  assert.match(JSON.parse(readFileSync(s.env.PAYLOAD_FILE, "utf8")).body, /### Not checked \(pair cap\)\n[\s\S]*`b\.go` × `AGENTS\.md`: 2 section\(s\)/);
+});
+
 test("pairs: a git failure or a bad max_pairs is a notice and status unavailable", async (t) => {
   const s = setup(t);
   await s.run("pairs", { BASE_SHA: "0000000" });

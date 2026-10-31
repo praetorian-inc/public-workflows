@@ -20,7 +20,8 @@ const closes = (l, open) => {
   const m = CLOSE.exec(l);
   return m !== null && m[1][0] === open[0] && m[1].length >= open.length;
 };
-const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
+// An ATX heading may sit after at most three spaces, as a fence opener may.
+const HEADING = /^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
 
 // [{ heading, level, text }] for the ## and ### sections of a markdown text. A
 // section runs to the next heading of the same or a higher level, so a ###
@@ -94,6 +95,9 @@ export function buildPairs({ root, base, head, skipList, maxPairs }) {
   };
   const diffs = {};
   const all = [];
+  // Governing files with no ## or ### section: nothing in them can be paired,
+  // so the caller says they went unchecked instead of passing them silently.
+  const sectionless = new Set();
   for (const file of changed) {
     const mds = governing(file, read);
     if (mds.length === 0) continue;
@@ -102,12 +106,14 @@ export function buildPairs({ root, base, head, skipList, maxPairs }) {
       // A heading text can repeat in one file; its occurrence number keeps
       // each section a separate finding.
       const seen = new Map();
-      for (const s of sections(read(agents_md))) {
+      const found = sections(read(agents_md));
+      if (found.length === 0) sectionless.add(agents_md);
+      for (const s of found) {
         const occurrence = (seen.get(s.heading) ?? 0) + 1;
         seen.set(s.heading, occurrence);
         all.push({ file, agents_md, heading: s.heading, occurrence, section: s.text, distance });
       }
     });
   }
-  return { diffs, ...capPairs(all, maxPairs) };
+  return { diffs, sectionless: [...sectionless], ...capPairs(all, maxPairs) };
 }

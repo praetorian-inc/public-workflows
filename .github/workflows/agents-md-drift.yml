@@ -399,6 +399,7 @@ jobs:
       # An empty job.workflow_sha would let checkout fall back to the default
       # branch and run different code with the JEV key, so prove the commit.
       - name: Verify drift sources match job.workflow_sha
+        id: verify
         shell: bash
         timeout-minutes: 1
         env:
@@ -546,12 +547,15 @@ jobs:
       # Deterministic publisher (ENG-5663). One drift comment per PR, PATCHed in
       # place. cli.mjs render decides the body from the JEV scores, the drafts
       # and the previous comment's hidden state block; the drafts are untrusted
-      # model text and only ever land inside code fences. Runs whenever the
-      # pairs step produced a verdict ('ok' or 'none'), so findings resolve when
-      # a push removes the code that made them stale.
+      # model text and only ever land inside code fences. Runs even when the
+      # pairs step failed or produced no status: render then only adds a "not
+      # rechecked" notice to an existing comment and never creates one. On 'ok'
+      # or 'none' findings resolve when a push removes the code that made them
+      # stale. Never runs unless the verify step proved the _pw checkout: render
+      # executes _pw code with a pull-requests: write token.
       - name: Post or update drift comment
         id: post
-        if: ${{ !cancelled() && (steps.pairs.outputs.status == 'ok' || steps.pairs.outputs.status == 'none') }}
+        if: ${{ !cancelled() && steps.verify.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
