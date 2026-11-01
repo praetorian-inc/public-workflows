@@ -114,3 +114,15 @@ test("P7: a PR that breaks or feeds an untouched link owns its error", () => {
   assert.equal(exposed.code, 1);
   assert.match(exposed.out, /::error file=vendor::vendor is a symlink to a directory holding the symlink/);
 });
+
+test("P8: a link through a linked directory follows that directory to its target", () => {
+  const root = initRepo();
+  mkdirSync(path.join(root, "lib"), { recursive: true });
+  symlinkSync("lib", path.join(root, "vendor"));
+  symlinkSync("vendor/a.go", path.join(root, "a.go"));
+  const base = commit(root, { "keep.go": file("go", 3), "lib/a.go": file("go", 3), "lib/b.go": file("go", 3) });
+  commit(root, { "lib/a.go": null });
+  const out = check({ root, base }, PR);
+  assert.equal(out.code, 1);
+  assert.match(out.out, /::error file=a\.go::a\.go is a symlink to a path that does not exist/);
+});

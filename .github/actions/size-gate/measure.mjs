@@ -104,14 +104,29 @@ const isDir = (abs) => {
   }
 };
 
-// The checkout paths a link reaches, hop by hop by readlink, so a PR that
-// deletes, renames or adds under a target touches the link too (LAB-7704).
+// The checkout paths a link reaches, resolving each component in turn (a
+// linked directory midway included), so a PR that deletes, renames or adds
+// under a target touches the link too (LAB-7704).
 export function linkTargets(root, p) {
   const out = [];
-  for (let cur = p, hops = 0; hops < 40 && isLink(root, cur); hops++) {
-    cur = posix(path.relative(root, path.resolve(root, path.dirname(cur), readlinkSync(path.join(root, cur)))));
-    if (outside(cur)) break;
-    out.push(cur);
+  let [done, todo] = [[], p.split("/")];
+  for (let hops = 0; todo.length && hops < 40; ) {
+    const part = todo.shift();
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (!done.pop()) return out;
+      continue;
+    }
+    done.push(part);
+    if (!isLink(root, done.join("/"))) continue;
+    hops++;
+    const target = readlinkSync(path.join(root, ...done));
+    done.pop();
+    if (path.isAbsolute(target)) done = [];
+    todo = [...posix(path.isAbsolute(target) ? path.relative(root, target) : target).split("/"), ...todo];
+    const next = path.posix.normalize([...done, ...todo].join("/"));
+    if (outside(next)) return out;
+    out.push(next);
   }
   return out;
 }
