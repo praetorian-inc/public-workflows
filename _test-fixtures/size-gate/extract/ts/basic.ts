@@ -57,3 +57,21 @@ export function Outer() {
 }
 
 export default () => 5;
+
+const foo = (() => 6);
+
+const o = { bar: (() => 7), deep: (((): number => 8)) };
+
+run((() => 9));
+
+exports.baz = (() => 10);
+
+module.exports["qux"] = (function () {
+  return 11;
+});
+
+(function () {
+  return 12;
+})();
+
+(() => 13)();

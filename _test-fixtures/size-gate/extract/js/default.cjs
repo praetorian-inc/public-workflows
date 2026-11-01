@@ -33,3 +33,17 @@ exports["foo"] = function () {
 module.exports["baz"] = () => 10;
 
 jobs["run"](() => 11);
+
+exports.wrapped = (() => 12);
+
+module.exports["qux"] = (function () {
+  return 13;
+});
+
+run((() => 14));
+
+exports.nested = (((() => 15)));
+
+(function () {
+  return 16;
+})();

@@ -18,3 +18,17 @@ export class Counter {
 }
 
 export default ((() => 12));
+
+const foo = (() => 13);
+
+const o = { bar: (() => 14), baz: ((() => 15)) };
+
+(() => 16)();
+
+export default (function Foo() {
+  return 17;
+});
+
+export default (function () {
+  return 18;
+});
