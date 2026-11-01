@@ -1,0 +1,7 @@
+{
+  "limit": 500,
+  "generatedBy": "node .github/actions/size-gate/cli.mjs baseline",
+  "files": {
+    ".github/actions/audit-delivery/audit-delivery.mjs": 4733
+  }
+}

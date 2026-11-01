@@ -89,6 +89,10 @@ test("M10: a function only matches a base function in the same language", () => 
   const tsx = { "src/legacy.ts": source("ts", fn("ts", "Z", 100)), "src/split.tsx": source("tsx", fn("tsx", "F", 80, "1")) };
   const moved = check(makeRepo({ base: { "keep.ts": file("ts", 3), ...ts }, head: tsx }));
   assert.equal(moved.code, 0, moved.out);
+  const mjs = { "src/legacy.mjs": source("mjs", fn("mjs", "F", 80), fn("mjs", "Z", 100)) };
+  const split = { "src/legacy.mjs": source("mjs", fn("mjs", "Z", 100)), "src/split.ts": source("ts", fn("ts", "F", 80, "1")) };
+  const fromJs = check(makeRepo({ base: { "keep.ts": file("ts", 3), ...mjs }, head: split }));
+  assert.equal(fromJs.code, 0, fromJs.out);
 });
 
 // A whole-file rename keeps its allowances only within one directory and language.
@@ -112,4 +116,7 @@ test("M12: renaming a file in its directory and language keeps its allowances", 
   }
   const tsx = check(renamed("src/a.ts", "src/a.tsx", source("ts", fn("ts", "F", 100))));
   assert.equal(tsx.code, 0, tsx.out);
+  // JavaScript and TypeScript are one language: a .js -> .ts conversion keeps its allowances.
+  const converted = check(renamed("src/a.js", "src/a.ts", source("js", fn("js", "F", 100))));
+  assert.equal(converted.code, 0, converted.out);
 });

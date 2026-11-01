@@ -1,4 +1,4 @@
-// Golden tests for the TypeScript/TSX function extractor (LAB-7587).
+// Golden tests for the TypeScript/JavaScript function extractor (LAB-7587, LAB-7641).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -10,19 +10,20 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, "..", "..", "..", "_test-fixtures", "size-gate", "extract");
 const EXTRACTOR = join(HERE, "extract-ts.mjs");
+const SOURCE = /\.[cm]?[jt]sx?$/;
 
 function run(...paths) {
   return JSON.parse(execFileSync(process.execPath, [EXTRACTOR, ...paths], { encoding: "utf8" }));
 }
 
-for (const lang of ["ts", "tsx"]) {
+for (const lang of ["ts", "tsx", "js", "jsx"]) {
   const dir = join(FIXTURES, lang);
-  const sources = readdirSync(dir).filter((f) => f.endsWith(`.${lang}`));
+  const sources = readdirSync(dir).filter((f) => SOURCE.test(f));
   test(`${lang} fixtures exist`, () => assert.ok(sources.length > 0));
   for (const name of sources) {
     test(`${lang}/${name} matches its golden`, () => {
       const src = join(dir, name);
-      const golden = JSON.parse(readFileSync(src.replace(/\.tsx?$/, ".golden.json"), "utf8"));
+      const golden = JSON.parse(readFileSync(src.replace(SOURCE, ".golden.json"), "utf8"));
       assert.deepEqual(run(src)[src], golden);
     });
   }

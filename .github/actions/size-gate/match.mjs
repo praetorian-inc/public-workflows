@@ -1,10 +1,10 @@
 // Cross-file function matching within one directory and language (LAB-7587,
 // plan §5.3 steps 4-7). Pure: no I/O.
 import path from "node:path";
-import { language } from "./scope.mjs";
+import { family } from "./scope.mjs";
 
-// .ts and .tsx are one language for matching; Go and Python stand alone.
-const family = (file) => (language(file) === "tsx" ? "ts" : language(file));
+// .ts/.tsx/.js/.mjs/.cjs/.jsx are one language for matching; Go and Python
+// stand alone.
 const keyOf = (file, name) => `${path.posix.dirname(file)}::${family(file)}::${name}`;
 
 // base: [{ file, functions }] for every changed base-side file.

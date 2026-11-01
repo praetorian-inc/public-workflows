@@ -6,13 +6,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { inScope, isGenerated, language, exemptByText } from "./scope.mjs";
+import { family, inScope, isGenerated, language, exemptByText } from "./scope.mjs";
 import { lineCount, measureTree } from "./measure.mjs";
 import { parseConfig, pathspecs, UsageError } from "./config.mjs";
 
-test("in scope: the four languages, nothing else", () => {
-  for (const p of ["a.go", "ui/x.ts", "ui/X.tsx", "pkg/m.py"]) assert.equal(inScope(p), true, p);
-  for (const p of ["a.mjs", "a.js", "a.java", "README.md", "a.d.ts", "api.pb.go"])
+test("in scope: Go, TypeScript, JavaScript and Python, nothing else", () => {
+  for (const p of ["a.go", "ui/x.ts", "ui/X.tsx", "pkg/m.py", "a.js", "a.mjs", "a.cjs", "ui/X.jsx", "src/app.min.mjs"])
+    assert.equal(inScope(p), true, p);
+  for (const p of ["a.mts", "a.cts", "a.json", "a.java", "README.md", "a.d.ts", "api.pb.go"])
     assert.equal(inScope(p), false, p);
 });
 
@@ -24,6 +25,10 @@ test("AC7 test-name patterns are exempt", () => {
     "pkg/test_x.py",
     "pkg/x_test.py",
     "pkg/conftest.py",
+    "a.test.js",
+    "a.spec.mjs",
+    "a.test.cjs",
+    "ui/a.spec.jsx",
   ])
     assert.equal(inScope(p), false, p);
   for (const p of ["pkg/latest_x.py", "pkg/contest.py", "pkg/x_tester.py"]) assert.equal(inScope(p), true, p);
@@ -46,6 +51,11 @@ test("generic test, vendor and generated directories are exempt", () => {
     "a/fixtures/f.py",
     "a/tests/t.py",
     "a/testutils.go",
+    "dist/app.min.js",
+    "a/__tests__/t.js",
+    "test-utils.js",
+    "a/test_helpers.mjs",
+    "a/x.gen.js",
   ])
     assert.equal(inScope(p), false, p);
   // zz_generated must start the filename; a hand-written name that merely contains it is measured.
@@ -60,7 +70,19 @@ test("language by extension", () => {
   assert.equal(language("a.ts"), "ts");
   assert.equal(language("a.tsx"), "tsx");
   assert.equal(language("a.py"), "py");
-  assert.equal(language("a.mjs"), null);
+  assert.equal(language("a.js"), "js");
+  assert.equal(language("a.mjs"), "mjs");
+  assert.equal(language("a.cjs"), "cjs");
+  assert.equal(language("a.jsx"), "jsx");
+  assert.equal(language("a.mts"), null);
+  assert.equal(language("a.json"), null);
+});
+
+test("family: TypeScript and JavaScript are one language; Go and Python stand alone", () => {
+  for (const p of ["a.ts", "a.tsx", "a.js", "a.mjs", "a.cjs", "a.jsx"]) assert.equal(family(p), "ts", p);
+  assert.equal(family("a.go"), "go");
+  assert.equal(family("a.py"), "py");
+  assert.equal(family("a.json"), null);
 });
 
 test("isGenerated: standard header before code only", () => {
@@ -98,6 +120,7 @@ test("lineCount counts physical lines; a last line without newline counts", () =
 test("lineCount breaks lines where each language's parser does", () => {
   const t = "a\r\nb\rc\u2028d\u2029e\n";
   assert.deepEqual(["a.go", "a.py", "a.ts", "a.tsx"].map((p) => lineCount(p, t)), [2, 3, 5, 5]);
+  assert.deepEqual(["a.js", "a.mjs", "a.cjs", "a.jsx"].map((p) => lineCount(p, t)), [5, 5, 5, 5]);
   for (const p of ["a.go", "a.py", "a.ts"]) assert.equal(lineCount(p, "a\r\nb\r\n"), 2, `${p}: CRLF counts as today`);
 });
 

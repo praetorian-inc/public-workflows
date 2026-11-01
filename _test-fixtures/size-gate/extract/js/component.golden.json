@@ -1,0 +1,8 @@
+{
+  "functions": [
+    { "name": "exports", "start": 5, "end": 7, "isComponent": true }
+  ],
+  "comments": [
+    { "start": 7, "end": 7, "text": "// trailing" }
+  ]
+}

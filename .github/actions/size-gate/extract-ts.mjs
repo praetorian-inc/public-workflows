@@ -1,4 +1,5 @@
-// TypeScript/TSX function extractor for the size gate (LAB-7587).
+// TypeScript/TSX and JavaScript/JSX function extractor for the size gate
+// (LAB-7587, LAB-7641).
 // Usage: node extract-ts.mjs <file>... ; prints one JSON object keyed by path.
 // Parse-only: ts.createSourceFile never evaluates the code it reads.
 import { readFileSync } from "node:fs";
@@ -9,6 +10,11 @@ const FUNCTION_KINDS = new Set([
   K.FunctionDeclaration, K.FunctionExpression, K.ArrowFunction, K.MethodDeclaration,
   K.Constructor, K.GetAccessor, K.SetAccessor,
 ]);
+// JavaScript parses with JSX allowed, as TypeScript itself parses a .js file.
+const KIND = {
+  ts: ts.ScriptKind.TS, tsx: ts.ScriptKind.TSX, js: ts.ScriptKind.JS,
+  mjs: ts.ScriptKind.JS, cjs: ts.ScriptKind.JS, jsx: ts.ScriptKind.JSX,
+};
 const JSX_KINDS = new Set([K.JsxElement, K.JsxSelfClosingElement, K.JsxFragment]);
 
 const join = (outer, name) => (outer ? `${outer}>${name}` : name);
@@ -149,7 +155,7 @@ function extractFile(path) {
   } catch (err) {
     return { functions: [], comments: [], error: `cannot read: ${err.message}` };
   }
-  const kind = path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const kind = KIND[path.slice(path.lastIndexOf(".") + 1)];
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, kind);
   // Any diagnostic fails, as in Go and Python: recovery can cut a function short.
   const diags = sf.parseDiagnostics ?? [];

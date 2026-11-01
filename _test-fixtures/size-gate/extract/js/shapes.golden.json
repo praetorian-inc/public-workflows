@@ -1,0 +1,9 @@
+{
+  "functions": [
+    { "name": "add", "start": 1, "end": 3, "isComponent": false },
+    { "name": "double", "start": 5, "end": 5, "isComponent": false },
+    { "name": "get Counter.value", "start": 12, "end": 14, "isComponent": false },
+    { "name": "Counter.increment", "start": 15, "end": 17, "isComponent": false }
+  ],
+  "comments": []
+}

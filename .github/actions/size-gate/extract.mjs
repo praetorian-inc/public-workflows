@@ -3,13 +3,13 @@
 // An extractor crash or invalid JSON throws: the gate fails closed (§5.5).
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { language } from "./scope.mjs";
+import { family } from "./scope.mjs";
 
 const here = (f) => fileURLToPath(new URL(f, import.meta.url));
 
 function command(lang, goExtractor) {
   if (lang === "py") return ["python3", ["-I", here("./extract_py.py")]];
-  if (lang === "ts" || lang === "tsx") return [process.execPath, [here("./extract-ts.mjs")]];
+  if (lang === "ts") return [process.execPath, [here("./extract-ts.mjs")]];
   if (!goExtractor) throw new Error("SIZE_GATE_GO_EXTRACTOR is not set; build extract-go and point it at the binary");
   return [goExtractor, []];
 }
@@ -48,7 +48,7 @@ export function numberDuplicates(functions) {
 export function extractAll(files, goExtractor) {
   const byLang = new Map();
   for (const f of files) {
-    const lang = language(f) === "tsx" ? "ts" : language(f);
+    const lang = family(f);
     if (!byLang.has(lang)) byLang.set(lang, []);
     byLang.get(lang).push(f);
   }

@@ -1,8 +1,9 @@
 name: Size gate (Callable)
-# Shared file and function size gate for Go, TypeScript/TSX and Python
-# (LAB-7587). Files: 500 lines (warning over 400), with a ratcheting baseline
-# for legacy files.
-# Functions: 50 lines (150 for a TSX component), checked only for functions a
+# Shared file and function size gate for Go, TypeScript/JavaScript (incl.
+# TSX/JSX) and Python (LAB-7587, LAB-7641). Files: 500 lines (warning over
+# 400), with a ratcheting baseline for legacy files.
+# Functions: 50 lines (150 for a component: a TS or JS function whose own body
+# contains JSX; JSX in a `.js` file counts too), checked only for functions a
 # PR adds or changes; a function that was already over at the merge-base is
 # grandfathered at its base length. Rules and the baseline recipe are in the
 # README under `size-gate.yml`.
