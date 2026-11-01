@@ -172,6 +172,28 @@ test("parseConfig refuses unknown modes, flags and bad numbers", () => {
   assert.throws(() => parseConfig(["check"], { SIZE_GATE_MIN_SCANNED: "lots" }), UsageError);
 });
 
+test("parseConfig usage errors name the offending argument", () => {
+  assert.throws(() => parseConfig(["check", "--bogus", "x"], {}), (e) => e instanceof UsageError && /--bogus/.test(e.message));
+  assert.throws(() => parseConfig(["check", "--include", "a/**", "--include"], {}), (e) => e instanceof UsageError && /--include/.test(e.message));
+  assert.throws(() => parseConfig(["check", "--root", "repo", "stray"], {}), (e) => e instanceof UsageError && /stray/.test(e.message));
+  assert.throws(() => parseConfig(["check", "stray"], {}), UsageError);
+  // A flag directly after a value flag is a missing value, not the value.
+  assert.throws(() => parseConfig(["check", "--include", "--exclude"], {}), UsageError);
+});
+
+test("parseConfig: a flag wins over its environment variable", () => {
+  const c = parseConfig(["check", "--baseline", "flag.json", "--include", "f/**", "--exclude", "g/**", "--min-scanned", "7"], {
+    SIZE_GATE_BASELINE: "env.json",
+    SIZE_GATE_INCLUDE: "e/**",
+    SIZE_GATE_EXCLUDE: "h/**",
+    SIZE_GATE_MIN_SCANNED: "3",
+  });
+  assert.equal(c.baselinePath, "flag.json");
+  assert.deepEqual(c.include, ["f/**"]);
+  assert.deepEqual(c.exclude, ["g/**"]);
+  assert.equal(c.minScanned, 7);
+});
+
 test("pathspecs: include and exclude become git glob magic", () => {
   assert.deepEqual(pathspecs([], []), []);
   assert.deepEqual(pathspecs(["ui/**"], ["acceptance/**"]), [":(glob)ui/**", ":(exclude,glob)acceptance/**"]);
