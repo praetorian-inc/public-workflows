@@ -185,6 +185,14 @@ export function readDiff(root, base, specs) {
   return { status, added, renames, atBase };
 }
 
+// Every path a pull request touches, whatever the scope: both sides of a
+// rename, deletions, and untracked files (LAB-7704).
+export function touchedPaths(root, base) {
+  const changed = z(git(root, ["-c", "core.quotePath=false", "diff", "--no-renames", "--name-only", "-z", base, "--"]));
+  const untracked = z(git(root, ["ls-files", "-z", "--others", "--exclude-standard"]));
+  return new Set([...changed, ...untracked]);
+}
+
 // A file's text at a ref, or null when the ref has no such file. Pass
 // encoding "buffer" for its raw bytes.
 export function showBlob(root, ref, p, encoding = "utf8") {

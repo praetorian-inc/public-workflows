@@ -1,5 +1,5 @@
 // Physical line counts for in-scope files (LAB-7587), ported from guard#9602.
-import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { matchSpecs } from "./git.mjs";
 import { exemptByText, family, inScope } from "./scope.mjs";
@@ -103,6 +103,35 @@ const isDir = (abs) => {
     return false;
   }
 };
+
+// The checkout paths a link reaches, resolving each component of the absolute
+// path in turn (a linked directory midway, or a hop out of the checkout and
+// back, included), so a PR that deletes, renames or adds under a target, or
+// under any link on the way, touches the link too (LAB-7704).
+export function linkTargets(root, p) {
+  const top = realpathSync(root);
+  const out = [];
+  let [done, todo] = [top.split(path.sep), p.split("/")];
+  for (let hops = 0; todo.length && hops < 40; ) {
+    const part = todo.shift();
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (done.length > 1) done.pop();
+      continue;
+    }
+    done.push(part);
+    const abs = done.join(path.sep) || path.sep;
+    if (!isLink(abs, "")) continue;
+    hops++;
+    const target = readlinkSync(abs);
+    done.pop();
+    if (path.isAbsolute(target)) done = [""];
+    todo = [...target.split(path.sep), ...todo];
+    const rel = path.relative(top, path.resolve(done.join(path.sep) || path.sep, ...todo));
+    if (!outside(rel)) out.push(posix(rel));
+  }
+  return out;
+}
 
 // measureTree skips symlinks, so a link could hide code: a file link passes
 // only when its target is a listed in-scope file, measured on its own; a

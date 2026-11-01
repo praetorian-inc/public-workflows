@@ -69,6 +69,14 @@ export function writeBaseline(root, baselinePath, loc) {
   return Object.keys(files).length;
 }
 
+// Baseline paths whose entry the working tree adds, removes or changes against
+// the merge-base. With no baseline there, every entry is new (LAB-7704).
+export function changedEntries(baseline, baseBaseline) {
+  if (!baseBaseline) return Object.keys(baseline);
+  const keys = new Set([...Object.keys(baseline), ...Object.keys(baseBaseline)]);
+  return [...keys].filter((p) => baseline[p] !== baseBaseline[p]);
+}
+
 // One entry against the tree: gone, back under the limit, grown or shrunk.
 function entryError(n, entry, B) {
   if (n === undefined) return `is listed in ${B} but no longer exists or is out of scope. Remove the entry.`;
