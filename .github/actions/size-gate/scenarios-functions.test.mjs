@@ -6,8 +6,8 @@ import { EXT, LANGS, check, component, file, fn, makeRepo, source } from "./scen
 // Every repo carries one small in-scope file so the liveness floor holds.
 const repo = (lang, base, head) => makeRepo({ base: { [`keep.${EXT[lang]}`]: file(lang, 3), ...base }, head });
 
-// Component rules hold wherever JSX parses: TSX, JSX, and JSX in plain .js.
-const COMPONENT_LANGS = ["tsx", "jsx", "js"];
+// Component rules hold wherever JSX parses: TSX, JSX, and JSX in plain .js, .mjs and .cjs.
+const COMPONENT_LANGS = ["tsx", "jsx", "js", "mjs", "cjs"];
 
 // A method of exactly n lines on a type or class, so names are qualified.
 function method(lang, n, tok) {
