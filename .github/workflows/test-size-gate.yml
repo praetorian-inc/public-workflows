@@ -6,7 +6,7 @@ name: Test size-gate
 #            caller does, against the default baseline path
 #            (.github/size-baseline.json). Only .go/.ts/.tsx/.js/.mjs/.cjs/
 #            .jsx/.py files are measured and tests are exempt, so the floor is
-#            the 38 files that leaves. The triggers therefore also match every
+#            the 39 files that leaves. The triggers therefore also match every
 #            in-scope source file, so a new oversize file fails on the PR that
 #            adds it.
 
