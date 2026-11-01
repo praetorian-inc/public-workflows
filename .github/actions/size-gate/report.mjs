@@ -1,6 +1,7 @@
 // GitHub workflow-command output for the size gate (LAB-7587).
 import { appendFileSync } from "node:fs";
 
+// Kept over @actions/core (LAB-7701): identical bytes, but it exports no escaper and adds 6 packages / 2 MB.
 // Escape a workflow-command message so a newline cannot start a new command.
 export const escapeData = (s) => String(s).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 // Property values also may not contain the ':' and ',' separators.

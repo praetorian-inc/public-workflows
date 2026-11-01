@@ -33,3 +33,10 @@ test("annotations escape the message and the file property", () => {
   assert.equal(annotation("error", { file: "a.go", msg: "m" }), "::error file=a.go::a.go m");
   assert.equal(annotation("warning", { file: "a,b:c.go", line: 7, msg: "x\ny" }), "::warning file=a%2Cb%3Ac.go,line=7::a,b:c.go:7 x%0Ay");
 });
+
+// Expected strings are the bytes @actions/core@3.0.1 core.error/warning/notice wrote for the same input (LAB-7701).
+test("annotations match @actions/core's escaping byte for byte", () => {
+  assert.equal(annotation("error", { file: "all:,%\r\n.go", line: 7, msg: "100% over\r\nk: v, w" }), "::error file=all%3A%2C%25%0D%0A.go,line=7::all:,%25%0D%0A.go:7 100%25 over%0D%0Ak: v, w");
+  assert.equal(annotation("warning", { file: "dir,with,commas/x.ts", msg: "two\nlines" }), "::warning file=dir%2Cwith%2Ccommas/x.ts::dir,with,commas/x.ts two%0Alines");
+  assert.equal(`::notice::${escapeData("SIZE_GATE_BASE 'a%b\r\nc:d,e'")}`, "::notice::SIZE_GATE_BASE 'a%25b%0D%0Ac:d,e'");
+});
