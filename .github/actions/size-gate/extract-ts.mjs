@@ -31,8 +31,8 @@ function propName(node) {
 function calleeName(expr) {
   if (ts.isIdentifier(expr)) return expr.text;
   if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
-  // `exports["foo"]` is foo, as `exports.foo` is.
-  if (ts.isElementAccessExpression(expr) && ts.isStringLiteral(expr.argumentExpression)) return expr.argumentExpression.text;
+  // `exports["foo"]` / `exports[`foo`]` is foo, as `exports.foo` is.
+  if (ts.isElementAccessExpression(expr) && ts.isStringLiteralLike(expr.argumentExpression)) return expr.argumentExpression.text;
   return null;
 }
 
@@ -40,7 +40,7 @@ function calleeName(expr) {
 const isModuleExports = (e) =>
   (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) &&
   ts.isIdentifier(e.expression) && e.expression.text === "module" &&
-  (ts.isPropertyAccessExpression(e) ? e.name.text : ts.isStringLiteral(e.argumentExpression) && e.argumentExpression.text) === "exports";
+  (ts.isPropertyAccessExpression(e) ? e.name.text : ts.isStringLiteralLike(e.argumentExpression) && e.argumentExpression.text) === "exports";
 
 // A parenthesized function, `(() => {})` or `((() => {}))`, sits where the
 // unwrapped one would: its outermost wrapper is what its context holds.

@@ -47,3 +47,15 @@ exports.nested = (((() => 15)));
 (function () {
   return 16;
 })();
+
+exports[`tpl`] = function () {
+  return 17;
+};
+
+module[`exports`] = function () {
+  return 18;
+};
+
+exports[`${key}`] = function () {
+  return 19;
+};
