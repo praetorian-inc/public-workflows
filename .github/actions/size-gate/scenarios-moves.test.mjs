@@ -126,3 +126,14 @@ test("M12: renaming a file in its directory and language keeps its allowances", 
   const fromCjs = check(makeRepo({ base: cjs, head: ts }));
   assert.equal(fromCjs.code, 0, fromCjs.out);
 });
+
+test("M13: an anonymous module.exports converted in place to export default keeps its allowance", () => {
+  const [, ...body] = fn("js", "F", 100);
+  const base = { "keep.go": file("go", 3), "src/a.js": source("js", ["module.exports = function () {", ...body]) };
+  const head = (b) => ({ "src/a.js": source("js", ["export default function () {", ...b]) });
+  const converted = check(makeRepo({ base, head: head(body) }));
+  assert.equal(converted.code, 0, converted.out);
+  const grown = check(makeRepo({ base, head: head(["  x += 1;", ...body]) }));
+  assert.equal(grown.code, 1, grown.out);
+  assert.match(grown.out, /`default` was 100 lines at the merge-base and is now 101; an over-limit function may change but not grow/);
+});

@@ -1,0 +1,8 @@
+{
+  "functions": [
+    { "name": "default", "start": 1, "end": 3, "isComponent": false },
+    { "name": "default", "start": 5, "end": 7, "isComponent": false },
+    { "name": "bar", "start": 9, "end": 9, "isComponent": false }
+  ],
+  "comments": []
+}

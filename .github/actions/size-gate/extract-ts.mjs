@@ -45,8 +45,9 @@ function contextName(node) {
   if (ts.isCallExpression(p) && p.arguments.includes(node)) return calleeName(p.expression);
   if (ts.isExportAssignment(p)) return "default";
   if (ts.isBinaryExpression(p) && p.right === node) {
-    // `module.exports = function Badge` is Badge, as `export function Badge` is.
-    if (node.name && isModuleExports(p.left)) return node.name.text;
+    // `module.exports = function Badge` is Badge, as `export function Badge` is;
+    // an anonymous one is default, as `export default function () {}` is.
+    if (isModuleExports(p.left)) return node.name ? node.name.text : "default";
     return calleeName(p.left);
   }
   return null;
