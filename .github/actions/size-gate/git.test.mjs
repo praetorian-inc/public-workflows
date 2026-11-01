@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { symlinkSync } from "node:fs";
 import path from "node:path";
 import { bannedLines } from "./disable-ban.mjs";
-import { isCommit, listFiles, readDiff, resolveBase, showBlob } from "./git.mjs";
+import { isCommit, listFiles, readDiff, readPatch, resolveBase, showBlob } from "./git.mjs";
 import { commit, initRepo, makeRepo, run, write } from "./scenario-kit.mjs";
 
 const ZERO = "0000000000000000000000000000000000000000";
@@ -188,6 +188,36 @@ test("readDiff: diff.noprefix and diff.mnemonicPrefix in the repo config change 
     run(root, "config", key, val);
     assert.deepEqual([...readDiff(root, base, []).added.get("x.go")], [[2, ""], [3, "var y = 1"]], key);
   }
+});
+
+// LAB-7700 regression fixture: one real patch holding every header form the
+// added-line parser must read. The patch assertions prove each form is present.
+// A trailing-space name must not merge into its neighbour (diff@9.0.0 trims it).
+test("readDiff: added lines survive every header form in one patch", () => {
+  const ctl = "f/c\u0001é.ts";
+  const { root, base } = makeRepo({
+    base: { 'f/we"ird.ts': "a\n", "f/hdr.ts": "-- a/x\nkeep\n", "f/gone.ts": "z\n", "f/old.ts": "1\n2\n3\n4\n", "f/shrink.ts": "1\n2\n", "f/trail.ts": "o\n" },
+    head: {
+      'f/we"ird.ts': "a\nb\n", [ctl]: "c\n", "f/café.ts": "d\n", "f/sp ace.ts": "s\n", "f/hdr.ts": "++ b/x\nkeep\n",
+      "f/gone.ts": null, "f/old.ts": null, "f/new.ts": "1\n2\n3\n4\n5\n", "f/shrink.ts": "1\n",
+      "f/trail.ts": "o\nm\n", "f/trail.ts ": "t\n",
+    },
+  });
+  const patch = readPatch(root, base, []);
+  for (const form of ['+++ "b/f/we\\"ird.ts"', '+++ "b/f/c\\001é.ts"', "+++ b/f/café.ts\n", "+++ b/f/sp ace.ts\t\n", "--- a/x\n+++ b/x\n", "+++ /dev/null", "rename from f/old.ts"])
+    assert.ok(patch.includes(form), `patch lacks ${JSON.stringify(form)}`);
+  const added = Object.fromEntries([...readDiff(root, base, []).added].map(([p, m]) => [p, [...m]]));
+  assert.deepEqual(added, {
+    'f/we"ird.ts': [[2, "b"]],
+    [ctl]: [[1, "c"]],
+    "f/café.ts": [[1, "d"]],
+    "f/sp ace.ts": [[1, "s"]],
+    "f/hdr.ts": [[1, "++ b/x"]],
+    "f/new.ts": [[5, "5"]],
+    "f/shrink.ts": [],
+    "f/trail.ts": [[2, "m"]],
+    "f/trail.ts ": [[1, "t"]],
+  });
 });
 
 test("showBlob returns the file at a ref, or null when absent", () => {
