@@ -4,18 +4,27 @@
 
 // Test, declaration and protobuf files by name (AC7).
 const TEST_SUFFIX =
-  /(_test\.go|\.test\.tsx?|\.spec\.tsx?|\.d\.ts|\.pb\.go)$|(^|\/)test_[^/]*\.py$|_test\.py$|(^|\/)conftest\.py$/;
+  /(_test\.go|\.(test|spec)\.(tsx?|[cm]?jsx?)|\.d\.ts|\.pb\.go)$|(^|\/)test_[^/]*\.py$|_test\.py$|(^|\/)conftest\.py$/;
 const EXCLUDED_DIR =
-  /(^|\/)(e2e|mocks?|__mocks__|generated|node_modules|vendor)(\/|$)|_gen\.go$|\.gen\.tsx?$|(^|\/)zz_generated[^/]*$/i;
+  /(^|\/)(e2e|mocks?|__mocks__|generated|node_modules|vendor)(\/|$)|_gen\.go$|\.gen\.(tsx?|[cm]?jsx?)$|\.min\.js$|(^|\/)zz_generated[^/]*$/i;
 const TEST_ONLY =
-  /(^|\/)(__tests__|__fixtures__|fixtures|tests?|testdata|testutils?|testhelpers?|test-utils)(\/|$)|(^|\/)(test[-_]?utils?|test_?helpers?)\.(go|tsx?)$/i;
-const LANGUAGE = /\.(go|tsx?|py)$/;
+  /(^|\/)(__tests__|__fixtures__|fixtures|tests?|testdata|testutils?|testhelpers?|test-utils)(\/|$)|(^|\/)(test[-_]?utils?|test[-_]?helpers?)\.(go|tsx?|[cm]?jsx?)$/i;
+const LANGUAGE = /\.(go|tsx?|py|[cm]?js|jsx)$/;
 
-// The language a path is measured as: "go", "ts", "tsx", "py", or null.
+// The extension a path is measured as: "go", "ts", "tsx", "py", "js", "mjs",
+// "cjs", "jsx", or null.
 export function language(p) {
   const m = LANGUAGE.exec(p);
   return m ? m[1] : null;
 }
+
+// The language family: TypeScript and JavaScript are one ("ts"), so they
+// share one extractor, line breaks and function matching (LAB-7641).
+const FAMILY = { tsx: "ts", js: "ts", mjs: "ts", cjs: "ts", jsx: "ts" };
+export const family = (p) => {
+  const l = language(p);
+  return l && (FAMILY[l] ?? l);
+};
 
 // In scope by path alone; the generated-header check needs the text.
 export function inScope(p) {

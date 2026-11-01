@@ -16,7 +16,15 @@
     { "name": "Outer>map", "start": 53, "end": 53, "isComponent": false },
     { "name": "Outer>setTimeout", "start": 54, "end": 54, "isComponent": false },
     { "name": "Outer>setTimeout", "start": 55, "end": 55, "isComponent": false },
-    { "name": "default", "start": 59, "end": 59, "isComponent": false }
+    { "name": "default", "start": 59, "end": 59, "isComponent": false },
+    { "name": "foo", "start": 61, "end": 61, "isComponent": false },
+    { "name": "o.bar", "start": 63, "end": 63, "isComponent": false },
+    { "name": "o.deep", "start": 63, "end": 63, "isComponent": false },
+    { "name": "run", "start": 65, "end": 65, "isComponent": false },
+    { "name": "baz", "start": 67, "end": 67, "isComponent": false },
+    { "name": "qux", "start": 69, "end": 71, "isComponent": false },
+    { "name": "anon", "start": 73, "end": 75, "isComponent": false },
+    { "name": "anon", "start": 77, "end": 77, "isComponent": false }
   ],
   "comments": []
 }

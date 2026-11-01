@@ -9,6 +9,8 @@ const cases = [
   ["go", "*.go -diff", "package p\n\nvar y = 1 //nolint:funlen\n"],
   ["go", "*.go binary", "package p\n\nvar y = 1 //nolint:funlen\n"],
   ["py", "*.py -diff", "# ruff: noqa\nx = 1\n"],
+  ["mjs", "*.mjs -diff", "// eslint-disable-next-line max-lines-per-function\nlet y = 1;\n"],
+  ["jsx", "*.jsx binary", "/* eslint-disable max-lines */\nlet y = 1;\n"],
 ];
 
 for (const [lang, attr, text] of cases) {

@@ -55,9 +55,9 @@ export function makeRepo({ base = {}, head = {}, untracked = {} }) {
   return { root, base: baseSha, head: headSha };
 }
 
-export const EXT = { go: "go", ts: "ts", tsx: "tsx", py: "py" };
+export const EXT = { go: "go", ts: "ts", tsx: "tsx", py: "py", js: "js", mjs: "mjs", cjs: "cjs", jsx: "jsx" };
 export const LANGS = Object.keys(EXT);
-const COMMENT = { go: "//", ts: "//", tsx: "//", py: "#" };
+const COMMENT = { go: "//", ts: "//", tsx: "//", py: "#", js: "//", mjs: "//", cjs: "//", jsx: "//" };
 const lines = (arr) => arr.join("\n") + "\n";
 
 // An n-line source file with no functions: a header, then comment filler.
@@ -78,7 +78,7 @@ export function fn(lang, name, n, tok = "0") {
   return [`function ${name}() {`, ...Array(n - 2).fill(`  x += ${tok};`), "}"];
 }
 
-// A TSX component of exactly n lines; its JSX makes the 150-line limit apply.
+// A TSX/JSX component of exactly n lines; its JSX makes the 150-line limit apply.
 export const component = (name, n, tok = "0") =>
   [`function ${name}() {`, ...Array(n - 3).fill(`  x += ${tok};`), "  return <div />;", "}"];
 

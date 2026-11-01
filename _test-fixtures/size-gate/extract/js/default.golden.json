@@ -1,0 +1,24 @@
+{
+  "functions": [
+    { "name": "default", "start": 1, "end": 3, "isComponent": false },
+    { "name": "default", "start": 5, "end": 7, "isComponent": false },
+    { "name": "bar", "start": 9, "end": 9, "isComponent": false },
+    { "name": "default", "start": 11, "end": 13, "isComponent": false },
+    { "name": "default", "start": 15, "end": 15, "isComponent": false },
+    { "name": "Named", "start": 17, "end": 19, "isComponent": false },
+    { "name": "default", "start": 21, "end": 23, "isComponent": false },
+    { "name": "Quoted", "start": 25, "end": 27, "isComponent": false },
+    { "name": "foo", "start": 29, "end": 31, "isComponent": false },
+    { "name": "baz", "start": 33, "end": 33, "isComponent": false },
+    { "name": "run", "start": 35, "end": 35, "isComponent": false },
+    { "name": "wrapped", "start": 37, "end": 37, "isComponent": false },
+    { "name": "qux", "start": 39, "end": 41, "isComponent": false },
+    { "name": "run", "start": 43, "end": 43, "isComponent": false },
+    { "name": "nested", "start": 45, "end": 45, "isComponent": false },
+    { "name": "anon", "start": 47, "end": 49, "isComponent": false },
+    { "name": "tpl", "start": 51, "end": 53, "isComponent": false },
+    { "name": "default", "start": 55, "end": 57, "isComponent": false },
+    { "name": "anon", "start": 59, "end": 61, "isComponent": false }
+  ],
+  "comments": []
+}

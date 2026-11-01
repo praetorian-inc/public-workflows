@@ -1,0 +1,16 @@
+{
+  "functions": [
+    { "name": "add", "start": 1, "end": 3, "isComponent": false },
+    { "name": "double", "start": 5, "end": 5, "isComponent": false },
+    { "name": "get Counter.value", "start": 12, "end": 14, "isComponent": false },
+    { "name": "Counter.increment", "start": 15, "end": 17, "isComponent": false },
+    { "name": "default", "start": 20, "end": 20, "isComponent": false },
+    { "name": "foo", "start": 22, "end": 22, "isComponent": false },
+    { "name": "o.bar", "start": 24, "end": 24, "isComponent": false },
+    { "name": "o.baz", "start": 24, "end": 24, "isComponent": false },
+    { "name": "anon", "start": 26, "end": 26, "isComponent": false },
+    { "name": "Foo", "start": 28, "end": 30, "isComponent": false },
+    { "name": "default", "start": 32, "end": 34, "isComponent": false }
+  ],
+  "comments": []
+}

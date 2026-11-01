@@ -73,10 +73,21 @@ test("F8: 600-line test files are out of scope", () => {
     "test_x.py": big("py"),
     "x_test.py": big("py"),
     "conftest.py": big("py"),
+    "x.test.mjs": big("mjs"),
+    "x.spec.js": big("js"),
+    "vendor.min.js": big("js"),
+    "__tests__/a.jsx": big("jsx"),
+    "test-utils.cjs": big("cjs"),
   };
   const r = check(repo("go", {}, head));
   assert.equal(r.code, 0, r.out);
   assert.doesNotMatch(r.out, /::(error|warning)/);
+});
+
+test("F8: only *.min.js is exempt as bundled; a 600-line app.min.mjs fails", () => {
+  const r = check(repo("go", {}, { "app.min.mjs": file("mjs", 600) }));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /app\.min\.mjs/);
 });
 
 test("F9: a generated Go file is exempt; the same file without the header is not", () => {

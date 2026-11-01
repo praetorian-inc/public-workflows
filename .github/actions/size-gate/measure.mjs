@@ -2,20 +2,20 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { matchSpecs } from "./git.mjs";
-import { exemptByText, inScope, language } from "./scope.mjs";
+import { exemptByText, family, inScope } from "./scope.mjs";
 
 // Line breaks as each parser numbers them, so counts match its positions:
 // go/scanner \n only; Python ast \n, \r\n, \r; TypeScript adds U+2028/9.
 const TS_BREAK = /\r\n|[\r\n\u2028\u2029]/;
-const BREAK = { go: /\n/, py: /\r\n|\r|\n/, ts: TS_BREAK, tsx: TS_BREAK };
+const BREAK = { go: /\n/, py: /\r\n|\r|\n/, ts: TS_BREAK };
 
-export const splitLines = (p, t) => t.split(BREAK[language(p)] ?? /\n/);
+export const splitLines = (p, t) => t.split(BREAK[family(p)] ?? /\n/);
 
 // g[i] is the git (\n) line of parser line i + 1, so g.length matches
 // splitLines: a parser break is a git break only when it holds "\n".
 export function gitLines(p, t) {
   const g = [1];
-  for (const [b] of t.matchAll(new RegExp(BREAK[language(p)] ?? /\n/, "g"))) g.push(g.at(-1) + (b.includes("\n") ? 1 : 0));
+  for (const [b] of t.matchAll(new RegExp(BREAK[family(p)] ?? /\n/, "g"))) g.push(g.at(-1) + (b.includes("\n") ? 1 : 0));
   return g;
 }
 

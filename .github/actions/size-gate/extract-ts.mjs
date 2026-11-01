@@ -1,4 +1,5 @@
-// TypeScript/TSX function extractor for the size gate (LAB-7587).
+// TypeScript/TSX and JavaScript/JSX function extractor for the size gate
+// (LAB-7587, LAB-7641).
 // Usage: node extract-ts.mjs <file>... ; prints one JSON object keyed by path.
 // Parse-only: ts.createSourceFile never evaluates the code it reads.
 import { readFileSync } from "node:fs";
@@ -9,6 +10,11 @@ const FUNCTION_KINDS = new Set([
   K.FunctionDeclaration, K.FunctionExpression, K.ArrowFunction, K.MethodDeclaration,
   K.Constructor, K.GetAccessor, K.SetAccessor,
 ]);
+// JavaScript parses with JSX allowed, as TypeScript itself parses a .js file.
+const KIND = {
+  ts: ts.ScriptKind.TS, tsx: ts.ScriptKind.TSX, js: ts.ScriptKind.JS,
+  mjs: ts.ScriptKind.JS, cjs: ts.ScriptKind.JS, jsx: ts.ScriptKind.JSX,
+};
 const JSX_KINDS = new Set([K.JsxElement, K.JsxSelfClosingElement, K.JsxFragment]);
 
 const join = (outer, name) => (outer ? `${outer}>${name}` : name);
@@ -25,23 +31,44 @@ function propName(node) {
 function calleeName(expr) {
   if (ts.isIdentifier(expr)) return expr.text;
   if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  // `exports["foo"]` / `exports[`foo`]` is foo, as `exports.foo` is.
+  if (ts.isElementAccessExpression(expr) && ts.isStringLiteralLike(expr.argumentExpression)) return expr.argumentExpression.text;
   return null;
+}
+
+// `module.exports`, or `module["exports"]` / `module['exports']`.
+const isModuleExports = (e) =>
+  (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) &&
+  ts.isIdentifier(e.expression) && e.expression.text === "module" &&
+  (ts.isPropertyAccessExpression(e) ? e.name.text : ts.isStringLiteralLike(e.argumentExpression) && e.argumentExpression.text) === "exports";
+
+// A parenthesized function, `(() => {})` or `((() => {}))`, sits where the
+// unwrapped one would: its outermost wrapper is what its context holds.
+function unparen(node) {
+  let top = node;
+  while (ts.isParenthesizedExpression(top.parent)) top = top.parent;
+  return top;
 }
 
 // The name a function expression or arrow takes from where it sits.
 function contextName(node) {
-  const p = node.parent;
+  const top = unparen(node);
+  const p = top.parent;
   if (ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)) return p.name.text;
   if (ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) return propName(p.name);
-  if (ts.isCallExpression(p) && p.arguments.includes(node)) return calleeName(p.expression);
-  if (ts.isExportAssignment(p)) return "default";
-  if (ts.isBinaryExpression(p) && p.right === node) return calleeName(p.left);
+  if (ts.isCallExpression(p) && p.arguments.includes(top)) return calleeName(p.expression);
+  // `export default (function Badge() {})` and `module.exports = function Badge`
+  // are Badge, as `export function Badge` is; an anonymous one is default, as
+  // `export default function () {}` is.
+  const isModuleExport = ts.isBinaryExpression(p) && p.right === top && isModuleExports(p.left);
+  if (ts.isExportAssignment(p) || isModuleExport) return node.name ? node.name.text : "default";
+  if (ts.isBinaryExpression(p) && p.right === top) return calleeName(p.left);
   return null;
 }
 
 // The class or object-literal owner prefix for members ("Svc.", "api.").
 function ownerPrefix(node) {
-  let p = node.parent;
+  let p = unparen(node).parent;
   if (ts.isPropertyDeclaration(p) || ts.isPropertyAssignment(p)) p = p.parent;
   if (ts.isClassLike(p)) return p.name ? `${p.name.text}.` : "";
   if (ts.isObjectLiteralExpression(p) && ts.isVariableDeclaration(p.parent) && ts.isIdentifier(p.parent.name)) {
@@ -149,7 +176,7 @@ function extractFile(path) {
   } catch (err) {
     return { functions: [], comments: [], error: `cannot read: ${err.message}` };
   }
-  const kind = path.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const kind = KIND[path.slice(path.lastIndexOf(".") + 1)];
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, kind);
   // Any diagnostic fails, as in Go and Python: recovery can cut a function short.
   const diags = sf.parseDiagnostics ?? [];

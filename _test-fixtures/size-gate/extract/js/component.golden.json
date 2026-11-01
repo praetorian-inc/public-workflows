@@ -1,0 +1,9 @@
+{
+  "functions": [
+    { "name": "Badge", "start": 5, "end": 7, "isComponent": true },
+    { "name": "foo", "start": 9, "end": 11, "isComponent": false }
+  ],
+  "comments": [
+    { "start": 7, "end": 7, "text": "// trailing" }
+  ]
+}

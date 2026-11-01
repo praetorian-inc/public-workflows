@@ -89,6 +89,10 @@ test("M10: a function only matches a base function in the same language", () => 
   const tsx = { "src/legacy.ts": source("ts", fn("ts", "Z", 100)), "src/split.tsx": source("tsx", fn("tsx", "F", 80, "1")) };
   const moved = check(makeRepo({ base: { "keep.ts": file("ts", 3), ...ts }, head: tsx }));
   assert.equal(moved.code, 0, moved.out);
+  const mjs = { "src/legacy.mjs": source("mjs", fn("mjs", "F", 80), fn("mjs", "Z", 100)) };
+  const split = { "src/legacy.mjs": source("mjs", fn("mjs", "Z", 100)), "src/split.ts": source("ts", fn("ts", "F", 80, "1")) };
+  const fromJs = check(makeRepo({ base: { "keep.ts": file("ts", 3), ...mjs }, head: split }));
+  assert.equal(fromJs.code, 0, fromJs.out);
 });
 
 // A whole-file rename keeps its allowances only within one directory and language.
@@ -112,4 +116,24 @@ test("M12: renaming a file in its directory and language keeps its allowances", 
   }
   const tsx = check(renamed("src/a.ts", "src/a.tsx", source("ts", fn("ts", "F", 100))));
   assert.equal(tsx.code, 0, tsx.out);
+  // JavaScript and TypeScript are one language: a .js -> .ts conversion keeps its allowances.
+  const converted = check(renamed("src/a.js", "src/a.ts", source("js", fn("js", "F", 100))));
+  assert.equal(converted.code, 0, converted.out);
+  // A named function assigned to module.exports is that function, so `export function` in .ts keeps it.
+  const [sig, ...body] = fn("cjs", "F", 100);
+  const cjs = { "keep.go": file("go", 3), "src/a.cjs": source("cjs", [`module.exports = ${sig}`, ...body]) };
+  const ts = { "src/a.cjs": null, "src/a.ts": source("ts", [`export ${sig}`, ...body]) };
+  const fromCjs = check(makeRepo({ base: cjs, head: ts }));
+  assert.equal(fromCjs.code, 0, fromCjs.out);
+});
+
+test("M13: an anonymous module.exports converted in place to export default keeps its allowance", () => {
+  const [, ...body] = fn("js", "F", 100);
+  const base = { "keep.go": file("go", 3), "src/a.js": source("js", ["module.exports = function () {", ...body]) };
+  const head = (b) => ({ "src/a.js": source("js", ["export default function () {", ...b]) });
+  const converted = check(makeRepo({ base, head: head(body) }));
+  assert.equal(converted.code, 0, converted.out);
+  const grown = check(makeRepo({ base, head: head(["  x += 1;", ...body]) }));
+  assert.equal(grown.code, 1, grown.out);
+  assert.match(grown.out, /`default` was 100 lines at the merge-base and is now 101; an over-limit function may change but not grow/);
 });

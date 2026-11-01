@@ -1,10 +1,13 @@
-// End-to-end function-rule scenarios N1-N15 (LAB-7587).
+// End-to-end function-rule scenarios N1-N15 (LAB-7587, LAB-7641).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EXT, LANGS, check, component, file, fn, makeRepo, source } from "./scenario-kit.mjs";
 
 // Every repo carries one small in-scope file so the liveness floor holds.
 const repo = (lang, base, head) => makeRepo({ base: { [`keep.${EXT[lang]}`]: file(lang, 3), ...base }, head });
+
+// Component rules hold wherever JSX parses: TSX, JSX, and JSX in plain .js, .mjs and .cjs.
+const COMPONENT_LANGS = ["tsx", "jsx", "js", "mjs", "cjs"];
 
 // A method of exactly n lines on a type or class, so names are qualified.
 function method(lang, n, tok) {
@@ -59,30 +62,32 @@ for (const lang of LANGS) {
   });
 }
 
-test("tsx N5: a new 151-line component fails; 150 passes", () => {
-  const p = "src/a.tsx";
-  const one = (head) => check(repo("tsx", { [p]: source("tsx") }, { [p]: head }));
-  const r = one(source("tsx", component("C", 151)));
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /new function `C` is 151 lines; the limit is 150/);
-  assert.equal(one(source("tsx", component("C", 150))).code, 0);
-});
+for (const lang of COMPONENT_LANGS) {
+  test(`${lang} N5: a new 151-line component fails; 150 passes`, () => {
+    const p = `src/a.${lang}`;
+    const one = (head) => check(repo(lang, { [p]: source(lang) }, { [p]: head }));
+    const r = one(source(lang, component("C", 151)));
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /new function `C` is 151 lines; the limit is 150/);
+    assert.equal(one(source(lang, component("C", 150))).code, 0);
+  });
 
-test("tsx N6: a 120-line component that loses its JSX fails", () => {
-  const p = "src/a.tsx";
-  const r = check(repo("tsx", { [p]: source("tsx", component("C", 120)) }, { [p]: source("tsx", fn("tsx", "C", 120)) }));
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /`C` is now 120 lines; the limit is 50/);
-});
+  test(`${lang} N6: a 120-line component that loses its JSX fails`, () => {
+    const p = `src/a.${lang}`;
+    const r = check(repo(lang, { [p]: source(lang, component("C", 120)) }, { [p]: source(lang, fn(lang, "C", 120)) }));
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /`C` is now 120 lines; the limit is 50/);
+  });
 
-test("tsx N11: a grandfathered 100-line function that gains JSX may change but not grow", () => {
-  const p = "src/a.tsx";
-  const one = (head) => check(repo("tsx", { [p]: source("tsx", fn("tsx", "C", 100)) }, { [p]: head }));
-  const grown = one(source("tsx", component("C", 120)));
-  assert.equal(grown.code, 1, grown.out);
-  assert.match(grown.out, /`C` was 100 lines at the merge-base and is now 120; an over-limit function may change but not grow/);
-  assert.equal(one(source("tsx", component("C", 100, "1"))).code, 0);
-});
+  test(`${lang} N11: a grandfathered 100-line function that gains JSX may change but not grow`, () => {
+    const p = `src/a.${lang}`;
+    const one = (head) => check(repo(lang, { [p]: source(lang, fn(lang, "C", 100)) }, { [p]: head }));
+    const grown = one(source(lang, component("C", 120)));
+    assert.equal(grown.code, 1, grown.out);
+    assert.match(grown.out, /`C` was 100 lines at the merge-base and is now 120; an over-limit function may change but not grow/);
+    assert.equal(one(source(lang, component("C", 100, "1"))).code, 0);
+  });
+}
 
 test("go N12: a duplicate name's ordinal carries no allowance; an unchanged duplicate still passes", () => {
   const p = "src/a.go";
@@ -149,11 +154,13 @@ test("py N14: replacing an over-limit annotated lambda with a differently named 
   assert.match(r.out, /new function `lambda:new` is 60 lines; the limit is 50/);
 });
 
-test("tsx N15: a grandfathered component that loses its JSX may change but not grow", () => {
-  const p = "src/a.tsx";
-  const one = (head) => check(repo("tsx", { [p]: source("tsx", component("C", 200)) }, { [p]: head }));
-  assert.equal(one(source("tsx", fn("tsx", "C", 200))).code, 0);
-  const grown = one(source("tsx", fn("tsx", "C", 201)));
-  assert.equal(grown.code, 1, grown.out);
-  assert.match(grown.out, /`C` was 200 lines at the merge-base and is now 201; an over-limit function may change but not grow/);
-});
+for (const lang of COMPONENT_LANGS) {
+  test(`${lang} N15: a grandfathered component that loses its JSX may change but not grow`, () => {
+    const p = `src/a.${lang}`;
+    const one = (head) => check(repo(lang, { [p]: source(lang, component("C", 200)) }, { [p]: head }));
+    assert.equal(one(source(lang, fn(lang, "C", 200))).code, 0);
+    const grown = one(source(lang, fn(lang, "C", 201)));
+    assert.equal(grown.code, 1, grown.out);
+    assert.match(grown.out, /`C` was 200 lines at the merge-base and is now 201; an over-limit function may change but not grow/);
+  });
+}
