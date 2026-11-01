@@ -132,4 +132,4 @@ jobs:
       contents: read
     uses: ./.github/workflows/size-gate.yml
     with:
-      min-scanned-files: 38
+      min-scanned-files: 39

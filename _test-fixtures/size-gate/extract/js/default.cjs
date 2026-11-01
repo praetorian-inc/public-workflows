@@ -7,3 +7,21 @@ module.exports = () => {
 };
 
 module.exports.bar = () => 3;
+
+module.exports = (function () {
+  return 4;
+});
+
+module.exports = (() => 5);
+
+module.exports = (function Named() {
+  return 6;
+});
+
+module["exports"] = function () {
+  return 7;
+};
+
+module['exports'] = function Quoted() {
+  return 8;
+};

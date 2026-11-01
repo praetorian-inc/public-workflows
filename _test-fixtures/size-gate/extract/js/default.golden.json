@@ -2,7 +2,12 @@
   "functions": [
     { "name": "default", "start": 1, "end": 3, "isComponent": false },
     { "name": "default", "start": 5, "end": 7, "isComponent": false },
-    { "name": "bar", "start": 9, "end": 9, "isComponent": false }
+    { "name": "bar", "start": 9, "end": 9, "isComponent": false },
+    { "name": "default", "start": 11, "end": 13, "isComponent": false },
+    { "name": "default", "start": 15, "end": 15, "isComponent": false },
+    { "name": "Named", "start": 17, "end": 19, "isComponent": false },
+    { "name": "default", "start": 21, "end": 23, "isComponent": false },
+    { "name": "Quoted", "start": 25, "end": 27, "isComponent": false }
   ],
   "comments": []
 }
