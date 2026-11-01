@@ -136,13 +136,18 @@ function newSidePath(line) {
   return (raw.startsWith('"') ? unquote(raw) : raw).slice(2);
 }
 
-// Added line numbers per new-side path, from a zero-context patch. Explicit
-// prefixes override diff.noprefix and diff.mnemonicPrefix in the repo config;
+// A zero-context patch against base. Explicit prefixes override diff.noprefix and diff.mnemonicPrefix in the repo config;
 // --text and --no-textconv keep .gitattributes from hiding or rewriting a hunk.
+export function readPatch(root, base, specs) {
+  const flags = ["-M", "--unified=0", "--text", "--no-textconv", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
+  return git(root, ["-c", "core.quotePath=false", "diff", ...flags, base, "--", ...specs]);
+}
+
+// Added line numbers per new-side path, from readPatch. Hand-parsed on purpose:
+// LAB-7700 found no diff library that passes git.test.mjs's header-form fixture.
 function readAdded(root, base, specs) {
   const added = new Map();
-  const flags = ["-M", "--unified=0", "--text", "--no-textconv", "--no-color", "--no-ext-diff", "--src-prefix=a/", "--dst-prefix=b/"];
-  const patch = git(root, ["-c", "core.quotePath=false", "diff", ...flags, base, "--", ...specs]);
+  const patch = readPatch(root, base, specs);
   let file = null;
   let line = 0;
   let inHeader = false; // an added line "++ b/x" reads "+++ b/x" inside a hunk
