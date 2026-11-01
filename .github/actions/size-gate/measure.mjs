@@ -1,5 +1,5 @@
 // Physical line counts for in-scope files (LAB-7587), ported from guard#9602.
-import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { matchSpecs } from "./git.mjs";
 import { exemptByText, family, inScope } from "./scope.mjs";
@@ -103,6 +103,18 @@ const isDir = (abs) => {
     return false;
   }
 };
+
+// The checkout paths a link reaches, hop by hop by readlink, so a PR that
+// deletes, renames or adds under a target touches the link too (LAB-7704).
+export function linkTargets(root, p) {
+  const out = [];
+  for (let cur = p, hops = 0; hops < 40 && isLink(root, cur); hops++) {
+    cur = posix(path.relative(root, path.resolve(root, path.dirname(cur), readlinkSync(path.join(root, cur)))));
+    if (outside(cur)) break;
+    out.push(cur);
+  }
+  return out;
+}
 
 // measureTree skips symlinks, so a link could hide code: a file link passes
 // only when its target is a listed in-scope file, measured on its own; a

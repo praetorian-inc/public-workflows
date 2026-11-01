@@ -88,3 +88,29 @@ test("P6: a bad symlink fails the PR that adds it, not a PR that leaves it alone
   assert.match(added.out, /::error file=b\.go::b\.go is a symlink to a path that does not exist/);
   assert.doesNotMatch(added.out, /file=a\.go/);
 });
+
+test("P7: a PR that breaks or feeds an untouched link owns its error", () => {
+  const setup = () => {
+    const root = initRepo();
+    mkdirSync(path.join(root, "lib"), { recursive: true });
+    symlinkSync("lib/a.go", path.join(root, "a.go"));
+    symlinkSync("lib", path.join(root, "vendor"));
+    const base = commit(root, { "keep.go": file("go", 3), "lib/a.go": file("go", 3) });
+    return { root, base };
+  };
+  const unrelated = setup();
+  commit(unrelated.root, { "keep.go": file("go", 4) });
+  assert.equal(check(unrelated, PR).code, 0);
+  const deleted = setup();
+  commit(deleted.root, { "lib/a.go": null });
+  const out = check(deleted, PR);
+  assert.equal(out.code, 1);
+  assert.match(out.out, /::error file=a\.go::a\.go is a symlink to a path that does not exist/);
+  const fed = setup();
+  symlinkSync("../keep.go", path.join(fed.root, "lib", "x.go"));
+  run(fed.root, "add", "-A");
+  run(fed.root, "commit", "-q", "-m", "nested link");
+  const exposed = check(fed, PR);
+  assert.equal(exposed.code, 1);
+  assert.match(exposed.out, /::error file=vendor::vendor is a symlink to a directory holding the symlink/);
+});

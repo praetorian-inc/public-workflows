@@ -9,7 +9,7 @@
 // passes the same values as SIZE_GATE_* environment variables.
 import { FILE_MAX, parseConfig, pathspecs, UsageError } from "./config.mjs";
 import { listFiles, readDiff, resolveBase, touchedPaths } from "./git.mjs";
-import { measureTree, symlinkErrors } from "./measure.mjs";
+import { linkTargets, measureTree, symlinkErrors } from "./measure.mjs";
 import { baseLengths, changedEntries, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
 import { checkFiles } from "./files-check.mjs";
 import { checkFunctions } from "./functions-check.mjs";
@@ -56,8 +56,10 @@ function runCheck(cfg, env) {
   const files = checkFiles({ root: cfg.root, base, loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
   const touched = prScope(cfg, base, baseline, baseBaseline);
-  const scoped = (errs) => (touched ? errs.filter((e) => touched.has(e.file)) : errs);
-  const errors = [...scoped([...symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), ...files.errors]), ...fns.errors];
+  const scoped = (errs, reach = (e) => touched.has(e.file)) => (touched ? errs.filter(reach) : errs);
+  const reachesTouched = (e) => [e.file, ...linkTargets(cfg.root, e.file)].some((t) => [...touched].some((u) => u === t || u.startsWith(`${t}/`)));
+  const links = scoped(symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), reachesTouched);
+  const errors = [...links, ...scoped(files.errors), ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];
   report({ errors, warnings, base, scanned: loc.size, baselined: Object.keys(baseline).length, env, log });
   return errors.length ? 1 : 0;
