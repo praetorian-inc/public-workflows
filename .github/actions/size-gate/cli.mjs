@@ -49,7 +49,12 @@ function runCheck(cfg, env) {
   const errors = [...symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), ...files.errors, ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];
   report({ errors, warnings, base, scanned: loc.size, baselined: Object.keys(baseline).length, env, log });
-  return errors.length ? 1 : 0;
+  // fatal marks a fail-closed finding (parse, symlink, generated-header gain).
+  // Nonblocking drops only size-limit violations.
+  if (errors.some((e) => e.fatal)) return 1;
+  if (!errors.length || cfg.gate !== "nonblocking") return errors.length ? 1 : 0;
+  log("::notice::size gate nonblocking mode: size violations do not fail the job");
+  return 0;
 }
 
 function main(argv, env) {

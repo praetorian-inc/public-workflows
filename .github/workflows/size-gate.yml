@@ -26,7 +26,8 @@ name: Size gate (Callable)
 #
 # Failure policy: the gate fails closed. A failed checkout, toolchain setup,
 # npm ci, extractor crash, unparseable HEAD file or an unmet
-# min-scanned-files floor is a red job, never a silent pass.
+# min-scanned-files floor is a red job, never a silent pass. mode=nonblocking
+# reports size violations and exits 0; it does not cover those failures.
 
 on:
   workflow_call:
@@ -84,6 +85,12 @@ on:
         required: false
         type: number
         default: 15
+
+      mode:
+        description: "blocking fails the job on size violations. nonblocking reports them and the job succeeds. Checkout, toolchain, parse, baseline, and scope failures still fail the job."
+        required: false
+        type: string
+        default: "blocking"
 
     outputs:
       violations:
@@ -214,6 +221,7 @@ jobs:
           SIZE_GATE_MIN_SCANNED: ${{ inputs.min-scanned-files }}
           SIZE_GATE_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
           SIZE_GATE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SIZE_GATE_MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           node _pw/.github/actions/size-gate/cli.mjs check --root repo

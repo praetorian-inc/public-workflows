@@ -630,6 +630,7 @@ jobs:
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Newline-separated allowed endpoints for block mode. Recommended for block mode: `github.com:443`, `api.github.com:443`, `raw.githubusercontent.com:443`, `release-assets.githubusercontent.com:443`, `nodejs.org:443`, `go.dev:443`, `dl.google.com:443`, `registry.npmjs.org:443` |
 | `timeout-minutes` | `15` | Job timeout |
+| `mode` | `blocking` | `nonblocking` still reports size violations and exits 0, so the check does not fail the PR. Checkout, toolchain, parse, baseline, symlink, and scope failures still fail the job |
 
 **Outputs:** `violations` (error count), `warnings` (warning count), `base-sha` (the commit the PR was compared with: the merge ref's first parent on `pull_request`, otherwise a merge-base).
 

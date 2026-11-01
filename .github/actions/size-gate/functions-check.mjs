@@ -113,7 +113,7 @@ export function checkFunctions({ root, base, diff, goExtractor }) {
   for (const b of s.old.filter((b) => b.error))
     warnings.push({ file: b.file, msg: `did not parse at the merge-base (${b.error}); its functions are checked as new.` });
   for (const h of s.head.filter((h) => h.error))
-    errors.push({ file: h.file, msg: `cannot parse: ${h.error}. Fix the syntax or exclude the path.` });
+    errors.push({ file: h.file, msg: `cannot parse: ${h.error}. Fix the syntax or exclude the path.`, fatal: true });
   errors.push(...banErrors(s.head, diff));
   for (const m of matchFunctions(s.old, s.head.filter((h) => !h.error))) {
     const msg = verdict(m);

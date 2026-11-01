@@ -118,7 +118,7 @@ export function symlinkErrors(root, paths, all, specs) {
     if (!isLink(root, p) || !(listed.has(p) || isDir(abs))) continue;
     const why = linkProblem(scope, abs, p);
     const rule = why?.startsWith("a directory") ? DIR_RULE : LINK_RULE;
-    if (why) errors.push({ file: p, msg: `is a symlink to ${why}; ${rule}.` });
+    if (why) errors.push({ file: p, msg: `is a symlink to ${why}; ${rule}.`, fatal: true });
   }
   return errors;
 }

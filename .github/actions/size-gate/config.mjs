@@ -11,6 +11,7 @@ export const DEFAULT_BASELINE = ".github/size-baseline.json";
 export class UsageError extends Error {}
 
 const MODES = new Set(["check", "baseline"]);
+const GATES = new Set(["blocking", "nonblocking"]);
 const VALUE_FLAGS = new Set(["--root", "--baseline", "--include", "--exclude", "--min-scanned"]);
 
 // Newline-separated list input; blank lines dropped, whitespace trimmed.
@@ -19,6 +20,14 @@ const list = (s) => (s ?? "").split("\n").map((x) => x.trim()).filter(Boolean);
 function count(raw, name) {
   if (!/^\d+$/.test(String(raw).trim())) throw new UsageError(`${name} must be a whole number, got '${raw}'`);
   return Number(raw);
+}
+
+// blocking fails the job on size violations. nonblocking reports them and
+// exits 0. Fail-closed errors (parse, baseline, scope) are not this switch.
+function gateMode(raw) {
+  const mode = String(raw ?? "").trim() || "blocking";
+  if (!GATES.has(mode)) throw new UsageError(`mode must be blocking or nonblocking, got '${mode}'`);
+  return mode;
 }
 
 function readFlags(args) {
@@ -49,6 +58,7 @@ export function parseConfig(argv, env) {
     // The runner sets GITHUB_EVENT_NAME to the caller's event in every step.
     pullRequest: env.GITHUB_EVENT_NAME === "pull_request",
     goExtractor: env.SIZE_GATE_GO_EXTRACTOR || "",
+    gate: gateMode(env.SIZE_GATE_MODE),
   };
 }
 

@@ -175,6 +175,43 @@ test("F16: a directory symlink is checked whatever include-paths lists, against 
   assert.equal(away.code, 0, away.out);
 });
 
+test("nonblocking mode reports a violation and exits 0", () => {
+  const r = check(repo("go", {}, { "d/a.go": file("go", 501) }), { SIZE_GATE_MODE: "nonblocking" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /::error file=d\/a.go::/);
+  assert.match(r.out, /nonblocking mode/);
+});
+
+test("nonblocking mode still fails a file that cannot parse", () => {
+  const p = "src/a.py";
+  const r = check(repo("py", { [p]: source("py", fn("py", "F", 5)) }, { [p]: "def f(:\n    pass\n" }), {
+    SIZE_GATE_MODE: "nonblocking",
+  });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /cannot parse/);
+  assert.doesNotMatch(r.out, /nonblocking mode/);
+});
+
+test("nonblocking mode still fails a bad symlink", () => {
+  const r = check(linked({ "a.go": "missing.go" }, {}), { SIZE_GATE_MODE: "nonblocking" });
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /is a symlink to/);
+  assert.doesNotMatch(r.out, /nonblocking mode/);
+});
+
+test("nonblocking mode still fails closed when the scope is wrong", () => {
+  const r = check(repo("go", {}, {}), { SIZE_GATE_MODE: "nonblocking", SIZE_GATE_MIN_SCANNED: "1000" });
+  assert.equal(r.code, 1);
+  assert.match(r.out, /the scope is wrong/);
+  assert.doesNotMatch(r.out, /nonblocking mode/);
+});
+
+test("an unknown size-gate mode exits 2", () => {
+  const r = check(repo("go", {}, {}), { SIZE_GATE_MODE: "warn" });
+  assert.equal(r.code, 2);
+  assert.match(r.out, /mode must be blocking or nonblocking/);
+});
+
 test("usage errors exit 2", () => {
   assert.equal(runCli(repo("go", {}, {}).root, ["bogus"]).code, 2);
 });
