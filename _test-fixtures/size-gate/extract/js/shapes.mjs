@@ -16,3 +16,5 @@ export class Counter {
     this.#count += 1;
   }
 }
+
+export default ((() => 12));

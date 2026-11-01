@@ -7,7 +7,10 @@
     { "name": "default", "start": 15, "end": 15, "isComponent": false },
     { "name": "Named", "start": 17, "end": 19, "isComponent": false },
     { "name": "default", "start": 21, "end": 23, "isComponent": false },
-    { "name": "Quoted", "start": 25, "end": 27, "isComponent": false }
+    { "name": "Quoted", "start": 25, "end": 27, "isComponent": false },
+    { "name": "foo", "start": 29, "end": 31, "isComponent": false },
+    { "name": "baz", "start": 33, "end": 33, "isComponent": false },
+    { "name": "run", "start": 35, "end": 35, "isComponent": false }
   ],
   "comments": []
 }

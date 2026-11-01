@@ -25,3 +25,11 @@ module["exports"] = function () {
 module['exports'] = function Quoted() {
   return 8;
 };
+
+exports["foo"] = function () {
+  return 9;
+};
+
+module.exports["baz"] = () => 10;
+
+jobs["run"](() => 11);

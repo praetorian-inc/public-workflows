@@ -31,6 +31,8 @@ function propName(node) {
 function calleeName(expr) {
   if (ts.isIdentifier(expr)) return expr.text;
   if (ts.isPropertyAccessExpression(expr)) return expr.name.text;
+  // `exports["foo"]` is foo, as `exports.foo` is.
+  if (ts.isElementAccessExpression(expr) && ts.isStringLiteral(expr.argumentExpression)) return expr.argumentExpression.text;
   return null;
 }
 
@@ -46,13 +48,14 @@ function contextName(node) {
   if (ts.isVariableDeclaration(p) && ts.isIdentifier(p.name)) return p.name.text;
   if (ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) return propName(p.name);
   if (ts.isCallExpression(p) && p.arguments.includes(node)) return calleeName(p.expression);
-  if (ts.isExportAssignment(p)) return "default";
-  // `module.exports = function Badge` is Badge, as `export function Badge` is;
-  // an anonymous one is default, as `export default function () {}` is. A
-  // parenthesized right-hand side, `module.exports = (() => {})`, is the same.
+  // A parenthesized function, `export default (() => {})`, sits where the
+  // unwrapped one would.
   let top = node;
   while (ts.isParenthesizedExpression(top.parent)) top = top.parent;
   const a = top.parent;
+  if (ts.isExportAssignment(a)) return "default";
+  // `module.exports = function Badge` is Badge, as `export function Badge` is;
+  // an anonymous one is default, as `export default function () {}` is.
   if (ts.isBinaryExpression(a) && a.right === top && isModuleExports(a.left)) return node.name ? node.name.text : "default";
   if (ts.isBinaryExpression(p) && p.right === node) return calleeName(p.left);
   return null;
