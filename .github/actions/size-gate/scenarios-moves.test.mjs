@@ -119,4 +119,10 @@ test("M12: renaming a file in its directory and language keeps its allowances", 
   // JavaScript and TypeScript are one language: a .js -> .ts conversion keeps its allowances.
   const converted = check(renamed("src/a.js", "src/a.ts", source("js", fn("js", "F", 100))));
   assert.equal(converted.code, 0, converted.out);
+  // A named function assigned to module.exports is that function, so `export function` in .ts keeps it.
+  const [sig, ...body] = fn("cjs", "F", 100);
+  const cjs = { "keep.go": file("go", 3), "src/a.cjs": source("cjs", [`module.exports = ${sig}`, ...body]) };
+  const ts = { "src/a.cjs": null, "src/a.ts": source("ts", [`export ${sig}`, ...body]) };
+  const fromCjs = check(makeRepo({ base: cjs, head: ts }));
+  assert.equal(fromCjs.code, 0, fromCjs.out);
 });

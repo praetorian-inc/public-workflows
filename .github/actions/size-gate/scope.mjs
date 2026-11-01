@@ -8,7 +8,7 @@ const TEST_SUFFIX =
 const EXCLUDED_DIR =
   /(^|\/)(e2e|mocks?|__mocks__|generated|node_modules|vendor)(\/|$)|_gen\.go$|\.gen\.(tsx?|[cm]?jsx?)$|\.min\.js$|(^|\/)zz_generated[^/]*$/i;
 const TEST_ONLY =
-  /(^|\/)(__tests__|__fixtures__|fixtures|tests?|testdata|testutils?|testhelpers?|test-utils)(\/|$)|(^|\/)(test[-_]?utils?|test_?helpers?)\.(go|tsx?|[cm]?jsx?)$/i;
+  /(^|\/)(__tests__|__fixtures__|fixtures|tests?|testdata|testutils?|testhelpers?|test-utils)(\/|$)|(^|\/)(test[-_]?utils?|test[-_]?helpers?)\.(go|tsx?|[cm]?jsx?)$/i;
 const LANGUAGE = /\.(go|tsx?|py|[cm]?js|jsx)$/;
 
 // The extension a path is measured as: "go", "ts", "tsx", "py", "js", "mjs",

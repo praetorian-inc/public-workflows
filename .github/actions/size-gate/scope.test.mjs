@@ -55,6 +55,9 @@ test("generic test, vendor and generated directories are exempt", () => {
     "a/__tests__/t.js",
     "test-utils.js",
     "a/test_helpers.mjs",
+    "a/test-helper.js",
+    "a/test-helpers.ts",
+    "a/test-helper.go",
     "a/x.gen.js",
   ])
     assert.equal(inScope(p), false, p);

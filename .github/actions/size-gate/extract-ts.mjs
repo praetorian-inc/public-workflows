@@ -34,6 +34,9 @@ function calleeName(expr) {
   return null;
 }
 
+const isModuleExports = (e) =>
+  ts.isPropertyAccessExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "module" && e.name.text === "exports";
+
 // The name a function expression or arrow takes from where it sits.
 function contextName(node) {
   const p = node.parent;
@@ -41,7 +44,11 @@ function contextName(node) {
   if (ts.isPropertyAssignment(p) || ts.isPropertyDeclaration(p)) return propName(p.name);
   if (ts.isCallExpression(p) && p.arguments.includes(node)) return calleeName(p.expression);
   if (ts.isExportAssignment(p)) return "default";
-  if (ts.isBinaryExpression(p) && p.right === node) return calleeName(p.left);
+  if (ts.isBinaryExpression(p) && p.right === node) {
+    // `module.exports = function Badge` is Badge, as `export function Badge` is.
+    if (node.name && isModuleExports(p.left)) return node.name.text;
+    return calleeName(p.left);
+  }
   return null;
 }
 
