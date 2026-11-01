@@ -104,29 +104,31 @@ const isDir = (abs) => {
   }
 };
 
-// The checkout paths a link reaches, resolving each component in turn (a
-// linked directory midway included), so a PR that deletes, renames or adds
-// under a target touches the link too (LAB-7704).
+// The checkout paths a link reaches, resolving each component of the absolute
+// path in turn (a linked directory midway, or a hop out of the checkout and
+// back, included), so a PR that deletes, renames or adds under a target, or
+// under any link on the way, touches the link too (LAB-7704).
 export function linkTargets(root, p) {
+  const top = realpathSync(root);
   const out = [];
-  let [done, todo] = [[], p.split("/")];
+  let [done, todo] = [top.split(path.sep), p.split("/")];
   for (let hops = 0; todo.length && hops < 40; ) {
     const part = todo.shift();
     if (part === "" || part === ".") continue;
     if (part === "..") {
-      if (!done.pop()) return out;
+      if (done.length > 1) done.pop();
       continue;
     }
     done.push(part);
-    if (!isLink(root, done.join("/"))) continue;
+    const abs = done.join(path.sep) || path.sep;
+    if (!isLink(abs, "")) continue;
     hops++;
-    const target = readlinkSync(path.join(root, ...done));
+    const target = readlinkSync(abs);
     done.pop();
-    if (path.isAbsolute(target)) done = [];
-    todo = [...posix(path.isAbsolute(target) ? path.relative(root, target) : target).split("/"), ...todo];
-    const next = path.posix.normalize([...done, ...todo].join("/"));
-    if (outside(next)) return out;
-    out.push(next);
+    if (path.isAbsolute(target)) done = [""];
+    todo = [...target.split(path.sep), ...todo];
+    const rel = path.relative(top, path.resolve(done.join(path.sep) || path.sep, ...todo));
+    if (!outside(rel)) out.push(posix(rel));
   }
   return out;
 }

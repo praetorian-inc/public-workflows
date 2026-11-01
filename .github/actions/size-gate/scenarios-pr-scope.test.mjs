@@ -126,3 +126,25 @@ test("P8: a link through a linked directory follows that directory to its target
   assert.equal(out.code, 1);
   assert.match(out.out, /::error file=a\.go::a\.go is a symlink to a path that does not exist/);
 });
+
+test("P9: a link that leaves and re-enters the checkout, or runs through a deleted link, stays the PR's", () => {
+  const setup = (target) => {
+    const root = initRepo();
+    mkdirSync(path.join(root, "lib"), { recursive: true });
+    symlinkSync("lib", path.join(root, "vendor"));
+    symlinkSync(target(root), path.join(root, "a.go"));
+    const base = commit(root, { "keep.go": file("go", 3), "lib/a.go": file("go", 3), "lib/b.go": file("go", 3) });
+    return { root, base };
+  };
+  const reentry = setup((root) => `../${path.basename(root)}/lib/a.go`);
+  commit(reentry.root, { "lib/a.go": null });
+  const out = check(reentry, PR);
+  assert.equal(out.code, 1, out.out);
+  assert.match(out.out, /::error file=a\.go::a\.go is a symlink to a path that does not exist/);
+  const via = setup(() => "vendor/a.go");
+  run(via.root, "rm", "-q", "vendor");
+  run(via.root, "commit", "-q", "-m", "drop vendor");
+  const dropped = check(via, PR);
+  assert.equal(dropped.code, 1, dropped.out);
+  assert.match(dropped.out, /::error file=a\.go::a\.go is a symlink to a path that does not exist/);
+});

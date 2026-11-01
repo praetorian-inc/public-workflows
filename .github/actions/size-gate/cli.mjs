@@ -56,8 +56,10 @@ function runCheck(cfg, env) {
   const files = checkFiles({ root: cfg.root, base, loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
   const touched = prScope(cfg, base, baseline, baseBaseline);
+  const touchedList = touched ? [...touched] : [];
   const scoped = (errs, reach = (e) => touched.has(e.file)) => (touched ? errs.filter(reach) : errs);
-  const reachesTouched = (e) => [e.file, ...linkTargets(cfg.root, e.file)].some((t) => [...touched].some((u) => u === t || u.startsWith(`${t}/`)));
+  const near = (t, u) => u === t || u.startsWith(`${t}/`) || t.startsWith(`${u}/`);
+  const reachesTouched = (e) => [e.file, ...linkTargets(cfg.root, e.file)].some((t) => touchedList.some((u) => near(t, u)));
   const links = scoped(symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), reachesTouched);
   const errors = [...links, ...scoped(files.errors), ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];
