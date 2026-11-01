@@ -8,9 +8,9 @@
 // --include <glob>..., --exclude <glob>..., --min-scanned <n>. The workflow
 // passes the same values as SIZE_GATE_* environment variables.
 import { FILE_MAX, parseConfig, pathspecs, UsageError } from "./config.mjs";
-import { listFiles, readDiff, resolveBase } from "./git.mjs";
+import { listFiles, readDiff, resolveBase, touchedPaths } from "./git.mjs";
 import { measureTree, symlinkErrors } from "./measure.mjs";
-import { baseLengths, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
+import { baseLengths, changedEntries, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
 import { checkFiles } from "./files-check.mjs";
 import { checkFunctions } from "./functions-check.mjs";
 import { escapeData, report } from "./report.mjs";
@@ -31,6 +31,15 @@ function runBaseline(cfg) {
   return 0;
 }
 
+// On a pull request, file-rule and symlink errors count only for paths the PR
+// touches, as a linter reports only changed files; a push checks the whole
+// repository, so drift on the default branch still fails there (LAB-7704).
+function prScope(cfg, base, baseline, baseBaseline) {
+  if (!cfg.pullRequest) return null;
+  log("::notice::pull_request: file-size and symlink errors are limited to files this PR touches; pushes check the whole repository.");
+  return new Set([...touchedPaths(cfg.root, base), ...changedEntries(baseline, baseBaseline)]);
+}
+
 function runCheck(cfg, env) {
   const specs = pathspecs(cfg.include, cfg.exclude);
   const base = resolveBase(cfg.root, cfg.base, log, cfg.defaultBranch, cfg.pullRequest);
@@ -46,7 +55,9 @@ function runCheck(cfg, env) {
   const baseLines = baseBaseline ? undefined : baseLengths(cfg.root, base, baseline, diff.renames);
   const files = checkFiles({ root: cfg.root, base, loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
-  const errors = [...symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), ...files.errors, ...fns.errors];
+  const touched = prScope(cfg, base, baseline, baseBaseline);
+  const scoped = (errs) => (touched ? errs.filter((e) => touched.has(e.file)) : errs);
+  const errors = [...scoped([...symlinkErrors(cfg.root, paths, listFiles(cfg.root, []), specs), ...files.errors]), ...fns.errors];
   const warnings = [...files.warnings, ...fns.warnings];
   report({ errors, warnings, base, scanned: loc.size, baselined: Object.keys(baseline).length, env, log });
   return errors.length ? 1 : 0;
