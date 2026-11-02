@@ -23,7 +23,7 @@ test("ratchet: an entry that matches its file and the base passes", () => {
 test("ratchet: every tree-side failure", () => {
   assert.deepEqual(r({}, { a: 600 }, null), [["a", "is listed in b.json but no longer exists or is out of scope. Remove the entry."]]);
   assert.deepEqual(r({ a: 500 }, { a: 600 }, null), [["a", "is now 500 lines, within the 500-line limit. Remove its entry from b.json."]]);
-  assert.deepEqual(r({ a: 601 }, { a: 600 }, null), [["a", "grew to 601 lines; b.json allows 600. Baselined files may not grow."]]);
+  assert.deepEqual(r({ a: 601 }, { a: 600 }, null), [["a", "grew to 601 lines; b.json allows 600. Baselined files may not grow.", true]]);
   assert.deepEqual(r({ a: 599 }, { a: 600 }, null), [["a", "shrank to 599 lines. Lower its b.json entry from 600 to 599 in this PR."]]);
 });
 

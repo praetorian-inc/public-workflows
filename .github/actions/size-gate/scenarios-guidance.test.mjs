@@ -67,10 +67,19 @@ test("G7: errors no split fixes print no guidance", () => {
   const runs = [
     repo({ "d/a.py": "def f(:\n    pass\n" }),
     makeRepo({ base: { "big.go": file("go", 600), [B]: baselineJson({ "big.go": 600 }) }, head: { "big.go": file("go", 300) } }),
+    makeRepo({ base: { "big.go": file("go", 600), [B]: baselineJson({ "big.go": 600 }) }, head: { "big.go": file("go", 550) } }),
   ];
   for (const r of runs) {
     const { code, out, summary } = gate(r);
     assert.equal(code, 1, out);
     assert.ok(!out.includes(GUIDANCE) && !summary.includes(GUIDANCE), out + summary);
   }
+});
+
+test("G8: a baselined file that grew gets the guidance", () => {
+  const B = ".github/size-baseline.json";
+  const r = makeRepo({ base: { "big.go": file("go", 600), [B]: baselineJson({ "big.go": 600 }) }, head: { "big.go": file("go", 610) } });
+  const { code, out } = gate(r);
+  assert.equal(code, 1, out);
+  assert.equal(count(out, GUIDANCE), 1, out);
 });

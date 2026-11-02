@@ -100,13 +100,15 @@ function firstError(was, entry, B) {
   return null;
 }
 
-// Ratchet failures for every baseline entry, as [path, message] pairs.
+// Ratchet failures for every baseline entry, as [path, message] pairs, plus a
+// third element `true` when a split fixes it (a baselined file that grew).
 // baseLines (from baseLengths) applies only when baseBaseline is null.
 export function ratchet({ loc, baseline, baseBaseline, renames, baselinePath: B, baseLines }) {
   const out = [];
   for (const [p, entry] of Object.entries(baseline)) {
-    const err = entryError(loc.get(p), entry, B);
-    if (err) out.push([p, err]);
+    const n = loc.get(p);
+    const err = entryError(n, entry, B);
+    if (err) out.push(n > entry ? [p, err, true] : [p, err]);
     const at = (m) => m[renames.get(p) ?? p] ?? m[p];
     const base = baseBaseline ? shrinkError(at(baseBaseline), entry, B) : baseLines && firstError(at(baseLines), entry, B);
     if (base) out.push([p, base]);
