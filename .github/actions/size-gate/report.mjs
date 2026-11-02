@@ -14,6 +14,15 @@ export function annotation(kind, { file, line, msg }) {
   return `::${kind} ${props}::${escapeData(`${where} ${msg}`)}`;
 }
 
+// Printed once when a run has an error a split fixes (LAB-7708): an error says
+// how big, not how to split. Parse, symlink and header errors do not get it.
+export const GUIDANCE =
+  "Split by responsibility, not to reach the line limit: name the concepts the code holds, give each its own " +
+  "file or module, and plan where the next addition of each kind goes so the file does not grow back. " +
+  "A pure move into a second file, `_part2`/`_utils`/`_helpers` files, and squeezing whitespace or comments " +
+  "do not fix this. A baseline entry is only for a file already over the limit when the gate was adopted; " +
+  "never add or raise one to pass. Read this repository's AGENTS.md, if it has one, for its split procedure.";
+
 const cell = (s) => String(s).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 function summary({ errors, warnings, base, scanned }) {
@@ -22,13 +31,16 @@ function summary({ errors, warnings, base, scanned }) {
     ...warnings.map((w) => `| warning | \`${cell(w.file)}\` | ${cell(w.msg)} |`),
   ];
   const head = `## Size gate\n\nScanned ${scanned} files against \`${base.slice(0, 12)}\`: ${errors.length} errors, ${warnings.length} warnings.\n`;
-  return rows.length ? `${head}\n| Kind | Where | Message |\n| --- | --- | --- |\n${rows.join("\n")}\n` : head;
+  if (!rows.length) return head;
+  const table = `${head}\n| Kind | Where | Message |\n| --- | --- | --- |\n${rows.join("\n")}\n`;
+  return errors.some((e) => e.split) ? `${table}\n${GUIDANCE}\n` : table;
 }
 
 // Print annotations and the totals line; write the step summary and outputs.
 export function report({ errors, warnings, base, scanned, baselined, env, log }) {
   for (const w of warnings) log(annotation("warning", w));
   for (const e of errors) log(annotation("error", e));
+  if (errors.some((e) => e.split)) log(`size gate: ${GUIDANCE}`);
   log(`size gate: scanned ${scanned} files against ${base.slice(0, 12)}; ${baselined} baselined, ${errors.length} errors, ${warnings.length} warnings`);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, summary({ errors, warnings, base, scanned }));
   if (env.GITHUB_OUTPUT)

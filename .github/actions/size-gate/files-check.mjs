@@ -14,8 +14,8 @@ function unbaselined(loc, baseline, diff, B) {
   const out = [];
   for (const [p, n] of Object.entries(oversized(loc))) {
     if (p in baseline) continue;
-    if (!diff.atBase.has(p) && !diff.renames.has(p)) out.push([p, `new file is ${n} lines; the limit is ${FILE_MAX}. Split it.`]);
-    else out.push([p, `is ${n} lines and not in ${B}; the limit is ${FILE_MAX}. Shrink it to ${FILE_MAX} or fewer.`]);
+    if (!diff.atBase.has(p) && !diff.renames.has(p)) out.push([p, `new file is ${n} lines; the limit is ${FILE_MAX}. Split it.`, true]);
+    else out.push([p, `is ${n} lines and not in ${B}; the limit is ${FILE_MAX}. Shrink it to ${FILE_MAX} or fewer.`, true]);
   }
   return out;
 }
@@ -44,7 +44,8 @@ export function checkFiles({ root, base, loc, diff, baseline, baseBaseline, base
     ...unbaselined(loc, baseline, diff, baselinePath),
     ...ratchet({ loc, baseline, baseBaseline, baseLines, renames: diff.renames, baselinePath }),
   ];
-  const errors = pairs.map(([file, msg]) => ({ file, msg }));
+  // A third element marks an error a split fixes (LAB-7708).
+  const errors = pairs.map(([file, msg, split]) => (split ? { file, msg, split } : { file, msg }));
   const warnings = [];
   for (const p of diff.added.keys()) {
     const n = loc.get(p);

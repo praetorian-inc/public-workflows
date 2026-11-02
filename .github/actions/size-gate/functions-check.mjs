@@ -98,12 +98,13 @@ function banErrors(head, diff) {
     const added = diff.added.get(h.file);
     if (h.error || !added) continue;
     for (const line of bannedLines(added, h.comments, h.file, h.text))
-      errors.push({ file: h.file, line, msg: "adds a size-lint disable comment; split the code instead." });
+      errors.push({ file: h.file, line, msg: "adds a size-lint disable comment; split the code instead.", split: true });
   }
   return errors;
 }
 
-// { errors, warnings }, each a list of { file, line?, msg }.
+// { errors, warnings }, each a list of { file, line?, msg, split? }; split marks
+// an error a split fixes, so a parse failure does not get the split guidance.
 export function checkFunctions({ root, base, diff, goExtractor }) {
   const s = sides(root, base, diff);
   const errors = [];
@@ -117,7 +118,7 @@ export function checkFunctions({ root, base, diff, goExtractor }) {
   errors.push(...banErrors(s.head, diff));
   for (const m of matchFunctions(s.old, s.head.filter((h) => !h.error))) {
     const msg = verdict(m);
-    if (msg) errors.push({ file: m.file, line: m.fn.start, msg });
+    if (msg) errors.push({ file: m.file, line: m.fn.start, msg, split: true });
   }
   return { errors, warnings };
 }
