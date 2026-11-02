@@ -1,12 +1,13 @@
 // Split guidance on failing runs (LAB-7708): printed once after the error
-// annotations and after the summary table, and never on a passing run.
+// annotations and after the summary table, only when an error is one a split
+// fixes, and never on a passing run.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { GUIDANCE } from "./report.mjs";
-import { check, file, makeRepo } from "./scenario-kit.mjs";
+import { baselineJson, check, file, fn, makeRepo, source } from "./scenario-kit.mjs";
 
 const repo = (head, untracked = {}) => makeRepo({ base: { "keep.go": file("go", 3) }, head, untracked });
 
@@ -53,4 +54,23 @@ test("G5: a warnings-only run prints no guidance", () => {
   assert.equal(code, 0, out);
   assert.match(out, /::warning /);
   assert.ok(!out.includes(GUIDANCE) && !summary.includes(GUIDANCE), out + summary);
+});
+
+test("G6: a function over the limit gets the guidance", () => {
+  const { code, out } = gate(repo({ "d/a.go": source("go", fn("go", "F", 51)) }));
+  assert.equal(code, 1, out);
+  assert.equal(count(out, GUIDANCE), 1, out);
+});
+
+test("G7: errors no split fixes print no guidance", () => {
+  const B = ".github/size-baseline.json";
+  const runs = [
+    repo({ "d/a.py": "def f(:\n    pass\n" }),
+    makeRepo({ base: { "big.go": file("go", 600), [B]: baselineJson({ "big.go": 600 }) }, head: { "big.go": file("go", 300) } }),
+  ];
+  for (const r of runs) {
+    const { code, out, summary } = gate(r);
+    assert.equal(code, 1, out);
+    assert.ok(!out.includes(GUIDANCE) && !summary.includes(GUIDANCE), out + summary);
+  }
 });

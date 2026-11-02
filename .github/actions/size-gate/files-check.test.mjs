@@ -11,8 +11,8 @@ const run = (loc, d, baseline = {}) =>
 test("a new oversized file and an old unbaselined one get different messages", () => {
   const { errors } = run({ n: 501, o: 502 }, diff({ atBase: ["o"] }));
   assert.deepEqual(errors, [
-    { file: "n", msg: "new file is 501 lines; the limit is 500. Split it." },
-    { file: "o", msg: "is 502 lines and not in b.json; the limit is 500. Shrink it to 500 or fewer." },
+    { file: "n", msg: "new file is 501 lines; the limit is 500. Split it.", split: true },
+    { file: "o", msg: "is 502 lines and not in b.json; the limit is 500. Shrink it to 500 or fewer.", split: true },
   ]);
 });
 

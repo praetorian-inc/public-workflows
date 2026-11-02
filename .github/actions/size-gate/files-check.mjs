@@ -39,12 +39,15 @@ function gainedHeader(root, base, status) {
 
 // { errors, warnings }, each a list of { file, line?, msg }.
 export function checkFiles({ root, base, loc, diff, baseline, baseBaseline, baseLines, baselinePath }) {
-  const pairs = [
-    ...gainedHeader(root, base, diff.status),
+  const sized = [
     ...unbaselined(loc, baseline, diff, baselinePath),
     ...ratchet({ loc, baseline, baseBaseline, baseLines, renames: diff.renames, baselinePath }),
   ];
-  const errors = pairs.map(([file, msg]) => ({ file, msg }));
+  // split: a split fixes this error (LAB-7708), true while the file is still over the limit.
+  const errors = [
+    ...gainedHeader(root, base, diff.status).map(([file, msg]) => ({ file, msg })),
+    ...sized.map(([file, msg]) => (loc.get(file) > FILE_MAX ? { file, msg, split: true } : { file, msg })),
+  ];
   const warnings = [];
   for (const p of diff.added.keys()) {
     const n = loc.get(p);
