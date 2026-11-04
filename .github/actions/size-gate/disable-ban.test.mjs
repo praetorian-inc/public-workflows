@@ -177,7 +177,7 @@ test("D1/D2 end to end: an added banned comment fails at its line; a coded noqa 
   const bad = makeRepo({ base: { "m.py": file("py", 3) }, head: { "m.py": file("py", 3) + "x = 1  # noqa\n" } });
   const r = check(bad);
   assert.equal(r.code, 1);
-  assert.match(r.out, /::error file=m\.py,line=4::m\.py:4 adds a size-lint disable comment; split the code instead\./);
+  assert.match(r.out, /::error file=m\.py,line=4::m\.py:4 adds a size-lint disable comment; remove it so advisory warnings remain visible\./);
   const ok = makeRepo({ base: { "m.py": file("py", 3) }, head: { "m.py": file("py", 3) + "x = 1  # noqa: E501\n" } });
   assert.equal(check(ok).code, 0);
 });
@@ -186,7 +186,7 @@ test("D1 end to end: a multi-line ESLint directive fails at its first line, or a
   const block = "/* eslint\n   max-lines-per-function: off */\n";
   const r = check(makeRepo({ base: { "m.ts": file("ts", 3) }, head: { "m.ts": file("ts", 3) + block } }));
   assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /::error file=m\.ts,line=4::m\.ts:4 adds a size-lint disable comment; split the code instead\./);
+  assert.match(r.out, /::error file=m\.ts,line=4::m\.ts:4 adds a size-lint disable comment; remove it so advisory warnings remain visible\./);
   assert.doesNotMatch(r.out, /line=5::/);
   const was = file("ts", 3) + '/* eslint\n   max-lines-per-function: ["error", 50] */\n';
   const s = check(makeRepo({ base: { "m.ts": was }, head: { "m.ts": file("ts", 3) + block } }));

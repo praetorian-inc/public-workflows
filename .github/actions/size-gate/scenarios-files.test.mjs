@@ -13,48 +13,49 @@ const repo = (lang, base, head, untracked) =>
 
 for (const lang of LANGS) {
   const p = `d/a.${EXT[lang]}`;
-  test(`${lang} F1: a new 501-line file fails`, () => {
+  test(`${lang} F1: a new 501-line file warns without failing`, () => {
     const r = check(repo(lang, {}, { [p]: file(lang, 501) }));
-    assert.equal(r.code, 1);
-    assert.match(r.out, new RegExp(`::error file=${p}::${p} new file is 501 lines; the limit is 500\\. Split it\\.`));
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, new RegExp(`::warning file=${p}::${p} is 501 lines, over the 400-line advisory threshold`));
+    assert.doesNotMatch(r.out, /::error /);
   });
   test(`${lang} F2: a new 500-line file passes with a warning`, () => {
     const r = check(repo(lang, {}, {}, { [p]: file(lang, 500) }));
     assert.equal(r.code, 0, r.out);
-    assert.match(r.out, new RegExp(`::warning file=${p}::${p} is 500 lines, over the 400-line soft limit \\(hard limit 500\\)\\.`));
+    assert.match(r.out, new RegExp(`::warning file=${p}::${p} is 500 lines, over the 400-line advisory threshold`));
   });
   test(`${lang} F3: an unbaselined file grown 150 to 410 passes with a warning`, () => {
     const r = check(repo(lang, { [p]: file(lang, 150) }, { [p]: file(lang, 410) }));
     assert.equal(r.code, 0, r.out);
-    assert.match(r.out, /is 410 lines, over the 400-line soft limit/);
+    assert.match(r.out, /is 410 lines, over the 400-line advisory threshold/);
   });
-  test(`${lang} F4: a baselined file that grows fails`, () => {
+  test(`${lang} F4: a baselined file that grows warns without failing`, () => {
     const r = check(repo(lang, { [p]: file(lang, 600), [B]: bj({ [p]: 600 }) }, { [p]: file(lang, 605) }));
-    assert.equal(r.code, 1);
-    assert.match(r.out, /grew to 605 lines; \.github\/size-baseline\.json allows 600\. Baselined files may not grow\./);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, new RegExp(`::warning file=${p}::${p} is 605 lines, over the 400-line advisory threshold`));
   });
-  test(`${lang} F5: a shrink must lower the entry`, () => {
+  test(`${lang} F5: a shrink need not lower an obsolete baseline entry`, () => {
     const base = { [p]: file(lang, 600), [B]: bj({ [p]: 600 }) };
     const kept = check(repo(lang, base, { [p]: file(lang, 590) }));
-    assert.equal(kept.code, 1);
-    assert.match(kept.out, /shrank to 590 lines\. Lower its \.github\/size-baseline\.json entry from 600 to 590 in this PR\./);
+    assert.equal(kept.code, 0, kept.out);
+    assert.match(kept.out, /is 590 lines, over the 400-line advisory threshold/);
     const lowered = check(repo(lang, base, { [p]: file(lang, 590), [B]: bj({ [p]: 590 }) }));
     assert.equal(lowered.code, 0, lowered.out);
   });
-  test(`${lang} F6: the baseline may not rise or gain entries`, () => {
+  test(`${lang} F6: adding or raising a legacy entry cannot fail the size check`, () => {
     const base = { [p]: file(lang, 600), [B]: bj({ [p]: 600 }) };
     const raised = check(repo(lang, base, { [p]: file(lang, 610), [B]: bj({ [p]: 610 }) }));
-    assert.equal(raised.code, 1);
-    assert.match(raised.out, /entry rose from 600 to 610; the baseline can only shrink\./);
+    assert.equal(raised.code, 0, raised.out);
+    assert.match(raised.out, /is 610 lines, over the 400-line advisory threshold/);
     const q = `d/b.${EXT[lang]}`;
     const added = check(repo(lang, base, { [q]: file(lang, 550), [B]: bj({ [p]: 600, [q]: 550 }) }));
-    assert.equal(added.code, 1);
-    assert.match(added.out, new RegExp(`${q} was added to \\.github/size-baseline\\.json; the baseline can only shrink\\.`));
+    assert.equal(added.code, 0, added.out);
+    assert.match(added.out, new RegExp(`::warning file=${q}::${q} is 550 lines`));
   });
-  test(`${lang} F7: a baselined file back under the limit must drop its entry`, () => {
+  test(`${lang} F7: a stale baseline entry cannot cause a source-length failure`, () => {
     const r = check(repo(lang, { [p]: file(lang, 600), [B]: bj({ [p]: 600 }) }, { [p]: file(lang, 290) }));
-    assert.equal(r.code, 1);
-    assert.match(r.out, /is now 290 lines, within the 500-line limit\. Remove its entry from/);
+    assert.equal(r.code, 0, r.out);
+    assert.doesNotMatch(r.out, /::warning file=/);
   });
   test(`${lang} F10: exclude-paths and include-paths take files out of scope`, () => {
     const big = { [p]: file(lang, 600) };
@@ -84,16 +85,18 @@ test("F8: 600-line test files are out of scope", () => {
   assert.doesNotMatch(r.out, /::(error|warning)/);
 });
 
-test("F8: only *.min.js is exempt as bundled; a 600-line app.min.mjs fails", () => {
+test("F8: only *.min.js is exempt as bundled; a 600-line app.min.mjs warns", () => {
   const r = check(repo("go", {}, { "app.min.mjs": file("mjs", 600) }));
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /app\.min\.mjs/);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /::warning file=app\.min\.mjs::app\.min\.mjs is 600 lines/);
 });
 
 test("F9: a generated Go file is exempt; the same file without the header is not", () => {
   const gen = file("go", 600, "// Code generated by x. DO NOT EDIT.").replace("// filler 0", "package p");
   assert.equal(check(repo("go", {}, { "g.go": gen })).code, 0);
-  assert.equal(check(repo("go", {}, { "g.go": file("go", 600) })).code, 1);
+  const handwritten = check(repo("go", {}, { "g.go": file("go", 600) }));
+  assert.equal(handwritten.code, 0, handwritten.out);
+  assert.match(handwritten.out, /::warning file=g\.go/);
 });
 
 test("F11: scanning fewer files than min-scanned-files fails", () => {
@@ -112,17 +115,17 @@ test("F12: a baseline entry that is not a line count fails the gate, at HEAD or 
   }
 });
 
-test("F13: with no merge-base baseline, a new baseline may only list files no longer than at the merge-base", () => {
+test("F13: a newly introduced legacy baseline is informational", () => {
   const big = { "d/a.go": file("go", 600) };
   assert.equal(check(repo("go", big, { [B]: bj({ "d/a.go": 600 }) })).code, 0);
   const renamed = check(repo("go", big, { "d/a.go": null, "d/n.go": file("go", 600), [B]: bj({ "d/n.go": 600 }) }));
   assert.equal(renamed.code, 0, renamed.out);
   const added = check(repo("go", {}, { "d/b.go": file("go", 600), [B]: bj({ "d/b.go": 600 }) }));
-  assert.equal(added.code, 1);
-  assert.match(added.out, /d\/b\.go did not exist at the merge-base, which has no \.github\/size-baseline\.json; a new file cannot be baselined\./);
+  assert.equal(added.code, 0, added.out);
+  assert.match(added.out, /::warning file=d\/b\.go::d\/b\.go is 600 lines/);
   const grown = check(repo("go", { "d/a.go": file("go", 250) }, { "d/a.go": file("go", 600), [B]: bj({ "d/a.go": 600 }) }));
-  assert.equal(grown.code, 1);
-  assert.match(grown.out, /allows 600 lines but it was 250 at the merge-base, which has no \.github\/size-baseline\.json; a baseline entry cannot exceed it\./);
+  assert.equal(grown.code, 0, grown.out);
+  assert.match(grown.out, /::warning file=d\/a\.go::d\/a\.go is 600 lines/);
 });
 
 // A repo whose head commit adds `files` and the symlinks `links` (path -> target).
@@ -155,8 +158,8 @@ test("F14: an in-scope symlink passes only when it resolves to an in-scope file 
   }
   assert.equal(check(linked({ "a.go": "real/b.go" }, { "real/b.go": file("go", 10) })).code, 0);
   const big = check(linked({ "a.go": "real/b.go" }, { "real/b.go": file("go", 600) }));
-  assert.equal(big.code, 1);
-  assert.match(big.out, /::error file=real\/b\.go::real\/b\.go new file is 600 lines/);
+  assert.equal(big.code, 0, big.out);
+  assert.match(big.out, /::warning file=real\/b\.go::real\/b\.go is 600 lines/);
   assert.doesNotMatch(big.out, /file=a\.go/);
 });
 
@@ -171,8 +174,8 @@ test("F15: a directory symlink passes only when every in-scope file it exposes i
   const nested = check(linked({ "real/in": "../keep.go", "pkg/alias": "../real" }, { "real/a.go": file("go", 3) }));
   assert.match(nested.out, /pkg\/alias is a symlink to a directory holding the symlink `real\/in`; /);
   const grown = check(linked({ "pkg/alias": "../real" }, { "real/a.go": file("go", 600) }));
-  assert.equal(grown.code, 1);
-  assert.match(grown.out, /::error file=real\/a\.go::real\/a\.go new file is 600 lines/);
+  assert.equal(grown.code, 0, grown.out);
+  assert.match(grown.out, /::warning file=real\/a\.go::real\/a\.go is 600 lines/);
   assert.doesNotMatch(grown.out, /file=pkg\/alias/);
 });
 
@@ -224,6 +227,8 @@ for (const lang of LANGS) {
     const r = check({ root, base: fork }, { GITHUB_EVENT_NAME: "pull_request" });
     assert.equal(r.code, 0, r.out);
     assert.match(r.out, /::notice::HEAD is the pull_request merge ref; comparing with its first parent/);
-    assert.equal(check({ root, base: fork }, { GITHUB_EVENT_NAME: "push" }).code, 1);
+    const push = check({ root, base: fork }, { GITHUB_EVENT_NAME: "push" });
+    assert.equal(push.code, 0, push.out);
+    assert.match(push.out, /::warning file=/);
   });
 }

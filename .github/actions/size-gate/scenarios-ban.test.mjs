@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { check, file, makeRepo, run } from "./scenario-kit.mjs";
 
-const BAN = /adds a size-lint disable comment; split the code instead\./;
+const BAN = /adds a size-lint disable comment; remove it so advisory warnings remain visible\./;
 const cases = [
   ["go", "*.go -diff", "package p\n\nvar y = 1 //nolint:funlen\n"],
   ["go", "*.go binary", "package p\n\nvar y = 1 //nolint:funlen\n"],

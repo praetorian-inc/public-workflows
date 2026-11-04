@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Size gate CLI (LAB-7587).
 //
-//   node cli.mjs check    --root <repo>   file and function limits, baseline ratchet
-//   node cli.mjs baseline --root <repo>   regenerate the baseline file
+//   node cli.mjs check    --root <repo>   advisory file/function lengths and integrity checks
+//   node cli.mjs baseline --root <repo>   optional legacy baseline inventory
 //
 // Shared flags: --baseline <file> (default .github/size-baseline.json),
 // --include <glob>..., --exclude <glob>..., --min-scanned <n>. The workflow
@@ -10,7 +10,7 @@
 import { FILE_MAX, parseConfig, pathspecs, UsageError } from "./config.mjs";
 import { listFiles, readDiff, resolveBase, touchedPaths } from "./git.mjs";
 import { linkTargets, measureTree, symlinkErrors } from "./measure.mjs";
-import { baseLengths, changedEntries, readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
+import { readBaseBaseline, readBaseline, writeBaseline } from "./baseline.mjs";
 import { checkFiles } from "./files-check.mjs";
 import { checkFunctions } from "./functions-check.mjs";
 import { escapeData, report } from "./report.mjs";
@@ -31,13 +31,12 @@ function runBaseline(cfg) {
   return 0;
 }
 
-// On a pull request, file-rule and symlink errors count only for paths the PR
-// touches, as a linter reports only changed files; a push checks the whole
-// repository, so drift on the default branch still fails there (LAB-7704).
-function prScope(cfg, base, baseline, baseBaseline) {
+// On a pull request, symlink and generated-header errors count only for paths
+// the PR touches; a push checks the whole repository (LAB-7704).
+function prScope(cfg, base) {
   if (!cfg.pullRequest) return null;
-  log("::notice::pull_request: file-size and symlink errors are limited to files this PR touches; pushes check the whole repository.");
-  return new Set([...touchedPaths(cfg.root, base), ...changedEntries(baseline, baseBaseline)]);
+  log("::notice::pull_request: symlink and generated-header errors are limited to files this PR touches; pushes check the whole repository.");
+  return new Set(touchedPaths(cfg.root, base));
 }
 
 function runCheck(cfg, env) {
@@ -48,14 +47,13 @@ function runCheck(cfg, env) {
   const diff = readDiff(cfg.root, base, specs);
   let baseline = readBaseline(cfg.root, cfg.baselinePath);
   if (baseline === null) {
-    log(`::notice::${cfg.baselinePath} does not exist; checking against an empty baseline.`);
+    log(`::notice::${cfg.baselinePath} does not exist; legacy baseline is optional.`);
     baseline = {};
   }
-  const baseBaseline = readBaseBaseline(cfg.root, base, cfg.baselinePath);
-  const baseLines = baseBaseline ? undefined : baseLengths(cfg.root, base, baseline, diff.renames);
-  const files = checkFiles({ root: cfg.root, base, loc, diff, baseline, baseBaseline, baseLines, baselinePath: cfg.baselinePath });
+  readBaseBaseline(cfg.root, base, cfg.baselinePath); // Validate historical input too.
+  const files = checkFiles({ root: cfg.root, base, loc, diff });
   const fns = checkFunctions({ root: cfg.root, base, diff, goExtractor: cfg.goExtractor });
-  const touched = prScope(cfg, base, baseline, baseBaseline);
+  const touched = prScope(cfg, base);
   const touchedList = touched ? [...touched] : [];
   const scoped = (errs, reach = (e) => touched.has(e.file)) => (touched ? errs.filter(reach) : errs);
   const near = (t, u) => u === t || u.startsWith(`${t}/`) || t.startsWith(`${u}/`);

@@ -5,27 +5,15 @@ import { checkFiles } from "./files-check.mjs";
 import { annotation, escapeData } from "./report.mjs";
 
 const diff = (o = {}) => ({ status: new Map(), atBase: new Set(o.atBase ?? []), renames: new Map(o.renames ?? []), added: new Map((o.added ?? []).map((p) => [p, new Map()])) });
-const run = (loc, d, baseline = {}) =>
-  checkFiles({ loc: new Map(Object.entries(loc)), diff: d, baseline, baseBaseline: null, baselinePath: "b.json" });
+const run = (loc, d) =>
+  checkFiles({ loc: new Map(Object.entries(loc)), diff: d });
 
-test("a new oversized file and an old unbaselined one get different messages", () => {
-  const { errors } = run({ n: 501, o: 502 }, diff({ atBase: ["o"] }));
-  assert.deepEqual(errors, [
-    { file: "n", msg: "new file is 501 lines; the limit is 500. Split it.", split: true },
-    { file: "o", msg: "is 502 lines and not in b.json; the limit is 500. Shrink it to 500 or fewer.", split: true },
-  ]);
-});
-
-test("a renamed oversized file is not new", () => {
-  const { errors } = run({ n: 501 }, diff({ renames: [["n", "o"]] }));
-  assert.match(errors[0].msg, /not in b\.json/);
-});
-
-test("warnings: only added or changed files of 401-500 lines", () => {
-  const { warnings, errors } = run({ a: 401, b: 500, c: 400, d: 450 }, diff({ added: ["a", "b", "c"] }));
+test("changed files over the advisory threshold warn, including former hard-limit cases", () => {
+  const { warnings, errors } = run({ a: 401, b: 501, c: 400, d: 600 }, diff({ added: ["a", "b", "c"] }));
   assert.deepEqual(errors, []);
   assert.deepEqual(warnings.map((w) => w.file), ["a", "b"]);
-  assert.equal(warnings[0].msg, "is 401 lines, over the 400-line soft limit (hard limit 500).");
+  assert.equal(warnings[0].msg, "is 401 lines, over the 400-line advisory threshold (previous hard limit 500).");
+  assert.ok(warnings.every((w) => w.review));
 });
 
 test("annotations escape the message and the file property", () => {

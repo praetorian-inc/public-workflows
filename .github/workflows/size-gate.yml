@@ -1,14 +1,13 @@
 name: Size gate (Callable)
 # Shared file and function size gate for Go, TypeScript/JavaScript (incl.
-# TSX/JSX) and Python (LAB-7587, LAB-7641). Files: 500 lines (warning over
-# 400), with a ratcheting baseline for legacy files. On pull_request, file
-# and symlink errors count only for paths the PR touches (LAB-7704); push and
-# workflow_dispatch runs check the whole repository.
-# Functions: 50 lines (150 for a component: a TS or JS function whose own body
-# contains JSX; JSX in a `.js` file counts too), checked only for functions a
-# PR adds or changes; a function that was already over at the merge-base is
-# grandfathered at its base length. Rules and the baseline recipe are in the
-# README under `size-gate.yml`.
+# TSX/JSX) and Python (LAB-7587, LAB-7641, LAB-7752). Changed files over 400
+# lines warn (500 was the former hard limit); changed functions over 50 lines
+# and JSX components over 150 warn. A legacy baseline remains accepted for
+# caller compatibility, but neither growth nor stale entries block a PR.
+# On pull_request, symlink and generated-header errors are scoped to touched
+# paths (LAB-7704); push and workflow_dispatch check the whole repository.
+# Parser, scope, symlink, spoofed header and size-lint-disable failures remain
+# hard. Rules are in the README under `size-gate.yml`.
 #
 # Caller template:
 #
@@ -27,7 +26,7 @@ name: Size gate (Callable)
 #       with:
 #         baseline-path: .github/size-baseline.json
 #
-# Failure policy: the gate fails closed. A failed checkout, toolchain setup,
+# Failure policy: source length only warns. A failed checkout, toolchain setup,
 # npm ci, extractor crash, unparseable HEAD file or an unmet
 # min-scanned-files floor is a red job, never a silent pass.
 
@@ -35,7 +34,7 @@ on:
   workflow_call:
     inputs:
       baseline-path:
-        description: "Baseline JSON in the caller repo, relative to its root."
+        description: "Optional legacy baseline JSON in the caller repo, relative to its root; validated but does not affect size warnings."
         required: false
         type: string
         default: ".github/size-baseline.json"
@@ -90,7 +89,7 @@ on:
 
     outputs:
       violations:
-        description: "Number of ::error annotations the gate emitted."
+        description: "Number of integrity ::error annotations the gate emitted (source length is advisory)."
         value: ${{ jobs.size.outputs.violations }}
       warnings:
         description: "Number of ::warning annotations the gate emitted."
