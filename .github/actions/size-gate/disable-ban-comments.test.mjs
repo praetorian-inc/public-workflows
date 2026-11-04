@@ -8,7 +8,7 @@ import path from "node:path";
 import { extractAll } from "./extract.mjs";
 import { check, file, goExtractor, makeRepo, run } from "./scenario-kit.mjs";
 
-const BAN = /adds a size-lint disable comment; split the code instead\./;
+const BAN = /adds a size-lint disable comment; remove it so advisory warnings remain visible\./;
 const banAt = (p, n) => new RegExp(`::error file=${p.replace(".", "\\.")},line=${n}::${p.replace(".", "\\.")}:${n} adds a size-lint disable comment`);
 const BASE = { "keep.go": file("go", 3) };
 

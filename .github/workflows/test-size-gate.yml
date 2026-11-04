@@ -3,12 +3,11 @@ name: Test size-gate
 #   unit:    extractor goldens (Go, TS/TSX, JS/JSX, Python), the node:test
 #            suites including the end-to-end scenario matrix, and actionlint.
 #   dogfood: runs the reusable workflow on this whole repo, the way a normal
-#            caller does, against the default baseline path
+#            caller does, with the optional legacy baseline path
 #            (.github/size-baseline.json). Only .go/.ts/.tsx/.js/.mjs/.cjs/
 #            .jsx/.py files are measured and tests are exempt, so the floor is
 #            the 39 files that leaves. The triggers therefore also match every
-#            in-scope source file, so a new oversize file fails on the PR that
-#            adds it.
+#            in-scope source file, so an oversize file warns on its PR.
 
 on:
   # Escape hatch: both real triggers are paths:-filtered (size-gate paths plus
@@ -21,7 +20,7 @@ on:
       - ".github/workflows/test-size-gate.yml"
       - ".github/actions/size-gate/**"
       - "_test-fixtures/size-gate/**"
-      # dogfood reads this repo's own baseline.
+      # dogfood validates this repo's optional legacy baseline.
       - ".github/size-baseline.json"
       # dogfood measures every in-scope source file in the repo, so a change
       # to one anywhere must re-run it here rather than on a later PR.
@@ -40,7 +39,7 @@ on:
       - ".github/workflows/test-size-gate.yml"
       - ".github/actions/size-gate/**"
       - "_test-fixtures/size-gate/**"
-      # dogfood reads this repo's own baseline.
+      # dogfood validates this repo's optional legacy baseline.
       - ".github/size-baseline.json"
       # dogfood measures every in-scope source file in the repo, so a change
       # to one anywhere must re-run it here rather than on a later PR.

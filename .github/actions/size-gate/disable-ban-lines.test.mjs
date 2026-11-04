@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import * as measure from "./measure.mjs";
 import { check, file, makeRepo } from "./scenario-kit.mjs";
 
-const BAN = /adds a size-lint disable comment; split the code instead\./;
+const BAN = /adds a size-lint disable comment; remove it so advisory warnings remain visible\./;
 const banAt = (p, n) => new RegExp(`::error file=${p.replace(".", "\\.")},line=${n}::${p.replace(".", "\\.")}:${n} adds a size-lint disable comment`);
 const BASE = { "keep.go": file("go", 3) };
 const LS = "\u2028";

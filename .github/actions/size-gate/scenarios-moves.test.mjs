@@ -25,27 +25,27 @@ for (const lang of LANGS) {
     assert.equal(gone.code, 0, gone.out);
   });
 
-  test(`${lang} M2: a moved function that grows fails and names its source`, () => {
+  test(`${lang} M2: a moved function that grows warns and names its source`, () => {
     const r = check(repo(lang, zBase, { [legacy]: shrunk, [split]: source(lang, fn(lang, "F", 81)) }));
-    assert.equal(r.code, 1, r.out);
-    assert.match(r.out, new RegExp(`\`F\` moved from \`${legacy}\`; it was 80 lines at the merge-base and is now 81`));
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, new RegExp(`\`F\` moved from \`${legacy}\`; grew from 80 to 81 lines; advisory threshold 50`));
   });
 
-  test(`${lang} M3: a moved function that was within its limit and is now over it fails`, () => {
+  test(`${lang} M3: a moved function that was within its limit and is now over it warns`, () => {
     const r = check(repo(lang, { [legacy]: legacyBase(40) }, { [legacy]: shrunk, [split]: source(lang, fn(lang, "F", 51)) }));
-    assert.equal(r.code, 1, r.out);
+    assert.equal(r.code, 0, r.out);
     assert.match(r.out, /`F` grew to 51 lines; the limit is 50/);
   });
 
   test(`${lang} M4: a move to another directory is a new function`, () => {
     const r = check(repo(lang, zBase, { [legacy]: shrunk, [at("split", "lib")]: source(lang, fn(lang, "F", 80)) }));
-    assert.equal(r.code, 1, r.out);
+    assert.equal(r.code, 0, r.out);
     assert.match(r.out, /new function `F` is 80 lines; the limit is 50/);
   });
 
   test(`${lang} M5: a function renamed while moving is new`, () => {
     const r = check(repo(lang, zBase, { [legacy]: shrunk, [split]: source(lang, fn(lang, "New", 80)) }));
-    assert.equal(r.code, 1, r.out);
+    assert.equal(r.code, 0, r.out);
     assert.match(r.out, /new function `New` is 80 lines/);
   });
 
@@ -53,7 +53,7 @@ for (const lang of LANGS) {
     const [one, two] = [at("one"), at("two")];
     const base = { [one]: legacyBase(60), [two]: legacyBase(60) };
     const r = check(repo(lang, base, { [one]: shrunk, [two]: shrunk, [split]: source(lang, fn(lang, "F", 60)) }));
-    assert.equal(r.code, 1, r.out);
+    assert.equal(r.code, 0, r.out);
     assert.match(r.out, new RegExp(`\`F\` \\(60 lines; the limit is 50\\) matches base functions in \`${one}\` and \`${two}\`; the match is ambiguous, so it is checked as a new function`));
   });
 
@@ -64,26 +64,26 @@ for (const lang of LANGS) {
     assert.equal(r.code, 0, r.out);
   });
 
-  test(`${lang} M8: a grandfathered function moved out and copied into two new siblings fails both`, () => {
+  test(`${lang} M8: an over-limit function copied into two new siblings warns for both`, () => {
     const head = { [legacy]: null, [at("s1")]: source(lang, fn(lang, "F", 80)), [at("s2")]: source(lang, fn(lang, "F", 80)) };
     const r = check(repo(lang, zBase, head));
-    assert.equal(r.code, 1, r.out);
-    assert.equal(count(r.out, /^::error .*`F` \(80 lines; the limit is 50\) .*ambiguous/), 2, r.out);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(count(r.out, /^::warning .*`F` \(80 lines; the limit is 50\) .*ambiguous/), 2, r.out);
   });
 
   test(`${lang} M9: an in-place edit keeps the allowance and a sibling copy is checked as new`, () => {
     const [a, b] = [at("a"), at("b")];
     const r = check(repo(lang, { [a]: source(lang, fn(lang, "F", 80)) }, { [a]: source(lang, fn(lang, "F", 80, "1")), [b]: source(lang, fn(lang, "F", 80)) }));
-    assert.equal(r.code, 1, r.out);
-    assert.equal(count(r.out, new RegExp(`^::error file=${a}`)), 0, r.out);
-    assert.match(r.out, new RegExp(`^::error file=${b}.*\`F\` in \`${b}\` matches the base function \`F\` in \`${a}\`, which \`${a}\` still holds in place; a copy does not inherit its allowance, so it is checked as a new function`, "m"));
+    assert.equal(r.code, 0, r.out);
+    assert.equal(count(r.out, new RegExp(`^::warning file=${a}`)), 1, r.out);
+    assert.match(r.out, new RegExp(`^::warning file=${b}.*\`F\` in \`${b}\` matches the base function \`F\` in \`${a}\`, which \`${a}\` still holds in place; the copy exceeds the 50-line advisory threshold`, "m"));
   });
 }
 
 test("M10: a function only matches a base function in the same language", () => {
   const base = { "keep.go": file("go", 3), "src/legacy.py": source("py", fn("py", "F", 100)) };
   const r = check(makeRepo({ base, head: { "src/legacy.py": null, "src/split.go": source("go", fn("go", "F", 80)) } }));
-  assert.equal(r.code, 1, r.out);
+  assert.equal(r.code, 0, r.out);
   assert.match(r.out, /new function `F` is 80 lines; the limit is 50/);
   const ts = { "src/legacy.ts": source("ts", fn("ts", "F", 80), fn("ts", "Z", 100)) };
   const tsx = { "src/legacy.ts": source("ts", fn("ts", "Z", 100)), "src/split.tsx": source("tsx", fn("tsx", "F", 80, "1")) };
@@ -101,12 +101,12 @@ const renamed = (from, to, text) => makeRepo({ base: { "keep.go": file("go", 3),
 test("M11: renaming a file to another directory makes its functions new", () => {
   for (const lang of LANGS) {
     const r = check(renamed(`src/a.${EXT[lang]}`, `lib/a.${EXT[lang]}`, source(lang, fn(lang, "F", 100))));
-    assert.equal(r.code, 1, `${lang}: ${r.out}`);
+    assert.equal(r.code, 0, `${lang}: ${r.out}`);
     assert.match(r.out, /new function `F` is 100 lines; the limit is 50/, lang);
   }
   const twins = check(renamed("src/a.go", "lib/a.go", source("go", fn("go", "init", 100), fn("go", "init", 100))));
-  assert.equal(twins.code, 1, twins.out);
-  assert.equal(count(twins.out, /^::error .*new function `init(#2)?` is 100 lines/), 2, twins.out);
+  assert.equal(twins.code, 0, twins.out);
+  assert.equal(count(twins.out, /^::warning .*new function `init(#2)?` is 100 lines/), 2, twins.out);
 });
 
 test("M12: renaming a file in its directory and language keeps its allowances", () => {
@@ -134,6 +134,6 @@ test("M13: an anonymous module.exports converted in place to export default keep
   const converted = check(makeRepo({ base, head: head(body) }));
   assert.equal(converted.code, 0, converted.out);
   const grown = check(makeRepo({ base, head: head(["  x += 1;", ...body]) }));
-  assert.equal(grown.code, 1, grown.out);
-  assert.match(grown.out, /`default` was 100 lines at the merge-base and is now 101; an over-limit function may change but not grow/);
+  assert.equal(grown.code, 0, grown.out);
+  assert.match(grown.out, /`default` grew from 100 to 101 lines; advisory threshold 50/);
 });

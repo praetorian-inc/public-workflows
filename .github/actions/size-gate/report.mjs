@@ -14,34 +14,33 @@ export function annotation(kind, { file, line, msg }) {
   return `::${kind} ${props}::${escapeData(`${where} ${msg}`)}`;
 }
 
-// Printed once when a run has an error a split fixes (LAB-7708): an error says
-// how big, not how to split. Parse, symlink and header errors do not get it.
+// Printed once when a run has a source-length warning. A warning prompts a
+// cohesion decision; integrity errors alone do not request architecture work.
 export const GUIDANCE =
-  "Split by responsibility, not to reach the line limit: name the concepts the code holds, give each its own " +
-  "file or module, and plan where the next addition of each kind goes so the file does not grow back. " +
-  "A pure move into a second file, `_part2`/`_utils`/`_helpers` files, and squeezing whitespace or comments " +
-  "do not fix this. A baseline entry is only for a file already over the limit when the gate was adopted; " +
-  "never add or raise one to pass. Read this repository's AGENTS.md, if it has one, for its split procedure.";
+  "Size is advisory: review whether this source has one cohesive owner and a clear place for the next addition. " +
+  "A cohesive long unit may remain; if a split is warranted, split by responsibility with an approved layout plan, " +
+  "not a pure move, `_part2`/`_utils`/`_helpers` file, or squeezed whitespace. " +
+  "Do not change a baseline entry to silence a warning. Read this repository's AGENTS.md for its current procedure, if present.";
 
 const cell = (s) => String(s).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 
 function summary({ errors, warnings, base, scanned }) {
   const rows = [
     ...errors.map((e) => `| error | \`${cell(e.file)}${e.line ? `:${e.line}` : ""}\` | ${cell(e.msg)} |`),
-    ...warnings.map((w) => `| warning | \`${cell(w.file)}\` | ${cell(w.msg)} |`),
+    ...warnings.map((w) => `| warning | \`${cell(w.file)}${w.line ? `:${w.line}` : ""}\` | ${cell(w.msg)} |`),
   ];
   const head = `## Size gate\n\nScanned ${scanned} files against \`${base.slice(0, 12)}\`: ${errors.length} errors, ${warnings.length} warnings.\n`;
   if (!rows.length) return head;
   const table = `${head}\n| Kind | Where | Message |\n| --- | --- | --- |\n${rows.join("\n")}\n`;
-  return errors.some((e) => e.split) ? `${table}\n${GUIDANCE}\n` : table;
+  return warnings.some((w) => w.review) ? `${table}\n${GUIDANCE}\n` : table;
 }
 
 // Print annotations and the totals line; write the step summary and outputs.
 export function report({ errors, warnings, base, scanned, baselined, env, log }) {
   for (const w of warnings) log(annotation("warning", w));
   for (const e of errors) log(annotation("error", e));
-  if (errors.some((e) => e.split)) log(`size gate: ${GUIDANCE}`);
-  log(`size gate: scanned ${scanned} files against ${base.slice(0, 12)}; ${baselined} baselined, ${errors.length} errors, ${warnings.length} warnings`);
+  if (warnings.some((w) => w.review)) log(`size gate: ${GUIDANCE}`);
+  log(`size gate: scanned ${scanned} files against ${base.slice(0, 12)}; ${baselined} legacy baseline entries, ${errors.length} errors, ${warnings.length} warnings`);
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, summary({ errors, warnings, base, scanned }));
   if (env.GITHUB_OUTPUT)
     appendFileSync(env.GITHUB_OUTPUT, `violations=${errors.length}\nwarnings=${warnings.length}\nbase-sha=${base}\n`);
