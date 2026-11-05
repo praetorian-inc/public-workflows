@@ -18,3 +18,6 @@ paths:
   .github/workflows/size-gate.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/agents-md-drift.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
