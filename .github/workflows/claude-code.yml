@@ -67,7 +67,7 @@ on:
         description: "Maximum number of Claude tool-call turns for the PR review. Bounds tool iterations only — the job's timeout-minutes remains the wall-clock safety ceiling against runaway/injection loops. Raise for large PRs where the reviewer needs more turns to read the diff and surrounding code before posting."
         required: false
         type: number
-        default: 45
+        default: 80
 
       model:
         description: "Claude model ID for the review run. Default claude-fable-5-2, for the automatic review and for an @claude re-review (each run is a new session). Omitting fallback_model inherits claude-opus-5-5 even when model is overridden; pass fallback_model: \"\" to opt out."
@@ -251,7 +251,7 @@ jobs:
       cancel-in-progress: false
 
     # Wall-clock ceiling on the Claude review job. `--max-turns` (the
-    # `max_turns` input, default 45) caps the number of tool-call turns, but
+    # `max_turns` input, default 80) caps the number of tool-call turns, but
     # NOT wall time (a long-running tool call or a slow model response can
     # still burn runner minutes). This timeout is the real safety boundary:
     # an injection-induced loop or a wedged network call would otherwise sit
@@ -259,13 +259,14 @@ jobs:
     # job time (job start to job end), measured 2026-11-12. Before any
     # release passed an effort level, 99 recent review jobs on each of two
     # caller repositories took a median of 2.2 and 1.8 minutes and at most
-    # 5.2 and 4.2. The one job measured at `--effort xhigh` took 7.5 minutes
-    # for 26 turns. That 30 minutes is enough at xhigh with 45 turns is an
-    # assumption, not a measurement. A job that hits this limit during the
-    # review step creates no PR review, because "Convert to PR review" needs
-    # a successful review step, and a comment the review had already posted
-    # stays a plain comment. None of the measured jobs timed out, so that
-    # case is unobserved. Because this timeout bounds wall time
+    # 5.2 and 4.2. The two jobs measured at `--effort xhigh` took 7.5 minutes
+    # for 26 turns and 9.2 minutes for 35 turns. That 30 minutes is enough at
+    # xhigh with 80 turns is an estimate from those two jobs (16 to 17
+    # seconds of job time a turn), not a measurement. A job that hits this
+    # limit during the review step creates no PR review, because "Convert to
+    # PR review" needs a successful review step, and a comment the review had
+    # already posted stays a plain comment. None of the measured jobs timed
+    # out, so that case is unobserved. Because this timeout bounds wall time
     # independently, raising max_turns does not weaken it.
     timeout-minutes: 30
 

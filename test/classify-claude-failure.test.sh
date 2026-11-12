@@ -325,7 +325,7 @@ step_has "$CHECKOUT_STEP" 'repository: ${{ job.workflow_repository }}' || missin
 # shellcheck disable=SC2016  # literal workflow text, not an expansion
 step_has "$CHECKOUT_STEP" 'ref: ${{ job.workflow_sha }}' || missing="$missing ref"
 step_has "$REFUSAL_STEP" "$CHECKED_OUT_SCRIPT" || missing="$missing classifier-path"
-name="wiring: the classifier checkout is of the workflow's own repository at its own commit, and the refusal check runs the classifier from it"
+name="wiring: the classifier checkout is of the workflow's own repository at its own commit, and the refusal check names the classifier under it"
 if [ -z "$missing" ]; then
   ok "$name"
 else
