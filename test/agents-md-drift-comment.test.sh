@@ -5,7 +5,7 @@
 #
 # The model step is a read-only analyst that returns its verdict as
 # `--json-schema` structured output; a deterministic `run:` step after it
-# creates or updates the single drift comment. Two things are proven here:
+# creates or updates the single drift comment. Three things are proven here:
 #
 #   1. The post step's real `run:` block — EXTRACTED from the workflow YAML at
 #      run time, never mirrored — creates, updates, or skips correctly when
@@ -16,6 +16,11 @@
 #      `gh pr comment`, and carries a valid `--json-schema` whose required
 #      fields are the ones the post step reads; and the post step is a plain
 #      `run:` step after the model step, gated on it.
+#   3. Each claude-code-action step of .github/workflows/claude-code.yml,
+#      tokenized the same way with the job's CLAUDE_HARDENED_ARGS block in
+#      place, passes `--settings` exactly once, and its one value is the pinned
+#      literal. It is checked here because this suite holds the `claude_args`
+#      tokenizer.
 #
 # Requires: bash, python3 with PyYAML, jq.
 #
@@ -59,7 +64,7 @@ section "Static contract — model tool surface, schema, and post-step wiring"
 
 # Each check prints "PASS<TAB>name" or "FAIL<TAB>name<TAB>expected<TAB>actual";
 # the post step's run: body is written out for the behavioural cases below.
-python3 - "$WORKFLOW" "$EXTRACT" > "$WORKDIR/static.tsv" <<'PY' || { echo "ERROR: static extraction failed" >&2; exit 1; }
+python3 - "$WORKFLOW" "$EXTRACT" "$REPO_ROOT/.github/workflows/claude-code.yml" > "$WORKDIR/static.tsv" <<'PY' || { echo "ERROR: static extraction failed" >&2; exit 1; }
 import json
 import pathlib
 import re
@@ -100,19 +105,25 @@ check("model step has an id", bool(model_id), "an id", model_id)
 # ── Tokenize claude_args the way the action does (shell-quote semantics) ──
 # `${{ ... }}` is resolved by Actions before the action sees the string; swap
 # each for an inert placeholder so the tokenizer sees what the action sees.
-raw = model["with"]["claude_args"]
-raw = "\n".join(l for l in raw.split("\n") if not l.strip().startswith("#"))
-raw = re.sub(r"\$\{\{.*?\}\}", "EXPR", raw)
-tokens = shlex.split(raw)
+def claude_tokens(raw):
+    raw = "\n".join(l for l in raw.split("\n") if not l.strip().startswith("#"))
+    raw = re.sub(r"\$\{\{.*?\}\}", "EXPR", raw)
+    return shlex.split(raw)
 
-flags = {}
-cur = None
-for t in tokens:
-    if t.startswith("--"):
-        cur = t[2:]
-        flags.setdefault(cur, [])
-    elif cur is not None:
-        flags[cur].append(t)
+
+def flag_values(tokens):
+    flags = {}
+    cur = None
+    for t in tokens:
+        if t.startswith("--"):
+            cur = t[2:]
+            flags.setdefault(cur, [])
+        elif cur is not None:
+            flags[cur].append(t)
+    return flags
+
+
+flags = flag_values(claude_tokens(model["with"]["claude_args"]))
 
 
 def tool_list(*names):
@@ -330,6 +341,28 @@ if schema is not None:
           read == set(schema.get("required", [])), sorted(schema.get("required", [])), sorted(read))
 
 (out / "post.sh").write_text(body)
+
+# ── claude-code.yml: the one --settings value every review step passes ──
+# Both action steps end claude_args with the job's CLAUDE_HARDENED_ARGS block,
+# which Actions puts in place of its `${{ env.… }}` before the action sees it.
+SETTINGS = '{"switchModelsOnFlag": false}'
+review = yaml.safe_load(open(sys.argv[3], encoding="utf-8"))
+review_steps = []
+for job in review["jobs"].values():
+    block = (job.get("env") or {}).get("CLAUDE_HARDENED_ARGS", "")
+    for st in job.get("steps", []):
+        if str(st.get("uses", "")).startswith("anthropics/claude-code-action@"):
+            args = (st.get("with") or {}).get("claude_args", "")
+            review_steps.append((st.get("id"), re.sub(
+                r"\$\{\{\s*env\.CLAUDE_HARDENED_ARGS\s*\}\}", lambda m: block, args)))
+check("claude-code.yml has claude-code-action steps", bool(review_steps), "at least one", len(review_steps))
+for sid, raw in review_steps:
+    toks = claude_tokens(raw)
+    # The flag is counted as well: a second one with no value adds nothing to
+    # the first one's value list.
+    got = (toks.count("--settings"), flag_values(toks).get("settings"))
+    check("claude-code.yml step %s passes --settings once, as the pinned literal" % sid,
+          got == (1, [SETTINGS]), (1, [SETTINGS]), got)
 PY
 
 while IFS=$'\t' read -r verdict name exp act; do
