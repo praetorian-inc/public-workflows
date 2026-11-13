@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ENG-8650: require activate_skill in a gemini-cli stream-json trace.
 #
-# stream-json events (gemini-cli 0.58.0 packages/core/src/output/types.ts):
+# stream-json events (gemini-cli 0.68.0 packages/core/src/output/types.ts):
 #   tool_use    tool_name, parameters.name
 #   tool_result output (llmContent or returnDisplay)
 #   message     role=assistant content is the review text

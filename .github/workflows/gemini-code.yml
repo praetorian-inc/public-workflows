@@ -77,10 +77,10 @@ on:
           - If nothing significant in any section: "No critical issues — LGTM pending human review."
 
       model:
-        description: "Gemini model ID"
+        description: "Gemini model ID. Default: gemini-4-carbon, run at thinking level HIGH (the settings override matches that model ID only)."
         required: false
         type: string
-        default: "gemini-3.8-flash"
+        default: "gemini-4-carbon"
 
       review_exclude_pathspecs:
         description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
@@ -241,10 +241,11 @@ jobs:
 
     runs-on: ubuntu-24.04
 
-    # Wall-clock ceiling on the agent. `model.maxSessionTurns: 30` caps tool-call
-    # turns, but not wall time; 15 min makes a stuck/looping run fail noticeably
-    # rather than hang. This is the hard backstop if the turn cap is ever miscounted.
-    timeout-minutes: 15
+    # Wall-clock ceiling on the agent: 30 minutes for a flat 80 session turns
+    # (`model.maxSessionTurns: 80`). The turn cap bounds tool-call turns, not
+    # wall time; 30 min makes a stuck/looping run fail noticeably rather than
+    # hang. This is the hard backstop if the turn cap is ever miscounted.
+    timeout-minutes: 30
 
     # Deliberately `contents: read` only. No PR write access in this job; the
     # post-feedback job handles comment posting with minimal permissions.
@@ -255,6 +256,7 @@ jobs:
       review_output: ${{ steps.sanitize.outputs.review }}
       empty_scope: ${{ steps.context.outputs.empty_scope }}
       failure_kind: ${{ steps.failclass.outputs.kind }}
+      served_models: ${{ steps.gemini.outputs.served }}
 
     steps:
       - name: Harden Runner
@@ -452,22 +454,6 @@ jobs:
             echo "${delim}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Compute session turn cap
-        id: turns
-        run: |
-          set -euo pipefail
-          # ENG-6428: size-aware cap. Floor 50, +3 per changed file, cap 80.
-          # 15-minute job timeout remains the wall clock. Empty-scope still
-          # emits 50 so skipped gemini `with:` JSON stays valid.
-          n=0
-          if [ "${{ steps.context.outputs.empty_scope }}" != "true" ] && [ -f .gemini-review/changed-files.txt ]; then
-            n=$(grep -c . .gemini-review/changed-files.txt || true)
-          fi
-          t=$((50 + n * 3))
-          if [ "${t}" -gt 80 ]; then t=80; fi
-          echo "n=${t}" >> "${GITHUB_OUTPUT}"
-          echo "Turn cap ${t} for ${n} changed file(s)"
-
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
       # The allowlist is vendored in this repo next to the stage script; its
       # allowlist/SOURCE records the review-bot-skills commit it was copied from.
@@ -613,6 +599,7 @@ jobs:
           cp _trace/.github/actions/stage-review-skills/check-gemini-skill-trace.sh "$RUNNER_TEMP/check-gemini-skill-trace.sh"
           cp _trace/.github/actions/stage-review-skills/check-graphify-use.sh "$RUNNER_TEMP/check-graphify-use.sh"
           cp _trace/.github/actions/stage-review-skills/classify-gemini-failure.sh "$RUNNER_TEMP/classify-gemini-failure.sh"
+          cp _trace/.github/actions/stage-review-skills/read-gemini-served-models.sh "$RUNNER_TEMP/read-gemini-served-models.sh"
           rm -rf _trace
 
       # Run Gemini CLI as a review agent. No github_token is passed — the
@@ -637,18 +624,25 @@ jobs:
           # same tool allowlist, no github token.
           gemini_key="${GEMINI_API_KEY}"
           unset GEMINI_API_KEY
-          npm install --silent --no-audit --prefer-offline --global @google/gemini-cli@0.58.0
+          npm install --silent --no-audit --prefer-offline --global @google/gemini-cli@0.68.0
           # Proof of graphify use is graphify's own query log. gemini-cli
-          # 0.58.0 strips every non-allowlisted variable from shell-tool
+          # 0.68.0 strips every non-allowlisted variable from shell-tool
           # children when GITHUB_SHA is set (environmentSanitization.ts strict
           # mode), so the two names are allowlisted in settings below.
           export GRAPHIFY_QUERY_LOG="${RUNNER_TEMP}/graphify-queries.jsonl"
           export GRAPHIFY_QUERY_LOG_ENABLE=1
           rm -f -- "$GRAPHIFY_QUERY_LOG"
           mkdir -p .gemini
+          # LAB-7944: a flat 80 turns on every PR, and thinking level HIGH for
+          # gemini-4-carbon (the override matches that model ID only).
           cat > .gemini/settings.json <<'SETTINGS_EOF'
           {
-            "model": { "maxSessionTurns": ${{ steps.turns.outputs.n }} },
+            "model": { "maxSessionTurns": 80 },
+            "modelConfigs": {
+              "customOverrides": [
+                { "match": { "model": "gemini-4-carbon" }, "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "HIGH" } } } }
+              ]
+            },
             "telemetry": { "enabled": false },
             "mcpServers": {},
             "security": {
@@ -752,11 +746,16 @@ jobs:
             echo "::error::gemini trace checker is missing"
             exit 1
           fi
+          served_script="${RUNNER_TEMP}/read-gemini-served-models.sh"
+          if [ ! -f "$served_script" ]; then
+            echo "::error::gemini served-model reader is missing"
+            exit 1
+          fi
           stderr="${RUNNER_TEMP}/gemini-stderr.txt"
           class="${RUNNER_TEMP}/gemini-class.txt"
           set +e
           # stdin is the prompt. --prompt "$(cat …)" puts the whole prompt in
-          # argv and dies at Linux MAX_ARG_STRLEN (131072). gemini-cli 0.58.0
+          # argv and dies at Linux MAX_ARG_STRLEN (131072). gemini-cli 0.68.0
           # reads a non-TTY stdin as the prompt.
           GEMINI_API_KEY="$gemini_key" gemini --yolo --output-format stream-json < "$PROMPT_FILE" > "$TRACE" 2> "$stderr"
           status=$?
@@ -810,6 +809,15 @@ jobs:
           {
             echo "summary<<${delim}"
             cat "$REVIEW"
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+          # LAB-7944: the footer names the model(s) the trace says served the
+          # review. The reader prints one validated line and never the trace.
+          served="$(TRACE="$TRACE" REQUESTED="$GEMINI_MODEL" bash "$served_script")"
+          delim="GEMINI_SERVED_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "served<<${delim}"
+            printf '%s\n' "$served"
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
 
@@ -945,7 +953,7 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           GEMINI_REVIEW: ${{ needs.gemini-review.outputs.review_output }}
-          GEMINI_MODEL: ${{ inputs.model }}
+          GEMINI_SERVED: ${{ needs.gemini-review.outputs.served_models }}
         with:
           script: |
             const message = process.env.GEMINI_REVIEW;
@@ -963,7 +971,7 @@ jobs:
                 message,
                 '',
                 '---',
-                `*Reviewed by Gemini (${process.env.GEMINI_MODEL})*`,
+                `*Reviewed by Gemini (${process.env.GEMINI_SERVED})*`,
               ].join('\n'),
               event: 'COMMENT',
             });
