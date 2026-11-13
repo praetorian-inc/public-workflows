@@ -16,6 +16,7 @@ on:
       - 'test/gemini-cli-pin.test.sh'
       - 'test/check-gemini-skill-trace.test.sh'
       - 'test/classify-gemini-failure.test.sh'
+      - 'test/read-gemini-served-models.test.sh'
       - 'test/classify-claude-failure.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
@@ -35,6 +36,7 @@ on:
       - 'test/gemini-cli-pin.test.sh'
       - 'test/check-gemini-skill-trace.test.sh'
       - 'test/classify-gemini-failure.test.sh'
+      - 'test/read-gemini-served-models.test.sh'
       - 'test/classify-claude-failure.test.sh'
       - 'test/gemini-graphify-tools.test.sh'
       - 'test/grok-cli-pin.test.sh'
@@ -85,6 +87,9 @@ jobs:
 
       - name: Gemini failure classifier
         run: bash test/classify-gemini-failure.test.sh
+
+      - name: Gemini served-model reader
+        run: bash test/read-gemini-served-models.test.sh
 
       - name: Claude failure classifier
         run: bash test/classify-claude-failure.test.sh

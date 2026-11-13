@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 #
-# Contract checks for Gemini CLI pin + ENG-6428 turn cap (ENG-7656 / ENG-6428).
+# Contract checks for the Gemini reviewer: CLI pin, model and thinking level,
+# flat turn cap and wall-clock ceiling (LAB-7944; earlier ENG-7656 / ENG-6428),
+# plus the deny policy, failure classification and prompt rules on that step.
 #
 set -uo pipefail
 
@@ -11,43 +13,94 @@ PASS=0
 FAIL=0
 ok()  { printf '  PASS  %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL  %s\n' "$1"; printf '        %s\n' "$2"; FAIL=$((FAIL + 1)); }
+# Only a clean miss (grep exit 1) counts as absent; an unreadable file does not.
+absent() { grep -F -q -- "$1" "$WF"; [ "$?" -eq 1 ]; }
 
 echo "gemini-cli-pin.test.sh"
 
-if grep -F -q 'gemini_cli_version: "0.58.0"' "$WF" || grep -F -q '@google/gemini-cli@0.58.0' "$WF"; then
-  ok "CLI pin is 0.58.0"
+pins="$(grep -o -E '@google/gemini-cli@[^[:space:]"]+' "$WF" | sort -u)"
+if [ "$pins" = "@google/gemini-cli@0.68.0" ]; then
+  ok "every CLI install pins 0.68.0"
 else
-  bad "CLI pin is 0.58.0" "$(grep -n -E 'gemini_cli_version|gemini-cli@' "$WF" || true)"
+  bad "every CLI install pins 0.68.0" "pins: $(printf '%s' "${pins:-none}" | tr '\n' ' ')"
 fi
 
-if grep -F -q 'gemini_cli_version: "0.45.2"' "$WF"; then
-  bad "no leftover 0.45.2 pin" "0.45.2 still present"
+# The workflow_call `model:` input, up to the next input.
+MODEL_INPUT="$(awk '/^      model:[[:space:]]*$/ { on = 1; next } on && /^      [A-Za-z0-9_-]+:[[:space:]]*$/ { exit } on { print }' "$WF")"
+if printf '%s\n' "$MODEL_INPUT" | grep -q -E '^[[:space:]]+default: "gemini-4-carbon"[[:space:]]*$' \
+  && printf '%s\n' "$MODEL_INPUT" | grep -q -E '^[[:space:]]+description: .*gemini-4-carbon'; then
+  ok "model input defaults to gemini-4-carbon and says so"
 else
-  ok "no leftover 0.45.2 pin"
+  bad "model input defaults to gemini-4-carbon and says so" "$MODEL_INPUT"
 fi
 
-if grep -F -q 'id: turns' "$WF"; then
-  ok "size-aware turns step"
+SETTINGS="$(awk -v start="cat > .gemini/settings.json <<'SETTINGS_EOF'" '
+  index($0, start) { on = 1; next }
+  on && /^[[:space:]]*SETTINGS_EOF$/ { exit }
+  on { print }
+' "$WF")"
+# One parse of the heredoc. Each line is <key>=<JSON value>.
+probe="$(printf '%s\n' "$SETTINGS" | python3 -I -c '
+import json, sys
+try:
+    s = json.load(sys.stdin)
+except ValueError:
+    print("json=invalid")
+    sys.exit(0)
+def get(d, *keys):
+    for k in keys:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d
+overrides = get(s, "modelConfigs", "customOverrides")
+levels = [get(o, "modelConfig", "generateContentConfig", "thinkingConfig", "thinkingLevel")
+          for o in (overrides if isinstance(overrides, list) else [])
+          if isinstance(o, dict) and o.get("match") == {"model": "gemini-4-carbon"}]
+print("json=ok")
+print("carbon_levels=" + json.dumps(levels))
+print("turns=" + json.dumps(get(s, "model", "maxSessionTurns")))
+')"
+# shellcheck disable=SC2016  # literal ${{ is the Actions expression opener
+if [ -n "$SETTINGS" ] && ! printf '%s\n' "$SETTINGS" | grep -F -q '${{' \
+  && printf '%s\n' "$probe" | grep -q -x -F 'json=ok'; then
+  ok "settings.json heredoc is literal JSON (no \${{ }})"
 else
-  bad "size-aware turns step" "no id: turns"
+  bad "settings.json heredoc is literal JSON (no \${{ }})" "probe=${probe:-none}"
 fi
 
-if grep -F -q 't=$((50 + n * 3))' "$WF"; then
-  ok "turn formula 50 + 3*n"
+if printf '%s\n' "$probe" | grep -q -x -F 'carbon_levels=["HIGH"]'; then
+  ok "gemini-4-carbon override sets thinkingLevel HIGH"
 else
-  bad "turn formula 50 + 3*n" "formula missing"
+  bad "gemini-4-carbon override sets thinkingLevel HIGH" "probe=${probe:-none}"
 fi
 
-if grep -F -q 'if [ "${t}" -gt 80 ]' "$WF"; then
-  ok "turn cap 80"
+if printf '%s\n' "$probe" | grep -q -x -F 'turns=80'; then
+  ok "maxSessionTurns is a flat 80"
 else
-  bad "turn cap 80" "cap missing"
+  bad "maxSessionTurns is a flat 80" "probe=${probe:-none}"
 fi
 
-if grep -F -q 'maxSessionTurns": ${{ steps.turns.outputs.n }}' "$WF"; then
-  ok "maxSessionTurns from turns output"
+for gone in 'id: turns' 'steps.turns' '50 + n * 3'; do
+  if absent "$gone"; then
+    ok "size-aware turn step removed: no '$gone'"
+  else
+    bad "size-aware turn step removed: no '$gone'" "$(grep -n -F -- "$gone" "$WF")"
+  fi
+done
+
+# Job-scoped: other jobs set their own timeout-minutes. TIMEOUT is the job's
+# timeout-minutes line with the comment lines directly above it.
+TIMEOUT="$(awk '/^  gemini-review:[[:space:]]*$/ { on = 1; next } on && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { exit } on { print }' "$WF" \
+  | awk '/^    #/ { note = note $0 "\n"; next } /^    timeout-minutes:/ { printf "%s%s\n", note, $0; exit } { note = "" }')"
+if printf '%s\n' "$TIMEOUT" | grep -q -E '^    timeout-minutes: 30[[:space:]]*$'; then
+  ok "gemini-review timeout is 30 minutes"
 else
-  bad "maxSessionTurns from turns output" "still a constant?"
+  bad "gemini-review timeout is 30 minutes" "${TIMEOUT:-no job-level timeout-minutes}"
+fi
+if printf '%s\n' "$TIMEOUT" | grep '^    #' | grep -q -E '(^|[^0-9])30 min' \
+  && printf '%s\n' "$TIMEOUT" | grep '^    #' | grep -q -E '(^|[^0-9])80 (session )?turns'; then
+  ok "timeout comment states 30 minutes and 80 turns"
+else
+  bad "timeout comment states 30 minutes and 80 turns" "${TIMEOUT:-no comment}"
 fi
 
 if grep -F -q 'ci-review-deny.toml' "$WF"; then
