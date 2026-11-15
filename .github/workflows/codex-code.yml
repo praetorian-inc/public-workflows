@@ -39,7 +39,7 @@ on:
           - A finding that meets none of the Critical Issues, Security or Design definitions above goes under Suggestions.
           - Tests: under Suggestions, mention only missing tests for behaviour this change adds or changes, and tests much larger than the change they cover.
           - SKIP style nits, formatting preferences, and cosmetic suggestions.
-          - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review."
+          - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review." Keep any Suggestions below it.
 
       model:
         description: "Codex review model ID. Default gpt-5.6-sol — the flagship, Codex-optimized 5.6 tier (validated accessible in CI). Override per-caller only for special cases: gpt-5.6-luna (fast/cheap, cost-sensitive repos) or gpt-5.6-terra (balanced cost/quality). Note: there is no plain 'gpt-5.6' — the 5.6 generation ships only as the luna/terra/sol tiers."

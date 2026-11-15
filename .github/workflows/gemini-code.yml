@@ -79,7 +79,7 @@ on:
           - A finding that meets none of the Critical Issues, Security or Design definitions above goes under Suggestions.
           - Tests: under Suggestions, mention only missing tests for behaviour this change adds or changes, and tests much larger than the change they cover.
           - SKIP style nits, formatting preferences, and cosmetic suggestions.
-          - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review."
+          - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review." Keep any Suggestions below it.
 
       model:
         description: "Gemini model ID. Default: gemini-4-carbon, run at thinking level HIGH (the settings override matches that model ID only)."
