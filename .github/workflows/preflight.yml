@@ -50,7 +50,7 @@ on:
 
     outputs:
       has_code:
-        description: "Whether the review should run ('true' or 'false'). 'false' on a docs-only PR, and on an @mention re-review past the round cap."
+        description: "Whether the review should run ('true' or 'false'). 'false' on a docs-only PR, and on an @mention re-review from an account without write access or past the round cap."
         value: ${{ jobs.check.outputs.has_code }}
 
 permissions:
@@ -108,20 +108,44 @@ jobs:
           MENTION_KEYWORD: ${{ inputs.mention_keyword }}
           FORCE_REVIEW_REGEX: ${{ inputs.force_review_regex }}
           COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENTER: ${{ github.event.comment.user.login }}
           THREAD_ID: ${{ github.event.comment.in_reply_to_id || github.event.comment.id }}
           EXTRA_ROUND: ${{ contains(github.event.pull_request.labels.*.name, 'extra-review-round') }}
         run: |
           set -eu
 
           # @mention on a review comment forces the reviewer to run regardless
-          # of file types, up to the round cap. The job's own if: already
-          # required contains(comment.body, mention_keyword), so by the time we
-          # reach here on a review_comment event, the reviewer explicitly asked.
+          # of file types, for a commenter with write access and up to the
+          # round cap. The job's own if: already required
+          # contains(comment.body, mention_keyword), so by the time we reach
+          # here on a review_comment event, the reviewer explicitly asked.
           if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
+            # Write access: a re-review runs only when the commenter can write
+            # to the repo, the same bar claude-code-action applies to @claude.
+            # On a public repo anyone can post a review comment. The permission
+            # endpoint decides, not author_association (see the gate note
+            # above). If the commenter's access cannot be read, the review runs.
+            permission_of() { # $1 login -> admin, write, read or none
+              gh api "repos/$REPO/collaborators/$1/permission" --jq .permission
+            }
+            COMMENTER_PERM=$(permission_of "$COMMENTER") || COMMENTER_PERM=unreadable
+            case "$COMMENTER_PERM" in
+              admin|write) ;;
+              unreadable)
+                echo "::warning::Could not read $COMMENTER's access to the repo; running the review." ;;
+              *)
+                echo "has_code=false" >> "$GITHUB_OUTPUT"
+                echo "⊘ $COMMENTER has $COMMENTER_PERM access, not write — $REVIEWER_NAME re-review skipped."
+                exit 0 ;;
+            esac
+
             # Round cap: at most MAX_REREVIEWS @mention re-reviews per reviewer
             # per PR; the review on open does not count. Every earlier review
             # comment that would have started this reviewer counts: it contains
-            # the keyword (contains() above ignores case) and no bot wrote it.
+            # the keyword (contains() above ignores case), no bot wrote it, and
+            # its author can write to the repo. Authors' access is looked up
+            # only once the other rules already reach the cap, once per author;
+            # an author whose access cannot be read does not count.
             # "Earlier" is a lower comment id, so the comment that started this
             # run, and any posted after it, do not count. It counts requests,
             # not reviews that finished: a request replaced while waiting, or
@@ -133,18 +157,36 @@ jobs:
             MAX_REREVIEWS=3
             if [ "$EXTRA_ROUND" != "true" ]; then
               PRIOR=0
+              AUTHORS=""
               if ! COMMENTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate); then
                 echo "::warning::Could not list the PR's review comments; running without the round cap."
-              elif ! PRIOR=$(printf '%s' "$COMMENTS" |
-                jq -s --arg kw "$MENTION_KEYWORD" --argjson cur "$COMMENT_ID" '
+              elif ! AUTHORS=$(printf '%s' "$COMMENTS" |
+                jq -rs --arg kw "$MENTION_KEYWORD" --argjson cur "$COMMENT_ID" '
                   [ .[][]
                     | select(.id < $cur)
                     | select(.user.login // "" | ascii_downcase
                         | (contains("coderabbit") or contains("devin") or contains("[bot]")) | not)
-                    | select(.body // "" | ascii_downcase | contains($kw | ascii_downcase)) ]
-                  | length'); then
+                    | select(.body // "" | ascii_downcase | contains($kw | ascii_downcase))
+                    | .user.login // "" ]
+                  | group_by(.) | .[] | "\(length) \(.[0])"'); then
                 echo "::warning::Could not read the PR's review comments; running without the round cap."
-                PRIOR=0
+                AUTHORS=""
+              fi
+              # AUTHORS holds one "<requests> <login>" line per author.
+              if [ "$(printf '%s\n' "$AUTHORS" | awk 'NF { n += $1 } END { print n + 0 }')" -ge "$MAX_REREVIEWS" ]; then
+                while read -r N LOGIN; do
+                  [ -n "$LOGIN" ] || continue
+                  if [ "$LOGIN" = "$COMMENTER" ]; then
+                    PERM=$COMMENTER_PERM
+                  else
+                    PERM=$(permission_of "$LOGIN") || PERM=unreadable
+                  fi
+                  case "$PERM" in
+                    admin|write) PRIOR=$((PRIOR + N)) ;;
+                    unreadable)
+                      echo "::warning::Could not read $LOGIN's access to the repo; their requests do not count toward the cap." ;;
+                  esac
+                done <<< "$AUTHORS"
               fi
               if [ "$PRIOR" -ge "$MAX_REREVIEWS" ]; then
                 echo "has_code=false" >> "$GITHUB_OUTPUT"
