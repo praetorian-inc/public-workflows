@@ -467,8 +467,7 @@ jobs:
       # the base branch before the CLI starts, so a slash command or the Skill
       # tool cannot load them. The build step inlines each SKILL.md into the
       # prompt, which is the load. Skill is not in allowedTools.
-      # The allowlist is vendored in this repo next to the stage script; its
-      # allowlist/SOURCE records the review-bot-skills commit it was copied from.
+      # The allowlist is vendored in this repo next to the stage script and edited there.
       # No token, no fetch, no App secrets. Skill bodies will be in a
       # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized

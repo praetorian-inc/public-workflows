@@ -7,7 +7,7 @@ name: Gemini PR Assistant (Callable)
 # the previous single-shot google-genai API call. Like the Claude and Codex reviewers,
 # Gemini now runs a tool loop and can read past the diff — opening the surrounding code
 # (definitions, callers, sibling modules) for real context. It also loads Praetorian's
-# review-bot-skills allowlist (root-level skill dirs vendored in this repo, staged
+# curated review-skill allowlist (root-level skill dirs vendored in this repo, staged
 # into `.gemini/skills/`).
 #
 # Security posture (hardcoded — callers cannot widen the attack surface):
@@ -401,12 +401,12 @@ jobs:
       #   - .geminiignore (recursive): would silently blind glob/list_directory.
       #   - .npmrc/.yarnrc* : run-gemini-cli installs the CLI with npm from this cwd; a
       #     PR-supplied registry override is a supply-chain vector.
-      # This runs BEFORE the review-bot-skills stage (which copies the vendored allowlist
+      # This runs BEFORE the review-skills stage (which copies the vendored allowlist
       # into .gemini/skills), so the sweep is UNCONDITIONAL — there
       # is no carve-out. If staging is skipped (any stage failure)
       # nothing trusted is staged and Gemini reviews with no agent config at all — never the
       # attacker's. Settings + skills then come ONLY from the action input and, when
-      # staged, the SHA-pinned review-bot-skills allowlist.
+      # staged, the vendored review-skill allowlist.
       # find flags:
       #   - no -type f, so a *symlinked* GEMINI.md/AGENTS.md is removed (not skipped);
       #     gemini-cli would otherwise resolve the link. -iname covers case variants.
@@ -460,8 +460,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       # Curated review skills, loaded natively by Gemini CLI from `.gemini/skills/`.
-      # The allowlist is vendored in this repo next to the stage script; its
-      # allowlist/SOURCE records the review-bot-skills commit it was copied from.
+      # The allowlist is vendored in this repo next to the stage script and edited there.
       # No token, no fetch, no App secrets. Skill bodies will be in a
       # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized
