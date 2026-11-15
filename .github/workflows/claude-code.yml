@@ -38,10 +38,10 @@ on:
 
           Constraints:
           - Keep total under 10 bullets.
-          - Leave out any finding that names no real input and no existing code.
+          - Leave out any finding that meets none of the four section definitions above.
           - SKIP style nits, formatting preferences, and cosmetic suggestions.
           - Do NOT read previous PR comments.
-          - If Critical issues, Security and Design are all empty, post: "No critical issues — LGTM pending human review."
+          - If Critical issues, Security and Design are all empty, post: "No critical issues — LGTM pending human review." Keep any Test coverage note below it.
 
       require_tests:
         description: "Whether to enforce test requirements"

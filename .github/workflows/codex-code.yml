@@ -36,7 +36,7 @@ on:
 
           Constraints:
           - Keep total under 10 bullets.
-          - A finding that names no real input and no existing code goes under Suggestions, never under Critical Issues, Security or Design.
+          - A finding that meets none of the Critical Issues, Security or Design definitions above goes under Suggestions.
           - Tests: under Suggestions, mention only missing tests for behaviour this change adds or changes, and tests much larger than the change they cover.
           - SKIP style nits, formatting preferences, and cosmetic suggestions.
           - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review."
