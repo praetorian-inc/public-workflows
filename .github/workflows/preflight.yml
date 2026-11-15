@@ -121,10 +121,12 @@ jobs:
           # here on a review_comment event, the reviewer explicitly asked.
           if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
             # Write access: a re-review runs only when the commenter can write
-            # to the repo, the same bar claude-code-action applies to @claude.
-            # On a public repo anyone can post a review comment. The permission
-            # endpoint decides, not author_association (see the gate note
-            # above). If the commenter's access cannot be read, the review runs.
+            # to the repo (the endpoint reports maintain as write), the same bar
+            # claude-code-action applies to @claude. On a public repo anyone can
+            # post a review comment. The permission endpoint decides, not
+            # author_association (see the gate note above). Like the action,
+            # this fails closed: if the commenter's access cannot be read, the
+            # review is skipped.
             permission_of() { # $1 login -> admin, write, read or none
               gh api "repos/$REPO/collaborators/$1/permission" --jq .permission
             }
@@ -132,7 +134,9 @@ jobs:
             case "$COMMENTER_PERM" in
               admin|write) ;;
               unreadable)
-                echo "::warning::Could not read $COMMENTER's access to the repo; running the review." ;;
+                echo "has_code=false" >> "$GITHUB_OUTPUT"
+                echo "::warning::Could not read $COMMENTER's access to the repo; $REVIEWER_NAME re-review skipped. Post the request again to retry."
+                exit 0 ;;
               *)
                 echo "has_code=false" >> "$GITHUB_OUTPUT"
                 echo "⊘ $COMMENTER has $COMMENTER_PERM access, not write — $REVIEWER_NAME re-review skipped."
@@ -148,10 +152,11 @@ jobs:
             # an author whose access cannot be read does not count.
             # "Earlier" is a lower comment id, so the comment that started this
             # run, and any posted after it, do not count. It counts requests,
-            # not reviews that finished: a request replaced while waiting, or
-            # made while the PR was a draft, still counts. While the PR carries
-            # the extra-review-round label there is no cap. Only a person
-            # should add that label, never an agent.
+            # not reviews that finished: a request replaced while waiting, made
+            # while the PR was a draft, or skipped because its author's access
+            # could not be read at the time still counts. While the PR carries
+            # the extra-review-round label there is no cap. Only a person should
+            # add that label, never an agent.
             # If the comments cannot be listed or read, the review runs: the
             # cap fails open.
             MAX_REREVIEWS=3

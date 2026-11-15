@@ -6,8 +6,8 @@
 # On a pull_request_review_comment event the step first looks up the
 # commenter's (COMMENTER) repository permission: unless it is admin or write the
 # review is skipped (has_code=false, no reply), with or without the
-# extra-review-round label; a lookup that fails warns and lets the request
-# through. It then lists the PR's review comments and counts the earlier ones
+# extra-review-round label; a lookup that fails also skips the review, with a
+# warning. It then lists the PR's review comments and counts the earlier ones
 # that would have started this reviewer: the body contains the mention keyword
 # (any case), the author is not a bot (login containing coderabbit, devin or
 # [bot]), its id is lower than the comment that started this run (it came
@@ -415,8 +415,8 @@ perm_case "case14 read commenter"                        false  "octocat=read"  
 perm_case "case14 none commenter"                        false  "octocat=none"  false    n     -       alice bob
 perm_case "case14 read commenter + label"                true   "octocat=read"  false    n     -       alice bob
 perm_case "case14 read commenter, 3 earlier: no notice"  false  "octocat=read"  false    n     -       alice bob carol
-perm_case "case14 commenter lookup fails, 2 earlier"     false  "octocat=fail"  true     n     y       alice bob
-perm_case "case14 commenter lookup fails, 3 earlier"     false  "octocat=fail"  false    y     y       alice bob carol
+perm_case "case14 commenter lookup fails, 2 earlier"     false  "octocat=fail"  false    n     y       alice bob
+perm_case "case14 commenter lookup fails, 3 earlier"     false  "octocat=fail"  false    n     y       alice bob carol
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 15 — only earlier mentions by admin/write authors count"
@@ -445,8 +445,8 @@ assert_eq "case16 at the cap: the commenter and each earlier author, once each" 
 #         label                                          EXTRA  GH_PERMS        has_code reply warning earlier mentions by
 perm_case "case16 commenter can write: 2 earlier count"   false  ""              false    y     n       octocat octocat alice
 assert_eq "case16 commenter can write: looked up once" "alice octocat" "$(perms | sort | paste -sd ' ' -)"
-perm_case "case16 commenter lookup fails: 2 don't count"  false  "octocat=fail"  true     n     y       octocat octocat alice bob
-assert_eq "case16 commenter lookup fails: looked up once" "alice bob octocat" "$(perms | sort | paste -sd ' ' -)"
+perm_case "case16 commenter lookup fails: skipped first"  false  "octocat=fail"  false    n     y       octocat octocat alice bob
+assert_eq "case16 commenter lookup fails: no author lookups" "octocat" "$(perms | sort | paste -sd ' ' -)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 17 — a pull_request event looks up no permission"
