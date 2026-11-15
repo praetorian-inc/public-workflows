@@ -3,20 +3,28 @@
 # Tests for the @mention re-review round cap in .github/workflows/preflight.yml,
 # step "Check for code changes in the PR" (id: check).
 #
-# On a pull_request_review_comment event the step lists the PR's review
-# comments and counts the earlier ones that would have started this reviewer:
-# the body contains the mention keyword (any case), the author is not a bot
-# (login containing coderabbit, devin or [bot]), and its id is lower than the
-# comment that started this run (it came before it). At MAX_REREVIEWS or more,
-# and without the extra-review-round label, it writes has_code=false and
-# replies on the thread; otherwise has_code=true. A listing that fails or
-# cannot be read fails open; a failed reply does not fail the step.
+# On a pull_request_review_comment event the step first looks up the
+# commenter's (COMMENTER) repository permission: unless it is admin or write the
+# review is skipped (has_code=false, no reply), with or without the
+# extra-review-round label; a lookup that fails also skips the review, with a
+# warning. It then lists the PR's review comments and counts the earlier ones
+# that would have started this reviewer: the body contains the mention keyword
+# (any case), the author is not a bot (login containing coderabbit, devin or
+# [bot]), its id is lower than the comment that started this run (it came
+# before it), and its author has admin or write permission. Authors are looked
+# up only once that unfiltered count reaches MAX_REREVIEWS, each at most once;
+# an author whose lookup fails is not counted, with a warning. At
+# MAX_REREVIEWS or more, and without the extra-review-round label, it writes
+# has_code=false and replies on the thread; otherwise has_code=true. A listing
+# that fails or cannot be read fails open; a failed reply does not fail the
+# step. A pull_request event looks up no permission.
 #
 # The step's real `run:` block is EXTRACTED from the workflow YAML at run time,
 # never mirrored, and run the way GitHub runs a step with no shell: key
 # (`bash -e`, no pipefail) with exactly the variables its env: block declares,
-# against a stub `gh` first on PATH that serves a canned comment listing and
-# records every call. Only the mention path is exercised.
+# against a stub `gh` first on PATH that serves a canned comment listing and a
+# per-case permission fixture, and records every call. The mention path is
+# exercised, plus one pull_request run that must look up no permission.
 #
 # Requires: bash (3.2+), python3 with PyYAML, jq.
 #
@@ -129,6 +137,7 @@ step_env() { # step_env <name> — this suite's value for one env: variable
     COMMENT_ID)         echo "$CUR" ;;
     THREAD_ID)          echo "$CUR" ;; # a new thread: the comment is its own root
     EXTRA_ROUND)        echo false ;;  # no extra-review-round label
+    COMMENTER)          echo octocat ;; # author of the comment that started the run (cur)
     *)                  return 1 ;;
   esac
 }
@@ -141,21 +150,29 @@ done < "$EXTRACT/env.txt"
 assert_eq "suite gives every env: variable of the step a value" "" "${unset_names# }"
 
 # ── Stub gh ──────────────────────────────────────────────────────────────────
-# Serves the two calls the mention path makes. Records one line per call in
-# $GH_LOG ("GET <path> paginate=<y|n>" or "<METHOD> <path>") and saves each
-# write's body field as $GH_LOG.<n>.body. A GET serves $GH_PAGES/page-<k>.json
-# back to back, as `gh api --paginate` does without --jq; without --paginate
-# only page 1. GH_FAIL_LIST=1 fails the GET, GH_FAIL_POST=1 fails the write.
+# Serves the calls the step makes. Records one line per call in $GH_LOG
+# ("GET <path> paginate=<y|n>" or "<METHOD> <path>") and saves each write's
+# body field as $GH_LOG.<n>.body.
+# - GET repos/<o>/<r>/collaborators/<login>/permission answers from the
+#   per-case fixture GH_PERMS ("login=perm ...", perm admin|write|read|none or
+#   fail). A login it does not name has write, so by default the commenter and
+#   every earlier author can write. "fail", or an empty login, exits 1 with the
+#   error body on stdout, as gh does on an HTTP error even with --jq.
+# - Any other GET serves $GH_PAGES/page-<k>.json back to back, as
+#   `gh api --paginate` does; without --paginate only page 1.
+# --jq is applied per page, as gh does. GH_FAIL_LIST=1 fails that listing GET
+# (not a permission lookup), GH_FAIL_POST=1 fails the write.
 cat > "$WORKDIR/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 set -u
 [ "${1:-}" = "api" ] || { echo "stub gh: unsupported: $*" >&2; exit 64; }
 shift
-method=""; path=""; paginate=n; fields=0; body=""
+method=""; path=""; paginate=n; fields=0; body=""; jqf=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --method|-X) method="$2"; shift 2 ;;
     --paginate)  paginate=y; shift ;;
+    --jq|-q)     jqf="$2"; shift 2 ;;
     -f|-F|--field|--raw-field)
       fields=$((fields + 1))
       case "$2" in body=*) body="${2#body=}" ;; esac
@@ -168,14 +185,30 @@ done
 if [ -z "$method" ]; then
   if [ "$fields" -gt 0 ]; then method=POST; else method=GET; fi
 fi
+emit() { if [ -n "$jqf" ]; then jq -r "$jqf" || exit 1; else cat; fi; }
 if [ "$method" = GET ]; then
   echo "GET $path paginate=$paginate" >> "$GH_LOG"
+  case "$path" in
+    repos/*/collaborators/*/permission)
+      login="${path#repos/*/collaborators/}"; login="${login%/permission}"
+      perm=write
+      set -f
+      for kv in ${GH_PERMS:-}; do
+        if [ "${kv%%=*}" = "$login" ]; then perm="${kv#*=}"; fi
+      done
+      set +f
+      if [ -z "$login" ] || [ "$perm" = fail ]; then
+        echo '{"message":"Not Found","status":"404"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1
+      fi
+      jq -cn --arg p "$perm" --arg l "$login" '{permission: $p, role_name: $p, user: {login: $l}}' | emit || exit 1
+      exit 0 ;;
+  esac
   if [ "${GH_FAIL_LIST:-0}" = 1 ]; then
     echo '{"message":"Server Error"}'; echo "gh: Server Error (HTTP 500)" >&2; exit 1
   fi
   for p in "$GH_PAGES"/page-*.json; do
     [ -f "$p" ] || continue
-    cat "$p"
+    emit < "$p"
     [ "$paginate" = y ] || break
   done
   exit 0
@@ -217,7 +250,11 @@ run_check() { # run_check [NAME=value ...] — the step's env:, then these overr
   RC=$?
 }
 
-gets()   { grep -E '^GET ' "$GHLOG" || true; }
+lists()  { awk '/^GET / && !/\/collaborators\/[^ ]*\/permission /' "$GHLOG"; } # GETs but permission lookups
+perms()  { # one line per permission lookup: the login looked up
+  awk '/^GET [^ ]*\/collaborators\/[^ ]*\/permission / {
+    sub(/^GET [^ ]*\/collaborators\//, ""); sub(/\/permission .*$/, ""); print }' "$GHLOG"
+}
 posts()  { grep -vE '^GET ' "$GHLOG" || true; }
 warned() { grep -q '^::warning::' "$LOG"; }
 reply_body() { # body field of the first write
@@ -245,6 +282,28 @@ TWO="$(c 101 alice '@gemini review this'),$(c 102 bob '@gemini again please')"
 THREE="$TWO,$(c 103 carol 'ping @gemini')"
 PLAIN="$(c 104 dave 'nit: rename this variable'),$(c 105 erin 'LGTM once CI is green')"
 REPLY_ROOT="repos/o/r/pulls/7/comments/$CUR/replies"
+
+mentions() { # mentions <login>... — one earlier @gemini request per login, ids 101, 102, ...
+  local id=101 l out=""
+  for l in "$@"; do out="$out${out:+,}$(c "$id" "$l" "@gemini round $id")"; id=$((id + 1)); done
+  printf '%s' "$out"
+}
+
+# perm_case <label> <EXTRA_ROUND> <GH_PERMS> <has_code> <reply y|n> <warning y|n|-> <earlier mention author>...
+# One row of a permission table: the earlier mentions are by the given logins,
+# the commenter is octocat. reply y: one reply on the thread root, n: none.
+# warning y: a ::warning is emitted, n: none is, -: not checked.
+perm_case() {
+  local label="$1" extra="$2" fixture="$3" hc="$4" reply="$5" warn="$6"
+  shift 6
+  pages "[$(mentions "$@"),$(cur)]"
+  run_check EXTRA_ROUND="$extra" GH_PERMS="$fixture"
+  if [ "$reply" = y ]; then expect "$label" "$hc" "$REPLY_ROOT"; else expect "$label" "$hc"; fi
+  case "$warn" in
+    y) if warned; then ok "$label: emits a ::warning"; else bad "$label: emits a ::warning" "::warning::..." "$(cat "$LOG")"; fi ;;
+    n) if warned; then bad "$label: emits no ::warning" "none" "$(grep '^::warning::' "$LOG")"; else ok "$label: emits no ::warning"; fi ;;
+  esac
+}
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 1 — 2 earlier mentions (and comments without one): runs"
@@ -274,7 +333,7 @@ section "Case 4 — 3 earlier mentions + extra-review-round label: runs, no list
 pages "[$THREE,$(cur)]"
 run_check EXTRA_ROUND=true
 expect "case4" true
-assert_eq "case4 comments are not listed" "" "$(gets)"
+assert_eq "case4 comments are not listed" "" "$(lists)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 5 — mentions by bot logins do not count (3 by one bot + 2 human)"
@@ -301,7 +360,7 @@ section "Case 8 — the listing spans two pages: both are counted"
 pages "[$TWO]" "[$(c 103 carol 'ping @gemini'),$(cur)]"
 run_check
 expect "case8" false "$REPLY_ROOT"
-assert_eq "case8 lists the PR's review comments, paginated" "GET repos/o/r/pulls/7/comments paginate=y" "$(gets)"
+assert_eq "case8 lists the PR's review comments, paginated" "GET repos/o/r/pulls/7/comments paginate=y" "$(lists)"
 
 # ═════════════════════════════════════════════════════════════════════════════
 section "Case 9 — the listing fails: runs (fails open) with a warning"
@@ -345,6 +404,56 @@ expect "case13" true
 if warned; then ok "case13 emits a ::warning"; else bad "case13 emits a ::warning" "::warning::..." "$(cat "$LOG")"; fi
 # The fallback must set a usable count, not reach has_code=true through a failed [ test.
 assert_eq "case13 step log has no shell error" "" "$(grep -E 'check\.sh: line [0-9]+: ' "$LOG" || true)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 14 — the commenter needs admin or write; the label lifts only the cap"
+# Under the cap (2 earlier mentions) only the gate can skip, so a skip here is
+# the gate's; at the cap (3) the gate must win before the cap posts its notice.
+#         label                                          EXTRA  GH_PERMS        has_code reply warning earlier mentions by
+perm_case "case14 admin commenter"                       false  "octocat=admin" true     n     n       alice bob
+perm_case "case14 read commenter"                        false  "octocat=read"  false    n     -       alice bob
+perm_case "case14 none commenter"                        false  "octocat=none"  false    n     -       alice bob
+perm_case "case14 read commenter + label"                true   "octocat=read"  false    n     -       alice bob
+perm_case "case14 read commenter, 3 earlier: no notice"  false  "octocat=read"  false    n     -       alice bob carol
+perm_case "case14 commenter lookup fails, 2 earlier"     false  "octocat=fail"  false    n     y       alice bob
+perm_case "case14 commenter lookup fails, 3 earlier"     false  "octocat=fail"  false    n     y       alice bob carol
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 15 — only earlier mentions by admin/write authors count"
+#         label                                          EXTRA  GH_PERMS                             has_code reply warning earlier mentions by
+perm_case "case15 3 by writers (admin, write, write)"    false  "alice=admin bob=write carol=write"  false    y     n       alice bob carol
+perm_case "case15 3 by a read account"                   false  "rita=read"                          true     n     n       rita rita rita
+perm_case "case15 2 writers + 1 read"                    false  "carol=read"                         true     n     n       alice bob carol
+perm_case "case15 2 writers + 1 none"                    false  "carol=none"                         true     n     n       alice bob carol
+perm_case "case15 2 writers + 1 lookup fails"            false  "carol=fail"                         true     n     y       alice bob carol
+perm_case "case15 3 writers + 1 lookup fails"            false  "dan=fail"                           false    y     y       alice bob carol dan
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 16 — lookups: only the commenter's under the cap; at it, each author once, the commenter's result reused"
+pages "[$TWO,$PLAIN,$(cur)]"
+run_check
+expect "case16 under the cap" true
+assert_eq "case16 under the cap: one lookup, the commenter's" "octocat" "$(perms | paste -sd ' ' -)"
+# 4 counted mentions by 2 authors, plus authors the unfiltered count never
+# reaches: no keyword (dave, erin), a bot, and a mention after this one.
+pages "[$(c 111 alice '@gemini'),$(c 112 bob '@gemini again'),$(c 113 alice 'ping @gemini'),$(c 114 bob '@gemini once more'),$PLAIN,$(c 116 'github-actions[bot]' '@gemini summary'),$(cur),$(c 9002 frank '@gemini later')]"
+run_check
+expect "case16 at the cap" false "$REPLY_ROOT"
+assert_eq "case16 at the cap: the commenter and each earlier author, once each" "alice bob octocat" "$(perms | sort | paste -sd ' ' -)"
+# The commenter (octocat) made earlier requests too: their one lookup decides
+# both the gate and whether those requests count.
+#         label                                          EXTRA  GH_PERMS        has_code reply warning earlier mentions by
+perm_case "case16 commenter can write: 2 earlier count"   false  ""              false    y     n       octocat octocat alice
+assert_eq "case16 commenter can write: looked up once" "alice octocat" "$(perms | sort | paste -sd ' ' -)"
+perm_case "case16 commenter lookup fails: skipped first"  false  "octocat=fail"  false    n     y       octocat octocat alice bob
+assert_eq "case16 commenter lookup fails: no author lookups" "octocat" "$(perms | sort | paste -sd ' ' -)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 17 — a pull_request event looks up no permission"
+pages '[{"filename":"src/main.go"}]'
+run_check EVENT_NAME=pull_request COMMENTER= COMMENT_ID= THREAD_ID=
+expect "case17" true
+assert_eq "case17 no permission lookup" "0" "$(perms | wc -l | tr -d ' ')"
 
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n──────────────────────────────────────────────\n'
