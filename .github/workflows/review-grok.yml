@@ -6,10 +6,6 @@ on:
   pull_request_review_comment:
     types: [created]
 
-concurrency:
-  group: grok-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 permissions:
   contents: read
 

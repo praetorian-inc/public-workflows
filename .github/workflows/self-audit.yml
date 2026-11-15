@@ -25,6 +25,7 @@ on:
       - 'test/check-grok-skill-trace.test.sh'
       - 'test/check-graphify-use.test.sh'
       - 'test/agents-md-drift-comment.test.sh'
+      - 'test/review-round-cap.test.sh'
   push:
     branches: [main]
     paths:
@@ -45,6 +46,7 @@ on:
       - 'test/check-grok-skill-trace.test.sh'
       - 'test/check-graphify-use.test.sh'
       - 'test/agents-md-drift-comment.test.sh'
+      - 'test/review-round-cap.test.sh'
 
 permissions:
   contents: read
@@ -125,6 +127,9 @@ jobs:
 
       - name: Unit-test instruction-file drift comment path (ENG-5663) and Claude review --settings pin
         run: bash test/agents-md-drift-comment.test.sh
+
+      - name: Unit-test the reviewers' re-review cap in preflight
+        run: bash test/review-round-cap.test.sh
 
       - name: Install zizmor
         env:
