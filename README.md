@@ -296,7 +296,7 @@ Runs Claude as a PR reviewer. **All security posture is hardcoded in the reusabl
 
 > ⚠️ **Do NOT enable `ACTIONS_STEP_DEBUG=true` on repos that call this reusable.** The upstream `claude-code-action` auto-enables `show_full_output` under debug logging, which can expose PR content, tool outputs, and the contents of the internal `execution_file` into Actions logs. On public repos those logs are world-readable; on private repos they're readable by anyone with repo read access. If you need to debug a Claude run, do it locally against a test repo, not by flipping debug on a production caller.
 
-**Default review prompt** produces a 3-section summary: `### Critical issues` / `### Security` / `### Test coverage`. Explicitly defers style nits to CodeRabbit + Codex. Callers can override via the `prompt` input.
+**Default review prompt** produces a 4-section summary: `### Critical issues` / `### Security` / `### Design` / `### Test coverage`. A finding is reported only when it names a real input that gives a wrong result, crash, data loss or regression, or a design defect (duplicated code, hand-built code where a library or existing code does the job, code in the wrong place). Style nits are skipped. Callers can override via the `prompt` input.
 
 **Minimal caller** (drop this in `.github/workflows/claude-code.yml` of a consumer repo):
 
@@ -329,7 +329,7 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Custom review prompt. Do not point it at the PR's `.claude/skills`; that tree is purged and replaced by the vendored CI allowlist. |
+| `prompt` | Built-in 4-section review template | Custom review prompt. Do not point it at the PR's `.claude/skills`; that tree is purged and replaced by the vendored CI allowlist. |
 | `model` | `claude-fable-5-2` | Primary model passed to `--model`. Single model ID, strictly validated (`^[A-Za-z0-9][A-Za-z0-9._-]*$` — no commas, no spaces, no flags). An explicit caller `model` overrides this default; repinning the reusable does not clear that override. Applies to automatic reviews and `@claude` re-reviews alike when omitted. |
 | `fallback_model` | `claude-opus-5-5` | Comma-separated fallback chain (no spaces — `a, b` fails validation). **Omitting this input inherits `claude-opus-5-5` even when `model` is set.** That is intentional: a cyber-guardrail refusal of the primary retries once on Opus 5.5. Pass `""` to keep the old fail-closed behavior. Elements equal to the primary are dropped before `--fallback-model`. `--fallback-model` itself does not cover refusals (`stop_reason: refusal`); this workflow detects that and re-runs once on the first remaining chain element. A refusal with an empty chain still fails the job. |
 | `require_tests` | `true` | When `true`, fails the workflow if Claude's output indicates "significant changes without automated tests". (Dead code under the default prompt — only matters for custom prompts that emit the `**Has ... :** Yes/No` markers.) |
@@ -409,7 +409,7 @@ jobs:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Custom review prompt (the PR diff is materialized to `.gemini-review/pr.diff` for the agent to read) |
+| `prompt` | Built-in 4-section review template | Custom review prompt (the PR diff is materialized to `.gemini-review/pr.diff` for the agent to read) |
 | `model` | `gemini-4-carbon` | Gemini model ID (thinking level high applies to `gemini-4-carbon` only) |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
@@ -475,7 +475,7 @@ jobs:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Custom review prompt (the PR diff is materialized to `.grok-review/pr.diff`) |
+| `prompt` | Built-in 4-section review template | Custom review prompt (the PR diff is materialized to `.grok-review/pr.diff`) |
 | `model` | `grok-4.6` | Grok model ID |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
@@ -531,7 +531,7 @@ jobs:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `prompt` | Built-in 3-section review template | Output-format/emphasis text appended after the hardcoded review wrapper |
+| `prompt` | Built-in 4-section review template | Output-format/emphasis text appended after the hardcoded review wrapper |
 | `model` | `gpt-5.6-sol` | Codex review model ID (flagship, Codex-optimized 5.6 tier; validated accessible in CI). Override per-caller for special cases: `gpt-5.6-luna` (fast/cheap, cost-sensitive repos) or `gpt-5.6-terra` (balanced cost/quality). Note: there is no plain `gpt-5.6` — the 5.6 generation ships only as the luna/terra/sol tiers. |
 | `effort` | `medium` | Reasoning effort level (`none`, `low`, `medium`, `high`, `xhigh`) |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
