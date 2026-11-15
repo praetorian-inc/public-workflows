@@ -12,13 +12,10 @@ set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 SCRIPT="$REPO_ROOT/.github/actions/stage-review-skills/stage-review-skills.sh"
-VENDORED="$REPO_ROOT/.github/actions/stage-review-skills/allowlist"
 
 WORKDIR="$(mktemp -d)" || { echo "ERROR: mktemp failed" >&2; exit 1; }
 trap 'rm -rf -- "$WORKDIR"' EXIT
 
-# The pin is whatever the vendored SOURCE records; never a second copy here.
-REF=$(tr -d '[:space:]' < "$VENDORED/SOURCE" 2>/dev/null || true)
 EXPECTED_IDS="adhering-to-dry
 adhering-to-yagni
 analyzing-cyclomatic-complexity
@@ -89,10 +86,9 @@ read_multi() {
   ' "$file"
 }
 
-# allowlist DIR [SOURCE] — fixture allowlist at DIR/allow with a SOURCE file.
+# allowlist DIR — empty fixture allowlist at DIR/allow.
 allowlist() {
   mkdir -p "$1/allow"
-  printf '%s\n' "${2-$REF}" > "$1/allow/SOURCE"
 }
 
 skill() { # case-dir id
@@ -114,11 +110,6 @@ section() { printf '\n%s\n' "$1"; }
 install_fakes
 DEST_REL=".claude/skills"
 
-# --- 0. the vendored pin itself ---
-section "0. vendored SOURCE"
-is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
-check "vendored SOURCE is a 40-hex commit" "SOURCE=$REF" is_sha "$REF"
-
 # --- 1. real vendored allowlist, no network ---
 section "1. vendored allowlist (claude)"
 T="$WORKDIR/t1"
@@ -128,10 +119,7 @@ check "vendored writes staged=true" "out=$(cat "$T/github_output") log=$(cat "$T
   [ "$(read_out "$T/github_output" staged)" = "true" ]
 check "vendored stages exactly the 10 allowlisted ids" "got=$(staged_ids "$T/ws/$DEST_REL")" \
   [ "$(staged_ids "$T/ws/$DEST_REL")" = "$EXPECTED_IDS" ]
-check "vendored does not copy SOURCE" "SOURCE copied" [ ! -e "$T/ws/$DEST_REL/SOURCE" ]
 check "vendored never calls git or curl" "$(ls "$T/fix")" no_network "$T"
-check "vendored logs the source commit" "log=$(cat "$T/log")" \
-  grep -qF "staging allowlist from review-bot-skills@$REF" "$T/log"
 check "vendored claude invocations are /id lines" "got=$(read_multi "$T/github_output" invocations)" \
   [ "$(read_multi "$T/github_output" invocations)" = "$(printf '%s\n' "$EXPECTED_IDS" | sed 's#^#/#')" ]
 
@@ -174,34 +162,6 @@ check "symlinked allowlist exits 0" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" = "0"
 check "symlinked allowlist writes staged=false" "out=$(cat "$T/github_output")" \
   [ "$(read_out "$T/github_output" staged)" = "false" ]
 check "symlinked allowlist stages nothing" "DEST exists" [ ! -e "$T/ws/$DEST_REL" ]
-
-# --- 4. SOURCE provenance: missing / garbage / symlink ---
-section "4. SOURCE provenance"
-for kind in missing empty garbage short upper symlink; do
-  T="$WORKDIR/t4-$kind"
-  mkdir -p "$T"
-  allowlist "$T"
-  skill "$T" review-a
-  case "$kind" in
-    missing) rm -f "$T/allow/SOURCE" ;;
-    empty) : > "$T/allow/SOURCE" ;;
-    garbage) printf 'not a sha; rm -rf /\n' > "$T/allow/SOURCE" ;;
-    short) printf '480aaf29\n' > "$T/allow/SOURCE" ;;
-    upper) printf '%s\n' "$REF" | tr '[:lower:]' '[:upper:]' > "$T/allow/SOURCE" ;;
-    symlink)
-      printf '%s\n' "$REF" > "$T/real-source"
-      rm -f "$T/allow/SOURCE"
-      ln -s "$T/real-source" "$T/allow/SOURCE"
-      ;;
-  esac
-  run_case "$T" claude "$T/allow"
-  check "SOURCE $kind exits 0" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" = "0" ]
-  check "SOURCE $kind writes staged=false" "out=$(cat "$T/github_output") log=$(cat "$T/log")" \
-    [ "$(read_out "$T/github_output" staged)" = "false" ]
-  check "SOURCE $kind stages nothing" "DEST exists" [ ! -e "$T/ws/$DEST_REL" ]
-  check "SOURCE $kind warns about provenance" "log=$(cat "$T/log")" \
-    grep -q '::warning::.*SOURCE' "$T/log"
-done
 
 # --- 5. invalid skill id: all-or-nothing ---
 section "5. invalid skill id"

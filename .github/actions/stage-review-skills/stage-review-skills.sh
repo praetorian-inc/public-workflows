@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# Fail-open staging of the vendored review-bot-skills allowlist into a
-# reviewer's skill dir (ENG-8614; vendored-only since ENG-8852). Shared by
+# Fail-open staging of the curated review-skill allowlist into a reviewer's
+# skill dir (ENG-8614; vendored-only since ENG-8852). Shared by
 # claude-code.yml, codex-code.yml, gemini-code.yml and grok-code.yml.
 #
 # There is one path and no network: the allowlist directory beside this
 # script (the trusted checkout of this repo at job.workflow_sha, never the PR
 # tree) is copied into DEST. No token, no fetch, no private repo access.
 #
-# The pin: allowlist/SOURCE is the ONLY record of which
-# praetorian-inc/review-bot-skills commit the vendored copy came from. It is
-# logged, not compared against anything. To refresh, re-copy the allowlisted
-# <id>/ dirs from praetorian-inc/review-bot-skills at the chosen commit into
-# allowlist/ (byte-identical, no symlinks) and write that 40-hex SHA to
-# allowlist/SOURCE in the same commit.
+# allowlist/ is the source of truth: edit its <id>/ dirs here directly (no
+# symlinks). There is no upstream copy to sync from.
 #
-# Always exits 0. Any failure (missing or symlinked allowlist, a missing or
-# non-40-hex SOURCE, an invalid skill id, a symlink in a skill dir, zero
-# skills, or a bad DEST) stages NOTHING: DEST is removed and staged=false is
-# written. The review then runs without curated skills. (A cancel/timeout
+# Always exits 0. Any failure (missing or symlinked allowlist, an invalid
+# skill id, a symlink in a skill dir, zero skills, or a bad DEST) stages
+# NOTHING: DEST is removed and staged=false is written. The review then runs without curated skills. (A cancel/timeout
 # signal still runs the cleanup, but the process then exits non-zero, e.g.
 # 143 for SIGTERM; the job is ending anyway.)
 #
@@ -54,7 +49,7 @@ cleanup() {
 trap cleanup EXIT
 
 skip() {
-  echo "::warning::review-bot-skills not staged ($1); reviewing without curated skills"
+  echo "::warning::review skills not staged ($1); reviewing without curated skills"
   exit 0
 }
 
@@ -81,15 +76,6 @@ clone="${SKILLS_ALLOWLIST:-$script_dir/allowlist}"
 if [ ! -d "$clone" ] || [ -L "$clone" ]; then
   skip "no vendored allowlist"
 fi
-# A vendored copy without provenance is a broken vendoring: refuse it.
-if [ ! -f "$clone/SOURCE" ] || [ -L "$clone/SOURCE" ]; then
-  skip "allowlist SOURCE missing"
-fi
-source_sha=$(tr -d '[:space:]' < "$clone/SOURCE" 2>/dev/null || true)
-if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
-  skip "allowlist SOURCE is not a 40-hex commit"
-fi
-echo "staging allowlist from review-bot-skills@${source_sha}"
 
 ids=()
 for skill_md in "$clone"/*/SKILL.md; do

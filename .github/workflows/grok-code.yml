@@ -6,7 +6,7 @@ name: Grok PR Assistant (Callable)
 # Design: AGENTIC review via the pinned Grok Build CLI (xAI grok 1.0.34), spawned
 # headless with --prompt-file / --output-format json. Like Claude, Codex, and Gemini,
 # Grok runs a tool loop (Read / Grep / Glob) and can read past the diff. It loads
-# the review-bot-skills allowlist (root-level skill dirs vendored in this repo, staged
+# the curated review-skill allowlist (root-level skill dirs vendored in this repo, staged
 # into `.agents/skills/`).
 #
 # Security posture (hardcoded — callers cannot widen the attack surface):
@@ -377,8 +377,7 @@ jobs:
           echo "Turn cap ${t} for ${n} changed file(s)"
 
       # Curated review skills, read by Grok from `.agents/skills/<id>/SKILL.md` (listed in the prompt).
-      # The allowlist is vendored in this repo next to the stage script; its
-      # allowlist/SOURCE records the review-bot-skills commit it was copied from.
+      # The allowlist is vendored in this repo next to the stage script and edited there.
       # No token, no fetch, no App secrets. Skill bodies will be in a
       # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized

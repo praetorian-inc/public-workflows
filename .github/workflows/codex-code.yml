@@ -386,8 +386,7 @@ jobs:
       # Curated review skills, auto-discovered by the Codex CLI from `.agents/skills`
       # in the CWD (explicit $id invocation only — each staged skill gets
       # agents/openai.yaml allow_implicit_invocation: false).
-      # The allowlist is vendored in this repo next to the stage script; its
-      # allowlist/SOURCE records the review-bot-skills commit it was copied from.
+      # The allowlist is vendored in this repo next to the stage script and edited there.
       # No token, no fetch, no App secrets. Skill bodies will be in a
       # public run's log and artifact. The purge step above ALWAYS runs first, so the sweep
       # never touches this trusted tree and PR-supplied agent config is neutralized
