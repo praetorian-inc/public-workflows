@@ -22,7 +22,6 @@ REF=$(tr -d '[:space:]' < "$VENDORED/SOURCE" 2>/dev/null || true)
 EXPECTED_IDS="adhering-to-dry
 adhering-to-yagni
 analyzing-cyclomatic-complexity
-analyzing-with-adversarial-pov
 discovering-reusable-code
 enforcing-code-architecture
 enforcing-evidence-based-analysis
@@ -126,7 +125,7 @@ run_case "$T" claude
 check "vendored exits 0" "rc=$(cat "$T/rc")" [ "$(cat "$T/rc")" = "0" ]
 check "vendored writes staged=true" "out=$(cat "$T/github_output") log=$(cat "$T/log")" \
   [ "$(read_out "$T/github_output" staged)" = "true" ]
-check "vendored stages exactly the 10 allowlisted ids" "got=$(staged_ids "$T/ws/$DEST_REL")" \
+check "vendored stages exactly the allowlisted ids" "got=$(staged_ids "$T/ws/$DEST_REL")" \
   [ "$(staged_ids "$T/ws/$DEST_REL")" = "$EXPECTED_IDS" ]
 check "vendored does not copy SOURCE" "SOURCE copied" [ ! -e "$T/ws/$DEST_REL/SOURCE" ]
 check "vendored never calls git or curl" "$(ls "$T/fix")" no_network "$T"

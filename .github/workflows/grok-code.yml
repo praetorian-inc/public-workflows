@@ -58,25 +58,30 @@ on:
           repository for context — the definitions, callers, and sibling modules
           the change touches. Review ONLY the changes introduced by this PR.
 
-          Apply your available review skills (adversarial perspective, evidence-based
-          analysis, simplicity, DRY, YAGNI, cyclomatic complexity) where relevant, and
+          Apply your available review skills (evidence-based analysis, reuse of existing
+          code, simplicity, DRY, YAGNI, cyclomatic complexity) where relevant, and
           ground every finding in a specific file and line.
 
           Produce your review in this exact markdown structure:
 
           ### Critical Issues
-          (Bugs, logic errors, broken contracts, nil/null dereferences, race conditions. Max 5 bullets. If none: "None.")
+          (Blocking: a real input reaches the changed code and gives a wrong result, a crash, data loss or a regression from the base branch. A real input is one the code actually receives: content already in this repository, a flow the repository documents, or attacker input where the code handles untrusted data. Name the input. Max 5 bullets. If none: "None.")
 
           ### Security
-          (Auth/crypto changes, input validation gaps, secrets exposure, injection vectors. Max 3 bullets. If none: "No security concerns flagged.")
+          (Auth/crypto changes, input validation gaps, secrets exposure, injection vectors. Name the attacker-controlled input or the exposed secret that makes it real. Max 3 bullets. If none: "No security concerns flagged.")
+
+          ### Design
+          (Blocking: the change duplicates code that already exists, hand-builds something a library, the standard library or existing repository code already does, or puts code in the wrong place. Name the existing code or library. Max 3 bullets. If none: "None.")
 
           ### Suggestions
-          (Non-blocking improvements. Max 3 bullets. If none: "No suggestions.")
+          (Not blocking: inputs nothing produces, extra hardening, wording, and tests. Max 3 bullets. If none: "No suggestions.")
 
           Constraints:
           - Keep total under 10 bullets.
-          - SKIP style nits, formatting preferences, and cosmetic suggestions — CodeRabbit already covers those on every push.
-          - If nothing significant in any section: "No critical issues — LGTM pending human review."
+          - A finding that meets none of the Critical Issues, Security or Design definitions above goes under Suggestions.
+          - Tests: under Suggestions, mention only missing tests for behaviour this change adds or changes, and tests much larger than the change they cover.
+          - SKIP style nits, formatting preferences, and cosmetic suggestions.
+          - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review." Keep any Suggestions below it.
 
       model:
         description: "Grok model ID"

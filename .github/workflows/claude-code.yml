@@ -25,19 +25,23 @@ on:
           ## Claude Review
 
           ### Critical issues
-          (Bugs, logic errors, or broken contracts that a reviewer must fix. Max 5 bullets. If none: "None.")
+          (Blocking: a real input reaches the changed code and gives a wrong result, a crash, data loss or a regression from the base branch. A real input is one the code actually receives: content already in this repository, a flow the repository documents, or attacker input where the code handles untrusted data. Name the input. Max 5 bullets. If none: "None.")
 
           ### Security
-          (Crypto/auth changes, new external network calls, missing input validation, secrets handling. Max 3 bullets. If none: "No security concerns flagged.")
+          (Crypto/auth changes, new external network calls, missing input validation, secrets handling. Name the attacker-controlled input or the exposed secret that makes it real. Max 3 bullets. If none: "No security concerns flagged.")
+
+          ### Design
+          (Blocking: the change duplicates code that already exists, hand-builds something a library, the standard library or existing repository code already does, or puts code in the wrong place. Name the existing code or library. Max 3 bullets. If none: "None.")
 
           ### Test coverage
-          (Missing tests for significant production code changes in *.go, *.ts, *.py. 1–2 lines. Skip if tests are present.)
+          (Missing tests for behaviour this change adds or changes in *.go, *.ts, *.py, or tests much larger than the change they cover. 1–2 lines. Skip if neither.)
 
           Constraints:
           - Keep total under 10 bullets.
-          - SKIP style nits, formatting preferences, and cosmetic suggestions — CodeRabbit and Codex already cover those on every push.
+          - Leave out any finding that meets none of the four section definitions above.
+          - SKIP style nits, formatting preferences, and cosmetic suggestions.
           - Do NOT read previous PR comments.
-          - If nothing significant in any section, post: "No critical issues — LGTM pending human review."
+          - If Critical issues, Security and Design are all empty, post: "No critical issues — LGTM pending human review." Keep any Test coverage note below it.
 
       require_tests:
         description: "Whether to enforce test requirements"
