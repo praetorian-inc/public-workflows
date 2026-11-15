@@ -50,7 +50,7 @@ on:
 
     outputs:
       has_code:
-        description: "Whether the PR contains code changes worth reviewing ('true' or 'false')."
+        description: "Whether the review should run ('true' or 'false'). 'false' on a docs-only PR, and on an @mention re-review past the round cap."
         value: ${{ jobs.check.outputs.has_code }}
 
 permissions:
@@ -107,14 +107,54 @@ jobs:
           REVIEWER_NAME: ${{ inputs.reviewer_name }}
           MENTION_KEYWORD: ${{ inputs.mention_keyword }}
           FORCE_REVIEW_REGEX: ${{ inputs.force_review_regex }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          THREAD_ID: ${{ github.event.comment.in_reply_to_id || github.event.comment.id }}
+          EXTRA_ROUND: ${{ contains(github.event.pull_request.labels.*.name, 'extra-review-round') }}
         run: |
           set -eu
 
-          # @mention on a review comment always forces the reviewer to run,
-          # regardless of file types. The job's own if: already required
-          # contains(comment.body, mention_keyword), so by the time we reach
-          # here on a review_comment event, the reviewer explicitly asked for it.
+          # @mention on a review comment forces the reviewer to run regardless
+          # of file types, up to the round cap. The job's own if: already
+          # required contains(comment.body, mention_keyword), so by the time we
+          # reach here on a review_comment event, the reviewer explicitly asked.
           if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
+            # Round cap: at most MAX_REREVIEWS @mention re-reviews per reviewer
+            # per PR; the review on open does not count. Every earlier review
+            # comment that would have started this reviewer counts: it contains
+            # the keyword (contains() above ignores case) and no bot wrote it.
+            # "Earlier" is a lower comment id, so the comment that started this
+            # run, and any posted after it, do not count. It counts requests,
+            # not reviews that finished: a request replaced while waiting, or
+            # made while the PR was a draft, still counts. While the PR carries
+            # the extra-review-round label there is no cap. Only a person
+            # should add that label, never an agent.
+            # If the comments cannot be listed or read, the review runs: the
+            # cap fails open.
+            MAX_REREVIEWS=3
+            if [ "$EXTRA_ROUND" != "true" ]; then
+              PRIOR=0
+              if ! COMMENTS=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate); then
+                echo "::warning::Could not list the PR's review comments; running without the round cap."
+              elif ! PRIOR=$(printf '%s' "$COMMENTS" |
+                jq -s --arg kw "$MENTION_KEYWORD" --argjson cur "$COMMENT_ID" '
+                  [ .[][]
+                    | select(.id < $cur)
+                    | select(.user.login // "" | ascii_downcase
+                        | (contains("coderabbit") or contains("devin") or contains("[bot]")) | not)
+                    | select(.body // "" | ascii_downcase | contains($kw | ascii_downcase)) ]
+                  | length'); then
+                echo "::warning::Could not read the PR's review comments; running without the round cap."
+                PRIOR=0
+              fi
+              if [ "$PRIOR" -ge "$MAX_REREVIEWS" ]; then
+                echo "has_code=false" >> "$GITHUB_OUTPUT"
+                echo "⊘ $PRIOR earlier $MENTION_KEYWORD requests on this PR (cap $MAX_REREVIEWS) — $REVIEWER_NAME re-review skipped."
+                gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/comments/$THREAD_ID/replies" \
+                  -f body="$REVIEWER_NAME re-review skipped: this PR has used its $MAX_REREVIEWS $REVIEWER_NAME re-reviews. Add the \`extra-review-round\` label to the PR to run more." \
+                  > /dev/null || echo "::warning::Could not post the round-cap notice."
+                exit 0
+              fi
+            fi
             echo "has_code=true" >> "$GITHUB_OUTPUT"
             echo "🔔 $MENTION_KEYWORD mention on a review comment — bypassing docs-only filter."
             exit 0

@@ -246,6 +246,16 @@ jobs:
 
     runs-on: ubuntu-24.04
 
+    # One review per PR at a time: a request that arrives while a review runs
+    # waits, and a newer request replaces an older waiting one. The group sits
+    # on this job, after preflight, so a review comment that does not ask for
+    # a review never takes a place in it. Callers need no workflow-level
+    # concurrency: one there groups every review comment on the PR, so a stray
+    # comment can replace a waiting request.
+    concurrency:
+      group: gemini-review-job-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
+
     # Wall-clock ceiling on the agent: 30 minutes for a flat 80 session turns
     # (`model.maxSessionTurns: 80`). The turn cap bounds tool-call turns, not
     # wall time; 30 min makes a stuck/looping run fail noticeably rather than
@@ -262,6 +272,7 @@ jobs:
       empty_scope: ${{ steps.context.outputs.empty_scope }}
       failure_kind: ${{ steps.failclass.outputs.kind }}
       served_models: ${{ steps.gemini.outputs.served }}
+      started: ${{ steps.started.outputs.started }}
 
     steps:
       - name: Harden Runner
@@ -275,6 +286,14 @@ jobs:
           # or a container runtime. run-gemini-cli installs the CLI into the runner
           # user's npm prefix (no sudo) and runs it in-process.
           disable-sudo-and-containers: true
+
+      # Set before any real work. A job that runs out of time ends 'cancelled'
+      # with this output kept; a job replaced while it waited in the
+      # concurrency group ends 'cancelled' too but never started, so it has
+      # none. The timeout notice keys on this to tell the two apart.
+      - name: Mark the review as started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -937,7 +956,13 @@ jobs:
   # single-shot reviewer). It does NOT run when gemini-review was skipped.
   post-feedback:
     needs: gemini-review
-    if: ${{ always() && (needs.gemini-review.result == 'success' || needs.gemini-review.result == 'failure') }}
+    # A review job that hits its timeout-minutes ends 'cancelled' while
+    # cancelled() stays false, because the run itself was not cancelled; its
+    # started output is 'true'. A job replaced while it waited in the
+    # concurrency group ends the same way but never started, and posts
+    # nothing. A run cancelled as a whole (by hand, or by a caller's
+    # cancel-in-progress) posts nothing.
+    if: ${{ always() && (needs.gemini-review.result == 'success' || needs.gemini-review.result == 'failure' || (!cancelled() && needs.gemini-review.result == 'cancelled' && needs.gemini-review.outputs.started == 'true')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -1021,4 +1046,23 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
               body: lines.join('\n'),
+            });
+
+      - name: Post timeout notice
+        if: ${{ needs.gemini-review.result == 'cancelled' }}
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '## Gemini Review',
+                '',
+                `⚠️ Gemini review did not complete — the review job hit its time limit. See the [run logs](${process.env.RUN_URL}).`,
+                'Comment `@gemini` on a review comment to re-trigger.',
+              ].join('\n'),
             });

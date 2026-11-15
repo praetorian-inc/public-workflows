@@ -211,6 +211,16 @@ jobs:
 
     runs-on: ubuntu-24.04
 
+    # One review per PR at a time: a request that arrives while a review runs
+    # waits, and a newer request replaces an older waiting one. The group sits
+    # on this job, after preflight, so a review comment that does not ask for
+    # a review never takes a place in it. Callers need no workflow-level
+    # concurrency: one there groups every review comment on the PR, so a stray
+    # comment can replace a waiting request.
+    concurrency:
+      group: codex-review-job-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
+
     # Wall-clock ceiling. codex-mini reviews complete in 2-5 minutes typically.
     # 10 minutes is ~3x the p99. Tight enough to catch a stuck run without
     # false-positive-failing legitimate large-PR reviews.
@@ -224,6 +234,7 @@ jobs:
     outputs:
       final_message: ${{ steps.run_codex.outputs.final-message }}
       empty_scope: ${{ steps.context.outputs.empty_scope }}
+      started: ${{ steps.started.outputs.started }}
 
     steps:
       - name: Harden Runner
@@ -252,6 +263,14 @@ jobs:
           # while sudo is still available and before Codex runs. The post-feedback
           # job (no codex-action) keeps disable-sudo-and-containers: true.
           disable-sudo-and-containers: false
+
+      # Set before any real work. A job that runs out of time ends 'cancelled'
+      # with this output kept; a job replaced while it waited in the
+      # concurrency group ends 'cancelled' too but never started, so it has
+      # none. The timeout notice keys on this to tell the two apart.
+      - name: Mark the review as started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -617,9 +636,21 @@ jobs:
   # code — it only posts the final-message output from the previous job.
   # Uses pulls.createReview with hardcoded event='COMMENT' so reviews appear in
   # the PR Reviews tab. There is no path to APPROVE — the event is not configurable.
+  #
+  # A failed review job gets a failure notice. A review job that hits its
+  # timeout-minutes ends 'cancelled' while cancelled() stays false, because the
+  # run itself was not cancelled; its started output is 'true' and it gets a
+  # timeout notice. A job replaced while it waited in the concurrency group
+  # ends the same way but never started, and posts nothing. A run cancelled as
+  # a whole (by hand, or by a caller's cancel-in-progress) posts nothing.
   post-feedback:
     needs: codex-review
-    if: needs.codex-review.outputs.final_message != '' || needs.codex-review.outputs.empty_scope == 'true'
+    if: >-
+      always() && (
+        (needs.codex-review.result == 'success' &&
+          (needs.codex-review.outputs.final_message != '' || needs.codex-review.outputs.empty_scope == 'true')) ||
+        needs.codex-review.result == 'failure' ||
+        (!cancelled() && needs.codex-review.result == 'cancelled' && needs.codex-review.outputs.started == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -635,7 +666,7 @@ jobs:
           disable-sudo-and-containers: true
 
       - name: Post review comment
-        if: needs.codex-review.outputs.final_message != ''
+        if: needs.codex-review.result == 'success' && needs.codex-review.outputs.final_message != ''
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           CODEX_FINAL_MESSAGE: ${{ needs.codex-review.outputs.final_message }}
@@ -663,7 +694,7 @@ jobs:
             });
 
       - name: Post empty-scope skip notice
-        if: needs.codex-review.outputs.empty_scope == 'true'
+        if: needs.codex-review.result == 'success' && needs.codex-review.outputs.empty_scope == 'true'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         with:
           script: |
@@ -674,3 +705,41 @@ jobs:
               body: 'Codex review skipped — every changed file in this PR matches the caller\'s `review_exclude_pathspecs` (generated artifacts verified by this repo\'s own CI). Nothing reviewable remains in scope.',
             });
 
+      # Hardcoded bodies — no untrusted input.
+      - name: Post failure notice
+        if: needs.codex-review.result == 'failure'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '## Codex Review',
+                '',
+                `⚠️ Codex review did not complete — the review job failed. See the [run logs](${process.env.RUN_URL}).`,
+                'Comment `@codex` on a review comment to re-trigger.',
+              ].join('\n'),
+            });
+
+      - name: Post timeout notice
+        if: needs.codex-review.result == 'cancelled'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: [
+                '## Codex Review',
+                '',
+                `⚠️ Codex review did not complete — the review job hit its time limit. See the [run logs](${process.env.RUN_URL}).`,
+                'Comment `@codex` on a review comment to re-trigger.',
+              ].join('\n'),
+            });

@@ -350,6 +350,12 @@ Note: `pull_request: types: [opened, ready_for_review]` — Claude reviews once 
 - **One script**: after the PR-supplied agent dirs are purged, the job checks out `.github/actions/stage-review-skills/stage-review-skills.sh` from this repo at the reusable's own SHA, so a caller cannot point it at a different set. The script validates every `<id>/SKILL.md` id, and copies the set into the harness's skill dir (`.claude/skills`, `.agents/skills`, or `.gemini/skills`).
 - **Fail-open**: a missing allowlist, a bad id, or an empty allowlist stages nothing, and the review runs without curated skills. Agent steps read only the script's `staged` output.
 
+**Re-review cap, queueing and notices (`claude-code.yml`, `codex-code.yml`, `gemini-code.yml`, `grok-code.yml`).** All four reviewers share these rules:
+
+- **Re-review cap.** Each reviewer runs once when the PR opens (or is marked ready for review), then at most 3 more times per PR on an `@claude` / `@codex` / `@gemini` / `@grok` review comment. Preflight counts the PR's earlier review comments that mention the reviewer (case-insensitive), leaving out the comment being handled and comments from CodeRabbit, Devin and `[bot]` accounts. Only comments posted before the one being handled count. With 3 already there, preflight skips the review and replies on that comment's thread to say so. The cap counts requests, not finished reviews: a request replaced while waiting (see below) or made while the PR was a draft still counts. To allow more, a person adds the `extra-review-round` label to the PR; while it is on, every request runs. Create that label in the calling repo before you need it. If preflight cannot list or read the comments, the review runs.
+- **One review per PR at a time.** Each review job carries its own concurrency group (`<reviewer>-review-job-<repo>-<PR>`, `cancel-in-progress: false`), set after preflight. A request that arrives while a review runs waits, and a newer request replaces an older waiting one. A review comment that does not ask for a review never takes a place in the group. **Callers need no workflow-level `concurrency:` block; delete it when repinning.** A caller-level group holds every review comment on the PR, so a comment that asks for nothing can replace a waiting request.
+- **Notices.** A review job that hits its `timeout-minutes` posts a notice that the review did not complete. A request replaced while it waited posts nothing: only a review job that started gets the notice. Codex, Gemini and Grok also post a notice when the review job fails. Claude does not: its job also fails after a review is posted (the test-requirements check, a graphify check error), and the job result cannot tell those failures apart from the ones that leave nothing on the PR. A run cancelled as a whole (by hand, or by a caller's `cancel-in-progress`) posts nothing.
+
 **Triggers the reusable workflow responds to:**
 
 - `pull_request` with `action == 'opened'` or `'ready_for_review'` on a same-repo branch PR — auto-reviews once on PR open (or when a draft PR is marked ready)
@@ -389,10 +395,6 @@ on:
     types: [opened, ready_for_review]
   pull_request_review_comment:
     types: [created]
-
-concurrency:
-  group: gemini-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   gemini-review:
@@ -456,10 +458,6 @@ on:
   pull_request_review_comment:
     types: [created]
 
-concurrency:
-  group: grok-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   grok-review:
     uses: praetorian-inc/public-workflows/.github/workflows/grok-code.yml@<SHA>
@@ -514,9 +512,6 @@ on:
     types: [opened, ready_for_review]
   pull_request_review_comment:
     types: [created]
-concurrency:
-  group: codex-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 jobs:
   codex-review:
     uses: praetorian-inc/public-workflows/.github/workflows/codex-code.yml@<SHA>
@@ -1201,7 +1196,7 @@ No secrets required — the caller's own `GITHUB_TOKEN`.
 
 These reusables exist to be composed by the workflows above; consumer repos don't call them directly:
 
-- **`preflight.yml`** — shared preflight for the AI reviewers (`claude-code` / `codex-code` / `gemini-code`). Determines whether a PR has code changes worth reviewing (skips docs/config-only PRs, saving ~$1–2 of LLM cost per PR at ~30s of runner time), enforces the same-repo-only gate, and honors the `@claude`/`@codex`/`@gemini` mention bypass. Takes `mention_keyword` + `reviewer_name` inputs; outputs `has_code`. `synchronize` is intentionally excluded (reviewers run on `opened`/`ready_for_review` only), and `.github/` changes are NOT treated as docs-only — CI config deserves review.
+- **`preflight.yml`** — shared preflight for the AI reviewers (`claude-code` / `codex-code` / `gemini-code` / `grok-code`). Determines whether a PR has code changes worth reviewing (skips docs/config-only PRs, saving ~$1–2 of LLM cost per PR at ~30s of runner time), enforces the same-repo-only gate, and honors the `@claude`/`@codex`/`@gemini`/`@grok` mention bypass up to the re-review cap (3 per reviewer per PR; the `extra-review-round` label lifts it — see **Re-review cap, queueing and notices**). Takes `mention_keyword` + `reviewer_name` inputs; outputs `has_code`. `synchronize` is intentionally excluded (reviewers run on `opened`/`ready_for_review` only), and `.github/` changes are NOT treated as docs-only — CI config deserves review.
 
 ## Pinning requirements
 
