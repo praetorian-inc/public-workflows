@@ -71,7 +71,7 @@ on:
           (Auth/crypto changes, input validation gaps, secrets exposure, injection vectors. Name the attacker-controlled input or the exposed secret that makes it real. Max 3 bullets. If none: "No security concerns flagged.")
 
           ### Design
-          (Blocking: the change duplicates code that already exists, hand-builds something a library, the standard library or existing repository code already does, or puts code in the wrong place. Name the existing code or library. Max 3 bullets. If none: "None.")
+          (Blocking: the change duplicates code that already exists, hand-builds something a setting or flag of a tool the project already runs, an installed CLI, the standard library, a dependency the project already declares, a maintained library or existing repository code already does, or puts code in the wrong place. Name what already does the job. Max 3 bullets. If none: "None.")
 
           ### Suggestions
           (Not blocking: inputs nothing produces, extra hardening, wording, and tests. Max 3 bullets. If none: "No suggestions.")
