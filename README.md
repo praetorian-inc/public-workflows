@@ -663,6 +663,46 @@ It writes every in-scope file over 500 lines. Pass the same globs that the calle
 
 **Notes:** no `branches:` filter on `pull_request`, because `on.pull_request.branches` matches the BASE and would skip stacked PRs. No `paths:` filter either. The gate checks out the caller into `repo/` with full history, so the merge-base resolves. It checks out its own sources at `job.workflow_sha` into `_pw/`, and fails if that SHA is empty or the checkout landed on a different commit. Parsing never runs caller code (go/parser, the TypeScript parser for TypeScript and JavaScript, and Python `ast`), so the gate is safe on fork PRs. The parsers run on pinned toolchains: Node 22, the Go version in `extract-go/go.mod`, and the `python-version` input (default 3.13). The job fails if `python3` on PATH is not the interpreter `actions/setup-python` installed. Callers must use `pull_request`, not `pull_request_target`, because the latter checks out the base branch. On `pull_request` the checkout is GitHub's merge ref, a merge of the PR head into the base branch's tip at the time the ref was built. The gate compares with that merge commit's first parent, not `pull_request.base.sha`, which GitHub does not refresh when the base branch moves, so commits that reached the base branch after the PR opened are never attributed to the PR. It reads the event from the runner's `GITHUB_EVENT_NAME` and logs a notice when the first parent differs from `base.sha`. If HEAD is not a merge commit, it falls back to the merge-base with `base.sha`. On `workflow_dispatch` there is no event base, so the gate compares HEAD with its merge-base with the first usable candidate: `origin/HEAD`, then `origin/<SIZE_GATE_DEFAULT_BRANCH>`, which the workflow sets to the caller's default branch (`github.event.repository.default_branch`; a name `git check-ref-format` rejects is ignored with a notice), then `origin/main`, then `HEAD~1`. On a push whose `event.before` is zero or unreachable, it logs a notice and does the same. A candidate whose merge-base with HEAD is HEAD itself is skipped. On a default-branch push with no usable `event.before`, the default-branch candidates are therefore skipped, and the gate falls through to the next one: `HEAD~1` when the default branch is `main`, which checks only the tip commit's changes. A commit with no parent and no other candidate compares with itself, so no diff-scoped source-length warnings apply; whole-tree integrity checks and baseline validation still run.
 
+### `linear-id-required.yml` — Linear issue id required (callable) (LAB-4594)
+
+Fails a pull request that names no Linear issue in a place Linear links from. Linear's GitHub integration links a pull request to an issue, as an attachment with `sourceType` `github`, only from those places, and its merge automation reads only that attachment. A pull request without one leaves its issue open after the merge.
+
+**Minimal caller:**
+
+```yaml
+name: Linear issue
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize]
+permissions:
+  contents: read
+jobs:
+  linear-issue:
+    uses: praetorian-inc/public-workflows/.github/workflows/linear-id-required.yml@<SHA>  # vX.Y.Z
+    permissions:
+      contents: read
+```
+
+The check's context is `linear-issue / Linear issue id`. Make it required on the branch in the caller's branch protection or ruleset. Keep `edited` in `types`, so that fixing the title or the body runs the check again.
+
+**Inputs:**
+
+| Input | Default | Purpose |
+|---|---|---|
+| `team-keys` | every team key in the Praetorian workspace on 2026-11-17 | Space- or newline-separated keys an id may start with. Letters and digits only. A team created later needs a release or the full list here |
+| `exempt-authors` | `dependabot[bot]` | Space-separated logins whose pull requests need no issue |
+| `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
+| `harden-runner-policy` | `audit` | `audit` or `block`. The job makes no network calls |
+
+**Rules:**
+
+- **An id** is a team key, a dash and a number, in any case, with no letter or digit touching it on either side. `eng-1234`, `13T-202` and `yourname/lab-4594-short-name` count. `cve-119618`, `us-east-2` and `loop-18` do not, because `cve`, `east` and `loop` are not team keys.
+- **Branch name or title:** the id alone is enough.
+- **Body:** the id must follow one of Linear's [magic words](https://linear.app/docs/github) on the same line, such as `Fixes ENG-1234`, `Part of ENG-1234` or `Related to ENG-1234`. A Markdown link or a `linear.app/<workspace>/issue/` URL after the word also counts. A bare id in the body does not count, because Linear does not link from it: on guard, of the pull requests from 2026-10-30 to 2026-11-17 that named an issue only in the body, all 16 with a magic word were linked and 18 of the 22 without one were not.
+
+**Notes:** the check reads only the event payload. It checks out no code and calls no API, so it is safe on fork pull requests. Run from any trigger other than `pull_request` or `pull_request_target`, it fails with an error saying so. A string that happens to match a real key, such as `prod-2` in a branch name, passes. So does one that names the issue in its branch name or title and also says `Skip ENG-1234` or `Ignore ENG-1234` in the body, which tells Linear not to link it: the author chose that.
+
 ### `agents-md-drift.yml` — instruction-file drift detection (AGENTS.md / CLAUDE.md)
 
 Detects when a PR's code changes may have made instruction-file documentation stale. Instruction files are `AGENTS.md` and `CLAUDE.md`: converted repos are AGENTS.md-canonical and leave a one-line `@AGENTS.md` import pointer behind in `CLAUDE.md`, while unconverted repos keep their content in `CLAUDE.md`. A pointer stub with a sibling `AGENTS.md` is resolved to that sibling, so the semantic check reads the file that actually carries the content; a stub with no sibling (a broken conversion) is conservatively kept. **Two-phase design:** a zero-cost shell pre-filter determines which instruction files are relevant to the PR's code changes, then Claude (Haiku) runs a read-only semantic check only when needed. The pre-filter skips the LLM job entirely when no instruction file exists, the PR is docs/config-only, changed files have no instruction-file ancestor in the directory tree, or the author is a bot. When a PR changes code and also edits an applicable instruction file, semantic analysis still runs to evaluate whether that edit adequately reflects the code change. Same-repo-only (fork PRs blocked); draft PRs skipped.

@@ -1,0 +1,173 @@
+name: Linear issue id required (Callable)
+# Fails a pull request that names no Linear issue in a place Linear links from
+# (LAB-4594). Linear's GitHub integration links a pull request to an issue when
+# the issue id is in the head branch name or the title, or follows a magic word
+# in the body ("Fixes ENG-123", "Part of ENG-123"). The link is an attachment
+# with sourceType "github" on the issue. Linear's merge automation and
+# operations/linear-merge-gate read only that attachment, so without it a
+# merged issue never reaches Done, or is moved back from it.
+#
+# Rules (README, `linear-id-required.yml`):
+# - An id is a key from `team-keys`, a dash and a number, in any case, with no
+#   letter or digit touching it on either side. `eng-1234`, `13T-202` and
+#   `yourname/lab-4594-short-name` count. `cve-119618`, `us-east-2` and
+#   `loop-18` do not, because cve, east and loop are not team keys.
+# - Branch name or title: the id alone is enough.
+# - Body: the id must follow a magic word on the same line. Linear's docs
+#   require it there (https://linear.app/docs/github), and on guard a bare id in
+#   the body mostly did not link: of the pull requests from 2026-10-30 to
+#   2026-11-17 that named an issue only in the body, all 16 with a magic word
+#   were linked and 18 of the 22 without one were not.
+# - A pull request opened by an author in `exempt-authors` passes.
+#
+# Caller template:
+#
+#   on:
+#     pull_request:
+#       branches: [main]
+#       types: [opened, edited, reopened, synchronize]
+#   permissions:
+#     contents: read
+#   jobs:
+#     linear-issue:
+#       uses: praetorian-inc/public-workflows/.github/workflows/linear-id-required.yml@<SHA>  # vX.Y.Z
+#       permissions:
+#         contents: read
+#
+# Keep `edited` in the types: it runs the check again when the author fixes
+# the title or the body.
+
+on:
+  workflow_call:
+    inputs:
+      team-keys:
+        description: "Space- or newline-separated Linear team keys an id may start with. The default is every team key in the Praetorian workspace on 2026-11-17; pass the full list to add a newer team before a release carries it."
+        required: false
+        type: string
+        default: "10T 13T 14T 3RD 5TH ACCEPT ART ATT CLO CUS ENG FIN FIR INF INF2 IOT LAB MAR OFFSEC OPS PEO PRO3 PROD PS PSL REP RT SAL SOF SUP SUPTEST"
+
+      exempt-authors:
+        description: "Space-separated GitHub logins whose pull requests need no Linear issue."
+        required: false
+        type: string
+        default: "dependabot[bot]"
+
+      enable-harden-runner:
+        description: "Whether to install StepSecurity Harden-Runner."
+        required: false
+        type: boolean
+        default: true
+
+      harden-runner-policy:
+        description: "Harden-Runner egress policy: 'audit' or 'block'."
+        required: false
+        type: string
+        default: "audit"
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Linear issue id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        if: inputs.enable-harden-runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: ${{ inputs.harden-runner-policy }}
+          disable-sudo-and-containers: true
+
+      # The branch name, title and body are written by the pull request's
+      # author, so every value reaches the script through env:, never ${{ }}.
+      - name: Check the pull request names a Linear issue
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          TEAM_KEYS: ${{ inputs.team-keys }}
+          EXEMPT_AUTHORS: ${{ inputs.exempt-authors }}
+        run: |
+          set -f  # the lists below are split on whitespace; [bot] must not glob
+          export LC_ALL=C  # ids are ASCII; the same character classes here and in the test
+
+          case "$EVENT_NAME" in
+            pull_request|pull_request_target) ;;
+            *)
+              echo "::error::Call linear-id-required.yml from a pull_request trigger. This run is a ${EVENT_NAME} event, which has no pull request to read."
+              exit 1
+              ;;
+          esac
+
+          keys=""
+          for key in $TEAM_KEYS; do
+            case "$key" in
+              *[!A-Za-z0-9]*)
+                echo "::error::team-keys holds '${key}'. A Linear team key is letters and digits only."
+                exit 1
+                ;;
+            esac
+            keys="${keys:+${keys}|}${key}"
+          done
+          if [ -z "$keys" ]; then
+            echo "::error::team-keys is empty."
+            exit 1
+          fi
+
+          for exempt in $EXEMPT_AUTHORS; do
+            if [ "$AUTHOR" = "$exempt" ]; then
+              echo "Opened by ${AUTHOR}, which needs no Linear issue."
+              exit 0
+            fi
+          done
+
+          id="(${keys})-[0-9]+"
+          after='([^[:alnum:]]|$)'
+          bare='(^|[^[:alnum:]])'"${id}${after}"
+          # Linear's magic words (https://linear.app/docs/github): closing,
+          # non-closing and relation words. The id may sit inside a Markdown
+          # link or an issue URL: "Fixes [ENG-1](...)", "Fixes https://linear.app/x/issue/ENG-1".
+          magic='close|closes|closed|closing|fix|fixes|fixed|fixing|resolve|resolves|resolved|resolving|complete|completes|completed|completing|implement|implements|implemented|implementing|linear[[:space:]]+issue|ref|refs|references|part[[:space:]]+of|contributes[[:space:]]+to|toward|towards|relates[[:space:]]+to|related[[:space:]]+to'
+          linked='(^|[^[:alpha:]])('"${magic}"')[[:space:]:]+\[?(https?://linear\.app/[^/[:space:]]+/issue/)?'"${id}${after}"
+
+          # first_match <ERE> <text>: print the first case-insensitive match
+          # without the edge characters around it, or fail when there is none.
+          first_match() {
+            local m
+            m=$(grep -ioE -- "$1" <<<"$2") || return 1
+            m=${m%%$'\n'*}
+            m=${m#[^[:alnum:]]}
+            m=${m%[^[:alnum:]]}
+            printf '%s' "$m"
+          }
+
+          if found=$(first_match "$bare" "$BRANCH"); then
+            where="branch name"
+          elif found=$(first_match "$bare" "$TITLE"); then
+            where="title"
+          elif found=$(first_match "$linked" "$BODY"); then
+            where="body"
+          else
+            echo "::error title=No Linear issue named::This pull request names no Linear issue where Linear links from, so the issue will not move to Done when it merges."
+            echo ""
+            echo "Name the issue in one of these places:"
+            echo "  Branch name  the id anywhere in it, e.g. yourname/eng-1234-short-description"
+            echo "               (Linear's 'Copy git branch name', Cmd/Ctrl+Shift+., makes one)"
+            echo "  Title        the id anywhere in it, e.g. ENG-1234: Fix the export button"
+            echo "  Body         a magic word and then the id, on one line, e.g. Fixes ENG-1234"
+            echo "               (also Closes, Resolves, Part of, Related to, Refs)"
+            echo ""
+            echo "A bare id in the body is not enough: Linear links from the body only after a magic word."
+            echo "Editing the title or the body runs this check again."
+            echo ""
+            echo "Team keys: ${keys//|/ }"
+            exit 1
+          fi
+          echo "Linear issue named in the ${where}: ${found}"
