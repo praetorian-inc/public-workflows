@@ -122,7 +122,7 @@ fi
 
 DEFAULT_KEYS="$(cat "$WORKDIR/team-keys.txt")"
 
-# run_step <branch> <title> <body> [author] [event] [team-keys]
+# run_step <branch> <title> <body> [author] [event] [team-keys] [exempt-authors]
 # Runs the extracted step with only its env: names set; leaves the exit status
 # in RC and stdout+stderr in OUT.
 run_step() {
@@ -132,7 +132,7 @@ run_step() {
       BRANCH="$1" TITLE="$2" BODY="$3" \
       AUTHOR="${4:-octocat}" \
       TEAM_KEYS="${6-$DEFAULT_KEYS}" \
-      EXEMPT_AUTHORS="dependabot[bot]" \
+      EXEMPT_AUTHORS="${7-dependabot[bot]}" \
       bash -e "$WORKDIR/check.sh" 2>&1
   )"
   RC=$?
@@ -204,6 +204,13 @@ else
   bad "dependabot[bot]" "rc=0 and the exempt line" "rc=$RC, $OUT"
 fi
 expect_fail "a human login that only looks like dependabot" "dependabot/x" "Bump vite" "" "dependabot"
+run_step "renovate/vite-6.x" "Bump vite" "" "renovate[bot]" "pull_request" "$DEFAULT_KEYS" "dependabot[bot] renovate[bot]"
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q 'needs no Linear issue'; then
+  ok "the second login in a space-separated exempt-authors"
+else
+  bad "the second login in a space-separated exempt-authors" "rc=0 and the exempt line" "rc=$RC, $OUT"
+fi
+expect_fail "empty exempt-authors exempts no one" "dependabot/x" "Bump vite" "" "dependabot[bot]" "pull_request" "$DEFAULT_KEYS" ""
 
 # ── Failing pull requests ────────────────────────────────────────────────────
 section "No id, or a string that only looks like one, fails"
