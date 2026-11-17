@@ -1,0 +1,28 @@
+name: Test linear-id-required.yml (self-test)
+# Calls linear-id-required.yml the way a consumer does, on pull requests that
+# change it, so the inputs and the pull request fields reach the step through
+# a real workflow_call (LAB-4594). test/linear-id-required.test.sh covers the
+# step's rules. A pull request that changes the check must therefore name a
+# Linear issue itself.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+    paths:
+      - '.github/workflows/linear-id-required.yml'
+      - '.github/workflows/test-linear-id-required.yml'
+      - 'test/linear-id-required.test.sh'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linear-issue:
+    # Local reference: the workflow from this commit.
+    uses: ./.github/workflows/linear-id-required.yml
+    permissions:
+      contents: read

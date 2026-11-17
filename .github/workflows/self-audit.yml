@@ -26,6 +26,7 @@ on:
       - 'test/check-graphify-use.test.sh'
       - 'test/agents-md-drift-comment.test.sh'
       - 'test/review-round-cap.test.sh'
+      - 'test/linear-id-required.test.sh'
   push:
     branches: [main]
     paths:
@@ -47,6 +48,7 @@ on:
       - 'test/check-graphify-use.test.sh'
       - 'test/agents-md-drift-comment.test.sh'
       - 'test/review-round-cap.test.sh'
+      - 'test/linear-id-required.test.sh'
 
 permissions:
   contents: read
@@ -130,6 +132,9 @@ jobs:
 
       - name: Unit-test the reviewers' re-review cap in preflight
         run: bash test/review-round-cap.test.sh
+
+      - name: Unit-test the Linear issue id check (LAB-4594)
+        run: bash test/linear-id-required.test.sh
 
       - name: Install zizmor
         env:
