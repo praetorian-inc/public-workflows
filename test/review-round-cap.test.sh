@@ -134,6 +134,7 @@ step_env() { # step_env <name> — this suite's value for one env: variable
     REVIEWER_NAME)      echo Gemini ;;
     MENTION_KEYWORD)    echo @gemini ;;
     FORCE_REVIEW_REGEX) echo "" ;;
+    MAX_REREVIEWS)      echo 3 ;;  # the max_rereviews input's default
     COMMENT_ID)         echo "$CUR" ;;
     THREAD_ID)          echo "$CUR" ;; # a new thread: the comment is its own root
     EXTRA_ROUND)        echo false ;;  # no extra-review-round label
@@ -454,6 +455,22 @@ pages '[{"filename":"src/main.go"}]'
 run_check EVENT_NAME=pull_request COMMENTER= COMMENT_ID= THREAD_ID=
 expect "case17" true
 assert_eq "case17 no permission lookup" "0" "$(perms | wc -l | tr -d ' ')"
+
+# ═════════════════════════════════════════════════════════════════════════════
+section "Case 18 — max_rereviews 1: the first request runs, the second is skipped unless labelled"
+pages "[$PLAIN,$(cur)]"
+run_check MAX_REREVIEWS=1
+expect "case18 cap 1, no earlier request" true
+pages "[$(mentions alice),$(cur)]"
+run_check MAX_REREVIEWS=1
+expect "case18 cap 1, 1 earlier request" false "$REPLY_ROOT"
+case "$(reply_body)" in
+  *"cap (1)"*) ok "case18 reply names the cap of 1" ;;
+  *) bad "case18 reply names the cap of 1" "...cap (1)..." "$(reply_body)" ;;
+esac
+pages "[$(mentions alice),$(cur)]"
+run_check MAX_REREVIEWS=1 EXTRA_ROUND=true
+expect "case18 cap 1, 1 earlier request + label" true
 
 # ═════════════════════════════════════════════════════════════════════════════
 printf '\n──────────────────────────────────────────────\n'

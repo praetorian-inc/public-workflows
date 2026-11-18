@@ -30,6 +30,12 @@ on:
         type: string
         default: ""
 
+      max_rereviews:
+        description: "Most @mention re-reviews per reviewer per PR; the review on open does not count. The extra-review-round label lifts the cap."
+        required: false
+        type: number
+        default: 3
+
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner."
         required: false
@@ -107,6 +113,7 @@ jobs:
           REVIEWER_NAME: ${{ inputs.reviewer_name }}
           MENTION_KEYWORD: ${{ inputs.mention_keyword }}
           FORCE_REVIEW_REGEX: ${{ inputs.force_review_regex }}
+          MAX_REREVIEWS: ${{ inputs.max_rereviews }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENTER: ${{ github.event.comment.user.login }}
           THREAD_ID: ${{ github.event.comment.in_reply_to_id || github.event.comment.id }}
@@ -143,13 +150,14 @@ jobs:
                 exit 0 ;;
             esac
 
-            # Round cap: at most MAX_REREVIEWS @mention re-reviews per reviewer
-            # per PR; the review on open does not count. Every earlier review
-            # comment that would have started this reviewer counts: it contains
-            # the keyword (contains() above ignores case), no bot wrote it, and
-            # its author can write to the repo. Authors' access is looked up
-            # only once the other rules already reach the cap, once per author;
-            # an author whose access cannot be read does not count.
+            # Round cap: at most MAX_REREVIEWS (the max_rereviews input, default
+            # 3) @mention re-reviews per reviewer per PR; the review on open does
+            # not count. Every earlier review comment that would have started
+            # this reviewer counts: it contains the keyword (contains() above
+            # ignores case), no bot wrote it, and its author can write to the
+            # repo. Authors' access is looked up only once the other rules
+            # already reach the cap, once per author; an author whose access
+            # cannot be read does not count.
             # "Earlier" is a lower comment id, so the comment that started this
             # run, and any posted after it, do not count. It counts requests,
             # not reviews that finished: a request replaced while waiting, made
@@ -159,7 +167,6 @@ jobs:
             # add that label, never an agent.
             # If the comments cannot be listed or read, the review runs: the
             # cap fails open.
-            MAX_REREVIEWS=3
             if [ "$EXTRA_ROUND" != "true" ]; then
               PRIOR=0
               AUTHORS=""
@@ -197,7 +204,7 @@ jobs:
                 echo "has_code=false" >> "$GITHUB_OUTPUT"
                 echo "⊘ $PRIOR earlier $MENTION_KEYWORD requests on this PR (cap $MAX_REREVIEWS) — $REVIEWER_NAME re-review skipped."
                 gh api -X POST "repos/$REPO/pulls/$PR_NUMBER/comments/$THREAD_ID/replies" \
-                  -f body="$REVIEWER_NAME re-review skipped: this PR has used its $MAX_REREVIEWS $REVIEWER_NAME re-reviews. Add the \`extra-review-round\` label to the PR to run more." \
+                  -f body="$REVIEWER_NAME re-review skipped: this PR has reached its $REVIEWER_NAME re-review cap ($MAX_REREVIEWS). Add the \`extra-review-round\` label to the PR to run more." \
                   > /dev/null || echo "::warning::Could not post the round-cap notice."
                 exit 0
               fi

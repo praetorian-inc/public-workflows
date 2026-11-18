@@ -97,6 +97,12 @@ on:
         type: string
         default: ""
 
+      max_rereviews:
+        description: "Most @claude re-reviews per PR; the review on open does not count. The extra-review-round label lifts the cap. Passed through to the shared preflight."
+        required: false
+        type: number
+        default: 3
+
     secrets:
       ANTHROPIC_API_KEY:
         description: "Anthropic API key for Claude"
@@ -123,6 +129,7 @@ jobs:
       mention_keyword: "@claude"
       reviewer_name: "Claude"
       force_review_regex: ${{ inputs.force_review_regex }}
+      max_rereviews: ${{ inputs.max_rereviews }}
       enable-harden-runner: ${{ inputs.enable-harden-runner }}
       harden-runner-policy: ${{ inputs.harden-runner-policy }}
       harden-runner-allowed-endpoints: ${{ inputs.harden-runner-allowed-endpoints }}
