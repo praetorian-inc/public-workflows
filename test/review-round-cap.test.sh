@@ -34,6 +34,8 @@ set -uo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 # PREFLIGHT_WORKFLOW points the suite at another copy (used to mutation-test it).
+# The four reviewer workflows that forward max_rereviews are always read from
+# this checkout's .github/workflows.
 WORKFLOW="${PREFLIGHT_WORKFLOW:-$REPO_ROOT/.github/workflows/preflight.yml}"
 
 WORKDIR="$(mktemp -d)" || { echo "ERROR: mktemp failed" >&2; exit 1; }
@@ -65,7 +67,7 @@ section "Static contract — the step the cases run"
 
 # Each check prints "PASS<TAB>name" or "FAIL<TAB>name<TAB>expected<TAB>actual";
 # the step's run: body and its env: names are written out for the cases below.
-python3 - "$WORKFLOW" "$EXTRACT" > "$WORKDIR/static.tsv" <<'PY' || { echo "ERROR: static extraction failed" >&2; exit 1; }
+python3 - "$WORKFLOW" "$EXTRACT" "$REPO_ROOT/.github/workflows" > "$WORKDIR/static.tsv" <<'PY' || { echo "ERROR: static extraction failed" >&2; exit 1; }
 import pathlib
 import sys
 
@@ -99,6 +101,23 @@ shells = [s for s in (
     ((wf.get("defaults") or {}).get("run") or {}).get("shell"),
 ) if s]
 check("step runs in the default shell (bash -e, no pipefail)", not shells, "no shell: override", shells)
+
+# max_rereviews reaches the step: each reviewer declares it (default 3) and
+# forwards it to its preflight job; preflight declares it and binds MAX_REREVIEWS.
+MAX = "${{ inputs.max_rereviews }}"
+bound = (step.get("env") or {}).get("MAX_REREVIEWS")
+check("step env: MAX_REREVIEWS is the max_rereviews input", bound == MAX, MAX, bound)
+docs = {"preflight.yml": wf}
+for r in ("claude", "codex", "gemini", "grok"):
+    docs["%s-code.yml" % r] = yaml.safe_load(open("%s/%s-code.yml" % (sys.argv[3], r), encoding="utf-8"))
+for name, doc in docs.items():
+    # PyYAML reads the bare `on:` key as the boolean True.
+    inputs = ((doc.get("on", doc.get(True)) or {}).get("workflow_call") or {}).get("inputs") or {}
+    default = (inputs.get("max_rereviews") or {}).get("default")
+    check("%s: input max_rereviews defaults to 3" % name, default == 3, 3, default)
+    if name != "preflight.yml":
+        fwd = (((doc.get("jobs") or {}).get("preflight") or {}).get("with") or {}).get("max_rereviews")
+        check("%s: jobs.preflight.with.max_rereviews is the input" % name, fwd == MAX, MAX, fwd)
 
 (out / "check.sh").write_text(body)
 (out / "env.txt").write_text("".join("%s\n" % k for k in (step.get("env") or {})))
