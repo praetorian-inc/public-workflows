@@ -82,10 +82,10 @@ on:
           - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review." Keep any Suggestions below it.
 
       model:
-        description: "Gemini model ID. Default: gemini-4-carbon, run at thinking level HIGH (the settings override matches that model ID only)."
+        description: "Gemini model ID. Default: gemini-4-neon, run at thinking level HIGH (the settings override matches that model ID only)."
         required: false
         type: string
-        default: "gemini-4-carbon"
+        default: "gemini-4-neon"
 
       review_exclude_pathspecs:
         description: "Newline-separated git pathspec patterns excluded from the reviewed diff — ONLY for generated artifacts that the consumer repo's CI mechanically verifies against their canonical sources (e.g. agentsmesh mirrors: `.claude/**`, a generated `AGENTS.md`). NEVER exclude hand-maintained agent-control or prompt files; those must stay in review scope. Each non-empty line becomes a `:(exclude)` pathspec on the diff commands. Empty = full PR diff. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment."
@@ -657,13 +657,13 @@ jobs:
           rm -f -- "$GRAPHIFY_QUERY_LOG"
           mkdir -p .gemini
           # LAB-7944: a flat 80 turns on every PR, and thinking level HIGH for
-          # gemini-4-carbon (the override matches that model ID only).
+          # gemini-4-neon (the override matches that model ID only).
           cat > .gemini/settings.json <<'SETTINGS_EOF'
           {
             "model": { "maxSessionTurns": 80 },
             "modelConfigs": {
               "customOverrides": [
-                { "match": { "model": "gemini-4-carbon" }, "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "HIGH" } } } }
+                { "match": { "model": "gemini-4-neon" }, "modelConfig": { "generateContentConfig": { "thinkingConfig": { "thinkingLevel": "HIGH" } } } }
               ]
             },
             "telemetry": { "enabled": false },

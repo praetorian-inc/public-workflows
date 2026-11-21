@@ -27,11 +27,11 @@ fi
 
 # The workflow_call `model:` input, up to the next input.
 MODEL_INPUT="$(awk '/^      model:[[:space:]]*$/ { on = 1; next } on && /^      [A-Za-z0-9_-]+:[[:space:]]*$/ { exit } on { print }' "$WF")"
-if printf '%s\n' "$MODEL_INPUT" | grep -q -E '^[[:space:]]+default: "gemini-4-carbon"[[:space:]]*$' \
-  && printf '%s\n' "$MODEL_INPUT" | grep -q -E '^[[:space:]]+description: .*gemini-4-carbon'; then
-  ok "model input defaults to gemini-4-carbon and says so"
+if printf '%s\n' "$MODEL_INPUT" | grep -q -E '^[[:space:]]+default: "gemini-4-neon"[[:space:]]*$' \
+  && printf '%s\n' "$MODEL_INPUT" | grep -q -E '^[[:space:]]+description: .*gemini-4-neon'; then
+  ok "model input defaults to gemini-4-neon and says so"
 else
-  bad "model input defaults to gemini-4-carbon and says so" "$MODEL_INPUT"
+  bad "model input defaults to gemini-4-neon and says so" "$MODEL_INPUT"
 fi
 
 SETTINGS="$(awk -v start="cat > .gemini/settings.json <<'SETTINGS_EOF'" '
@@ -54,9 +54,9 @@ def get(d, *keys):
 overrides = get(s, "modelConfigs", "customOverrides")
 levels = [get(o, "modelConfig", "generateContentConfig", "thinkingConfig", "thinkingLevel")
           for o in (overrides if isinstance(overrides, list) else [])
-          if isinstance(o, dict) and o.get("match") == {"model": "gemini-4-carbon"}]
+          if isinstance(o, dict) and o.get("match") == {"model": "gemini-4-neon"}]
 print("json=ok")
-print("carbon_levels=" + json.dumps(levels))
+print("neon_levels=" + json.dumps(levels))
 print("turns=" + json.dumps(get(s, "model", "maxSessionTurns")))
 ')"
 # shellcheck disable=SC2016  # literal ${{ is the Actions expression opener
@@ -67,10 +67,10 @@ else
   bad "settings.json heredoc is literal JSON (no \${{ }})" "probe=${probe:-none}"
 fi
 
-if printf '%s\n' "$probe" | grep -q -x -F 'carbon_levels=["HIGH"]'; then
-  ok "gemini-4-carbon override sets thinkingLevel HIGH"
+if printf '%s\n' "$probe" | grep -q -x -F 'neon_levels=["HIGH"]'; then
+  ok "gemini-4-neon override sets thinkingLevel HIGH"
 else
-  bad "gemini-4-carbon override sets thinkingLevel HIGH" "probe=${probe:-none}"
+  bad "gemini-4-neon override sets thinkingLevel HIGH" "probe=${probe:-none}"
 fi
 
 if printf '%s\n' "$probe" | grep -q -x -F 'turns=80'; then
