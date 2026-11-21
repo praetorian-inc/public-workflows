@@ -42,10 +42,10 @@ on:
           - If Critical Issues, Security and Design are all empty: "No critical issues — LGTM pending human review." Keep any Suggestions below it.
 
       model:
-        description: "Codex review model ID. Default gpt-5.6-sol — the flagship, Codex-optimized 5.6 tier (validated accessible in CI). Override per-caller only for special cases: gpt-5.6-luna (fast/cheap, cost-sensitive repos) or gpt-5.6-terra (balanced cost/quality). Note: there is no plain 'gpt-5.6' — the 5.6 generation ships only as the luna/terra/sol tiers."
+        description: "OpenAI model ID for Codex PR reviews. Callers can override the default."
         required: false
         type: string
-        default: "gpt-5.6-sol"
+        default: "gpt-6.2-astra"
 
       effort:
         description: "Reasoning effort level (none, low, medium, high, xhigh)"
