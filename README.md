@@ -383,7 +383,7 @@ Runs Gemini as a complementary PR reviewer **alongside** the Claude PR Assistant
 - **Preflight job**: Skips docs-only PRs; `@gemini` on a PR review comment bypasses the filter. Agent-behavior sources (`SKILL.md`, agent instruction files like `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`, harness config dirs `.agents/`/`.claude/`/`.gemini/`/`.codex/`, and `.agentsmesh/**`) always force a review even when markdown-only (built-in `FORCE_RE`; extend via the `force_review_regex` input). `review_exclude_pathspecs` (newline-separated git pathspecs) excludes generated artifacts (e.g. agentsmesh mirrors) from the reviewed diff; generated artifacts only — never hand-maintained agent-control files. A PR whose every changed file matches these pathspecs skips the review with an explanatory comment.
 - **Anti-injection prompt**: Gemini instructed to treat all PR content (including `GEMINI.md`) as untrusted data
 - **Pinned**: the CLI version is hardcoded in the `npm install` (`@google/gemini-cli@0.68.0`, **not** a caller input — it governs folder-trust/tool-policy semantics); review-skill allowlist vendored in this repo
-- **Model, thinking and turn cap (LAB-7944)**: the default model `gemini-4-carbon` runs at thinking level high (a `modelConfigs.customOverrides` entry in the hardcoded settings, matched to that model ID only). `maxSessionTurns` is a flat 80 on every PR, whatever its size. Job `timeout-minutes: 30` is the wall clock. Turn-limit failures post a notice that does **not** advise retry. No fallback model: a failed review fails the job. The review footer names the model(s) listed in the trace's `result.stats.models`, or the requested model and "serving model unknown" when that list is missing or empty.
+- **Model, thinking and turn cap (LAB-7944)**: the default model `gemini-4-neon` runs at thinking level high (a `modelConfigs.customOverrides` entry in the hardcoded settings, matched to that model ID only). `maxSessionTurns` is a flat 80 on every PR, whatever its size. Job `timeout-minutes: 30` is the wall clock. Turn-limit failures post a notice that does **not** advise retry. No fallback model: a failed review fails the job. The review footer names the model(s) listed in the trace's `result.stats.models`, or the requested model and "serving model unknown" when that list is missing or empty.
 - **CODEOWNERS**: `@praetorian-inc/security-engineering` review required on any change
 
 **Minimal caller** (drop this in `.github/workflows/gemini-code.yml` of a consumer repo):
@@ -413,7 +413,7 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `prompt` | Built-in 4-section review template | Custom review prompt (the PR diff is materialized to `.gemini-review/pr.diff` for the agent to read) |
-| `model` | `gemini-4-carbon` | Gemini model ID (thinking level high applies to `gemini-4-carbon` only) |
+| `model` | `gemini-4-neon` | Gemini model ID (thinking level high applies to `gemini-4-neon` only) |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `generativelanguage.googleapis.com:443, api.github.com:443, github.com:443, registry.npmjs.org:443, storage.googleapis.com:443, objects.githubusercontent.com:443, release-assets.githubusercontent.com:443, pypi.org:443, files.pythonhosted.org:443` |
