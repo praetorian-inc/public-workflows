@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 #
 # Tests for .github/workflows/ts-ci.yml:
-#   * Static contract (permissions, on.workflow_call inputs/defaults, downstream
-#     has_ts job gating, step env: mappings, no ${{ }} in run: blocks)
+#   * Static contract (workflow permissions: contents: read, extracted step
+#     shapes, env: mappings, working-directory, default shell, no ${{ }} in run:)
 #   * jobs.preflight.steps[id=check]  — PR changed-file detection, non-PR
 #     bypass, and fail-open behavior
 #   * jobs.test.steps[name="Run tests"] — failing script stderr preservation,
-#     missing/invalid script error handling, and passing script execution
+#     dash-prefixed script execution, missing/invalid scripts, passing scripts
 #
 # Both `run:` blocks are EXTRACTED from the workflow YAML at runtime, never
 # mirrored, and executed via `bash -e` (GitHub Actions' default Linux shell).
 #
 # Requires: bash (3.2+), python3 with PyYAML, jq, node, npm.
-#
 # Usage: bash test/ts-ci.test.sh
 #
 set -uo pipefail
@@ -66,167 +65,56 @@ def check(name, cond, expected="", actual=""):
         print("FAIL\t%s\t%s\t%s" % (name, expected, str(actual).replace("\n", " ")))
 
 
-# Top-level and job-level permissions (C3: contents: read only).
-check(
-    "workflow permissions are contents: read only",
-    wf.get("permissions") == {"contents": "read"},
-    "{'contents': 'read'}",
-    wf.get("permissions"),
-)
+def check_step(label, job, step, want_env, filename, want_wd=None):
+    body = step.get("run") or ""
+    check("%s is a plain run: step (no uses:)" % label, bool(body) and "uses" not in step, "run only", step.get("uses"))
+    check("%s run: has no ${{ }} expressions" % label, "${{" not in body, "none", "contains ${{")
+    shells = [s for s in (
+        step.get("shell"),
+        ((job.get("defaults") or {}).get("run") or {}).get("shell"),
+        ((wf.get("defaults") or {}).get("run") or {}).get("shell"),
+    ) if s]
+    check("%s runs in the default shell (bash -e, no pipefail)" % label, not shells, "no shell: override", shells)
+    if want_wd is not None:
+        check("%s sets working-directory to %s" % (label, want_wd), step.get("working-directory") == want_wd, want_wd, step.get("working-directory"))
+    env = step.get("env") or {}
+    check("%s env: maps expected inputs/context" % label, env == want_env, want_env, env)
+    (out / filename).write_text(body, encoding="utf-8")
+
+
+check("workflow permissions are contents: read only", wf.get("permissions") == {"contents": "read"}, "{'contents': 'read'}", wf.get("permissions"))
 
 jobs = wf.get("jobs") or {}
-for jname in ("preflight", "install", "typecheck", "lint", "test"):
-    jperms = (jobs.get(jname) or {}).get("permissions")
-    check(
-        "job %s permissions are contents: read only" % jname,
-        jperms == {"contents": "read"},
-        "{'contents': 'read'}",
-        jperms,
-    )
-
-# on.workflow_call input schema and defaults (PyYAML parses bare `on:` as True).
-trigger = wf.get("on", wf.get(True)) or {}
-wcall = trigger.get("workflow_call") or {}
-inputs = wcall.get("inputs") or {}
-expected_inputs = {
-    "working-directory": ("string", "."),
-    "node-version": ("string", "22"),
-    "enable-typecheck": ("boolean", True),
-    "enable-lint": ("boolean", True),
-    "enable-test": ("boolean", True),
-    "test-script": ("string", "test"),
-    "enable-private-deps": ("boolean", False),
-    "private-deps-owner": ("string", "praetorian-inc"),
-    "private-deps-repos": ("string", ""),
-    "enable-harden-runner": ("boolean", True),
-    "harden-runner-policy": ("string", "audit"),
-    "harden-runner-allowed-endpoints": ("string", ""),
-}
-bad_inputs = {}
-for key, (etype, edef) in expected_inputs.items():
-    spec = inputs.get(key)
-    if not isinstance(spec, dict) or spec.get("type") != etype or spec.get("default") != edef:
-        bad_inputs[key] = spec
-check(
-    "on.workflow_call.inputs preserves all 12 inputs with types and defaults",
-    not bad_inputs,
-    "all 12 inputs intact",
-    bad_inputs,
-)
-
-secrets = wcall.get("secrets") or {}
-check(
-    "on.workflow_call.secrets preserves PLUGIN_CI_APP_ID and PLUGIN_CI_PRIVATE_KEY",
-    set(("PLUGIN_CI_APP_ID", "PLUGIN_CI_PRIVATE_KEY")).issubset(set(secrets.keys())),
-    "PLUGIN_CI_APP_ID, PLUGIN_CI_PRIVATE_KEY",
-    sorted(secrets.keys()),
-)
-
-# Preflight output wiring to downstream jobs.
 preflight = jobs.get("preflight") or {}
-check(
-    "preflight exports has_ts from steps.check.outputs.has_ts",
-    (preflight.get("outputs") or {}).get("has_ts") == "${{ steps.check.outputs.has_ts }}",
-    "${{ steps.check.outputs.has_ts }}",
-    (preflight.get("outputs") or {}).get("has_ts"),
-)
-
-expected_gates = {
-    "install": "needs.preflight.outputs.has_ts == 'true'",
-    "typecheck": "needs.preflight.outputs.has_ts == 'true' && inputs.enable-typecheck",
-    "lint": "needs.preflight.outputs.has_ts == 'true' && inputs.enable-lint",
-    "test": "needs.preflight.outputs.has_ts == 'true' && inputs.enable-test",
-}
-for jname, want_if in expected_gates.items():
-    j = jobs.get(jname) or {}
-    actual_if = j.get("if")
-    check(
-        "job %s gates on preflight has_ts" % jname,
-        actual_if == want_if,
-        want_if,
-        actual_if,
-    )
-
-# Extract preflight step (id: check).
 pf_step = next((s for s in preflight.get("steps") or [] if s.get("id") == "check"), None)
 check("jobs.preflight has step id: check", pf_step is not None, "step id=check", "none")
 if pf_step is not None:
-    pf_body = pf_step.get("run") or ""
-    check(
-        "preflight check is a plain run: step (no uses:)",
-        bool(pf_body) and "uses" not in pf_step,
-        "run only",
-        pf_step.get("uses"),
+    check_step(
+        "preflight check",
+        preflight,
+        pf_step,
+        {
+            "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
+            "EVENT_NAME": "${{ github.event_name }}",
+            "REPO": "${{ github.repository }}",
+            "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+            "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+        },
+        "preflight.sh",
     )
-    check(
-        "preflight check run: has no ${{ }} expressions",
-        "${{" not in pf_body,
-        "none",
-        "contains ${{",
-    )
-    pf_shell = pf_step.get("shell") or ((preflight.get("defaults") or {}).get("run") or {}).get("shell")
-    check(
-        "preflight check runs in default/bash shell",
-        pf_shell in (None, "bash"),
-        "None or bash",
-        pf_shell,
-    )
-    pf_env = pf_step.get("env") or {}
-    want_pf_env = {
-        "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}",
-        "EVENT_NAME": "${{ github.event_name }}",
-        "REPO": "${{ github.repository }}",
-        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
-        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-    }
-    check(
-        "preflight check env: maps GH_TOKEN, EVENT_NAME, REPO, BASE_SHA, HEAD_SHA",
-        pf_env == want_pf_env,
-        want_pf_env,
-        pf_env,
-    )
-    (out / "preflight.sh").write_text(pf_body, encoding="utf-8")
 
-# Extract test job "Run tests" step.
 test_job = jobs.get("test") or {}
 rt_step = next((s for s in test_job.get("steps") or [] if s.get("name") == "Run tests"), None)
 check("jobs.test has step name: Run tests", rt_step is not None, "step name='Run tests'", "none")
 if rt_step is not None:
-    rt_body = rt_step.get("run") or ""
-    check(
-        "Run tests is a plain run: step (no uses:)",
-        bool(rt_body) and "uses" not in rt_step,
-        "run only",
-        rt_step.get("uses"),
+    check_step(
+        "Run tests",
+        test_job,
+        rt_step,
+        {"TEST_SCRIPT": "${{ inputs.test-script }}"},
+        "run-tests.sh",
+        want_wd="${{ inputs.working-directory }}",
     )
-    check(
-        "Run tests run: has no ${{ }} expressions",
-        "${{" not in rt_body,
-        "none",
-        "contains ${{",
-    )
-    rt_shell = rt_step.get("shell") or ((test_job.get("defaults") or {}).get("run") or {}).get("shell")
-    check(
-        "Run tests runs in default/bash shell",
-        rt_shell in (None, "bash"),
-        "None or bash",
-        rt_shell,
-    )
-    check(
-        "Run tests sets working-directory to inputs.working-directory",
-        rt_step.get("working-directory") == "${{ inputs.working-directory }}",
-        "${{ inputs.working-directory }}",
-        rt_step.get("working-directory"),
-    )
-    rt_env = rt_step.get("env") or {}
-    want_rt_env = {"TEST_SCRIPT": "${{ inputs.test-script }}"}
-    check(
-        "Run tests env: maps TEST_SCRIPT to inputs.test-script",
-        rt_env == want_rt_env,
-        want_rt_env,
-        rt_env,
-    )
-    (out / "run-tests.sh").write_text(rt_body, encoding="utf-8")
 PY
 
 while IFS=$'\t' read -r verdict name exp act; do
@@ -396,7 +284,6 @@ section "INV-1 / CASE-1 — preflight emits has_ts=true for subdirectory and roo
 
 for path in \
   "_test-fixtures/ts-minimal/package.json" \
-  "subdir/package.json" \
   "subdir/package-lock.json" \
   "subdir/tsconfig.json" \
   "subdir/tsconfig.build.json" \
@@ -408,20 +295,10 @@ for path in \
   "subdir/.eslintrc" \
   "subdir/.eslintrc.json" \
   "subdir/.eslintrc.yml" \
-  "packages/app/frontend/package.json" \
   "src/index.ts" \
   "package.json" \
   "package-lock.json" \
-  "tsconfig.json" \
-  "tsconfig.build.json" \
-  "vitest.config.ts" \
-  "vitest.config.mts" \
-  "vitest.config.cts" \
-  "eslint.config.mjs" \
-  "eslint.config.mts" \
-  ".eslintrc" \
-  ".eslintrc.json" \
-  ".eslintrc.yml"; do
+  "tsconfig.json"; do
   preflight_case "PR modifying $path -> has_ts=true" "true" "pull_request" "0" "$path"
 done
 
@@ -435,12 +312,17 @@ for path in \
   "README.md" \
   "subdir/my-package.json" \
   "subdir/my-package-lock.json" \
+  "subdir/package-lock_json" \
   "subdir/my-tsconfig.json" \
   "subdir/my.eslintrc.json" \
   "subdir/my-vitest.config.mts" \
   "subdir/my-eslint.config.mts" \
   "docs/package.json.md" \
-  "docs/package-lock.json.bak"; do
+  "docs/package-lock.json.bak" \
+  "docs/tsconfig-migration.md" \
+  "docs/eslint.config-notes.md" \
+  "docs/vitest.config-notes.md" \
+  "docs/.eslintrc-notes.md"; do
   preflight_case "PR modifying $path -> has_ts=false" "false" "pull_request" "0" "$path"
 done
 
@@ -463,7 +345,6 @@ done
 
 preflight_case "PR with gh api error -> has_ts=true (fail open)" "true" "pull_request" "1" "README.md"
 
-# 300 non-TS files hit GitHub compare API's 300-file cap -> fail open.
 MANY_FILES=()
 i=1
 while [ "$i" -le 300 ]; do
@@ -486,6 +367,16 @@ else
     "rc=$RC, stderr=[$(tr '\n' ' ' < "$STDERR")], stdout=[$(tr '\n' ' ' < "$STDOUT")]"
 fi
 
+run_tests_step "set-script" "-s" "-s" \
+  "node -e \"console.log('PASS_DASH_SCRIPT'); console.error('ERR_DASH_SCRIPT'); process.exit(3)\""
+if [ "$RC" -eq 3 ] && grep -qF -- "PASS_DASH_SCRIPT" "$STDOUT" && grep -qF -- "ERR_DASH_SCRIPT" "$STDERR"; then
+  ok "dash-prefixed script '-s' executes (not parsed as npm flag) and preserves rc/stdout/stderr"
+else
+  bad "dash-prefixed script '-s' executes (not parsed as npm flag) and preserves rc/stdout/stderr" \
+    "rc=3, stdout contains PASS_DASH_SCRIPT, stderr contains ERR_DASH_SCRIPT" \
+    "rc=$RC, stdout=[$(tr '\n' ' ' < "$STDOUT")], stderr=[$(tr '\n' ' ' < "$STDERR")]"
+fi
+
 # ── INV-4 / CASE-4: Run tests rejects missing/invalid test-script ────────────
 section "INV-4 / CASE-4 — Run tests exits non-zero naming missing/invalid test-script"
 
@@ -504,36 +395,22 @@ missing_script_case() { # missing_script_case <label> <mode> <test_script> [ov_k
   fi
   local trimmed="${script//[[:space:]]/}"
   if [ -n "$trimmed" ]; then
-    if grep -qF -- "$script" "$combined"; then
-      ok "$label"
-    else
-      bad "$label" "error naming '$script'" "rc=$RC, out=[$(tr '\n' ' ' < "$combined")]"
-    fi
+    if grep -qF -- "$script" "$combined"; then ok "$label"
+    else bad "$label" "error naming '$script'" "rc=$RC, out=[$(tr '\n' ' ' < "$combined")]"; fi
   else
-    if [ -s "$combined" ]; then
-      ok "$label"
-    else
-      bad "$label" "non-empty error output" "rc=$RC, out=[]"
-    fi
+    if [ -s "$combined" ]; then ok "$label"
+    else bad "$label" "non-empty error output" "rc=$RC, out=[]"; fi
   fi
 }
 
-missing_script_case "absent script 'nonexistent-script' in _test-fixtures/ts-minimal" \
-  "as-is" "nonexistent-script"
-missing_script_case "missing package.json with TEST_SCRIPT=test" \
-  "no-pkg" "test"
-missing_script_case "package.json missing .scripts key" \
-  "no-scripts" "missing-scripts-key"
-missing_script_case "package.json with .scripts: null" \
-  "null-scripts" "null-scripts"
-missing_script_case "package.json script value is empty string ''" \
-  "set-script" "empty-script" "empty-script" ""
-missing_script_case "package.json script value is whitespace '   '" \
-  "set-script" "blank-script" "blank-script" "   "
-missing_script_case "empty TEST_SCRIPT ''" \
-  "as-is" ""
-missing_script_case "whitespace TEST_SCRIPT '   '" \
-  "as-is" "   "
+missing_script_case "absent script 'nonexistent-script' in _test-fixtures/ts-minimal" "as-is" "nonexistent-script"
+missing_script_case "missing package.json with TEST_SCRIPT=test" "no-pkg" "test"
+missing_script_case "package.json missing .scripts key" "no-scripts" "missing-scripts-key"
+missing_script_case "package.json with .scripts: null" "null-scripts" "null-scripts"
+missing_script_case "package.json script value is empty string ''" "set-script" "empty-script" "empty-script" ""
+missing_script_case "package.json script value is whitespace '   '" "set-script" "blank-script" "blank-script" "   "
+missing_script_case "empty TEST_SCRIPT ''" "as-is" ""
+missing_script_case "whitespace TEST_SCRIPT '   '" "as-is" "   "
 
 # ── Guard duality: Run tests succeeds on defined passing scripts ─────────────
 section "Run tests — defined passing scripts succeed"

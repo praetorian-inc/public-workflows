@@ -185,7 +185,7 @@ jobs:
           printf '%s\n' "$FILES" | sed 's/^/  /'
           echo
 
-          TS_RE='\.(tsx|ts|jsx|js|mjs|cjs)$|(^|/)package\.json$|(^|/)package-lock\.json$|(^|/)tsconfig|(^|/)vitest\.config|(^|/)\.eslintrc|(^|/)eslint\.config'
+          TS_RE='\.(tsx|ts|jsx|js|mjs|cjs)$|(^|/)package\.json$|(^|/)package-lock\.json$|(^|/)tsconfig[^/]*\.jsonc?$|(^|/)vitest\.config(\.[^/.]+)*\.(ts|mts|cts|js|mjs|cjs)$|(^|/)\.eslintrc(\.(js|cjs|yml|yaml|json))?$|(^|/)eslint\.config(\.[^/.]+)*\.(ts|mts|cts|js|mjs|cjs)$'
           if printf '%s\n' "$FILES" | grep -E "$TS_RE" | grep -q .; then
             echo "has_ts=true" >> "$GITHUB_OUTPUT"
             echo "✓ TypeScript/JS changes detected — CI will run."
@@ -551,4 +551,4 @@ jobs:
             echo "::error::Test script '$TEST_SCRIPT' not found in package.json"
             exit 1
           fi
-          npm run "$TEST_SCRIPT"
+          npm run -- "$TEST_SCRIPT"
