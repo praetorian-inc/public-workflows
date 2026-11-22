@@ -287,6 +287,7 @@ for path in \
   "subdir/package-lock.json" \
   "subdir/tsconfig.json" \
   "subdir/tsconfig.build.json" \
+  "subdir/tsconfig.jsonc" \
   "subdir/vitest.config.ts" \
   "subdir/vitest.config.mts" \
   "subdir/vitest.config.cts" \
@@ -298,7 +299,8 @@ for path in \
   "src/index.ts" \
   "package.json" \
   "package-lock.json" \
-  "tsconfig.json"; do
+  "tsconfig.json" \
+  "tsconfig.jsonc"; do
   preflight_case "PR modifying $path -> has_ts=true" "true" "pull_request" "0" "$path"
 done
 
