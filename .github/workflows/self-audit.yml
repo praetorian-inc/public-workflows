@@ -27,6 +27,7 @@ on:
       - 'test/agents-md-drift-comment.test.sh'
       - 'test/review-round-cap.test.sh'
       - 'test/linear-id-required.test.sh'
+      - 'test/go-sec-govulncheck-sarif-gate.test.sh'
   push:
     branches: [main]
     paths:
@@ -49,6 +50,7 @@ on:
       - 'test/agents-md-drift-comment.test.sh'
       - 'test/review-round-cap.test.sh'
       - 'test/linear-id-required.test.sh'
+      - 'test/go-sec-govulncheck-sarif-gate.test.sh'
 
 permissions:
   contents: read
@@ -135,6 +137,9 @@ jobs:
 
       - name: Unit-test the Linear issue id check (LAB-4594)
         run: bash test/linear-id-required.test.sh
+
+      - name: Unit-test the go-sec govulncheck SARIF fail-on-findings gate
+        run: bash test/go-sec-govulncheck-sarif-gate.test.sh
 
       - name: Install zizmor
         env:
