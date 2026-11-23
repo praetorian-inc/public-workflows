@@ -1084,122 +1084,228 @@ jobs:
                 .filter(c => c.user && c.user.login === 'github-actions[bot]')
                 .filter(c => priorIds ? !priorIds.has(c.id) : Date.parse(c.created_at) >= startedAt);
 
-              // Prefer exact comment IDs parsed from main-session Bash
-              // `gh pr comment` tool results in EXEC_FILE, intersected with
-              // newBotComments, so concurrent sibling workflow comments are
-              // never hijacked and untrusted PR text cannot forge an ID.
+              // Prefer exact comment IDs parsed from standalone `gh pr comment`
+              // Bash tool results in EXEC_FILE (main session or subagent),
+              // intersected with newBotComments, so concurrent sibling or
+              // unrelated workflow comments are never hijacked and untrusted
+              // PR text from mixed commands (`gh pr view && gh pr comment`)
+              // cannot forge an ID.
               const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
               const serverUrl = (process.env.GITHUB_SERVER_URL || 'https://github.com').replace(/\/+$/, '');
               const commentUrlRe = new RegExp(
                 `^${escapeRe(serverUrl)}/${escapeRe(owner)}/${escapeRe(repo)}/(?:pull|issues)/${escapeRe(prNumber)}#issuecomment-(\\d+)$`,
                 'i'
               );
-              const isGhPrCommentCmd = (cmd) => {
-                if (typeof cmd !== 'string') return false;
-                // Strip line continuations, backslash escapes, single/double quoted strings,
-                // and shell comments (only after start/whitespace/metacharacter) in one O(n) pass
-                // so `graphify query "gh pr comment"` or `# gh pr comment` never false-matches.
-                const unquoted = cmd
-                  .replace(/\\\r?\n/g, ' ')
-                  .replace(/\\.|'[^']*'|"(?:\\.|[^"\\])*"|(?<=^|[\s;&|(])#[^\r\n]*/g, ' ');
-                return /(?:^|[\r\n;&|(])[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*gh[ \t]+pr[ \t]+comment(?:[ \t\r\n;&|)]|$)/.test(unquoted);
-              };
+              const classifyGhPrCommentCmd = (cmd) => {
+                if (typeof cmd !== 'string') return 'none';
+                const subRe = /(?:^|[^\\])(?:\\\\)*(?:\$\(|`)/;
+                const hdRe = /^<<(-?)[ \t]*(?:'([^'\r\n]+)'|"([^"\r\n]+)"|\\([^\s;&|()<>]+)|([^\s;&|()<>'"\\]+))/;
+                const catHdRe = /^\$\([ \t]*cat[ \t]+<<(-?)[ \t]*(?:'([^'\r\n]+)'|"([^"\r\n]+)"|\\([^\s;&|()<>]+))[ \t]*\r?\n/;
+                const out = [];
+                const pendingHd = [];
+                let hasUnsafeSub = false;
+                let i = 0;
+                const n = cmd.length;
 
-              let execParsed = false;
-              let hasResult = false;
-              let succeededGhCommentCalls = 0;
-              const ghCommentToolIds = new Set();
-              const execCommentIds = new Set();
-              const execPath = (process.env.EXEC_FILE || '').trim();
-              if (execPath) {
-                try {
-                  const rawExec = fs.readFileSync(execPath, 'utf8');
-                  const entries = JSON.parse(rawExec);
-                  if (Array.isArray(entries)) {
-                    execParsed = true;
-                    for (const entry of entries) {
-                      if (!entry || typeof entry !== 'object') continue;
-                      if (entry.type === 'result') {
-                        hasResult = true;
+                const consumeHeredocs = () => {
+                  while (pendingHd.length > 0 && i < n) {
+                    const hd = pendingHd[0];
+                    let end = cmd.indexOf('\n', i);
+                    if (end === -1) end = n;
+                    const line = cmd.slice(i, end).replace(/\r$/, '');
+                    i = end < n ? end + 1 : n;
+                    const cmp = hd.stripTabs ? line.replace(/^\t+/, '') : line;
+                    if (cmp === hd.delim) pendingHd.shift();
+                    else if (!hd.quoted && subRe.test(line)) hasUnsafeSub = true;
+                  }
+                };
+
+                while (i < n) {
+                  const ch = cmd[i];
+                  if (ch === '\n' || ch === '\r') {
+                    out.push(ch);
+                    if (ch === '\r' && cmd[i + 1] === '\n') i++;
+                    i++;
+                    consumeHeredocs();
+                    continue;
+                  }
+                  if (ch === '\\' && i + 1 < n) {
+                    out.push(' ');
+                    i += (cmd[i + 1] === '\r' && cmd[i + 2] === '\n') ? 3 : 2;
+                    continue;
+                  }
+                  if (ch === '$' && cmd[i + 1] === "'") {
+                    let j = i + 2;
+                    while (j < n && cmd[j] !== "'") j += (cmd[j] === '\\' && j + 1 < n) ? 2 : 1;
+                    if (j >= n) { hasUnsafeSub = true; break; }
+                    out.push(' ');
+                    i = j + 1;
+                    continue;
+                  }
+                  if (ch === "'") {
+                    const close = cmd.indexOf("'", i + 1);
+                    if (close === -1) { hasUnsafeSub = true; break; }
+                    out.push(' ');
+                    i = close + 1;
+                    continue;
+                  }
+                  if (ch === '"') {
+                    const cm = catHdRe.exec(cmd.slice(i + 1));
+                    if (cm) {
+                      const stripTabs = Boolean(cm[1]);
+                      const delim = cm[2] || cm[3] || cm[4];
+                      let j = i + 1 + cm[0].length;
+                      let foundDelim = false;
+                      while (j < n) {
+                        let end = cmd.indexOf('\n', j);
+                        if (end === -1) end = n;
+                        const line = cmd.slice(j, end).replace(/\r$/, '');
+                        j = end < n ? end + 1 : n;
+                        if ((stripTabs ? line.replace(/^\t+/, '') : line) === delim) {
+                          foundDelim = true;
+                          break;
+                        }
+                      }
+                      const closeTail = foundDelim ? /^[ \t]*\)"/.exec(cmd.slice(j)) : null;
+                      if (closeTail) {
+                        out.push(' ');
+                        i = j + closeTail[0].length;
                         continue;
                       }
-                      if (entry.parent_tool_use_id != null) continue;
-                      if (entry.type === 'assistant' && entry.message && Array.isArray(entry.message.content)) {
-                        for (const block of entry.message.content) {
-                          if (
-                            block &&
-                            block.type === 'tool_use' &&
-                            block.name === 'Bash' &&
-                            typeof block.id === 'string' &&
-                            block.input &&
-                            isGhPrCommentCmd(block.input.command)
-                          ) {
-                            ghCommentToolIds.add(block.id);
-                          }
-                        }
-                      }
+                      hasUnsafeSub = true;
+                      while (j < n && cmd[j] !== '"') j += (cmd[j] === '\\' && j + 1 < n) ? 2 : 1;
+                      out.push(' ');
+                      i = j < n ? j + 1 : n;
+                      continue;
                     }
-                    if (ghCommentToolIds.size > 0) {
-                      for (const entry of entries) {
-                        if (!entry || typeof entry !== 'object') continue;
-                        if (entry.parent_tool_use_id != null) continue;
-                        if (entry.type !== 'user' || !entry.message || !Array.isArray(entry.message.content)) continue;
-                        for (const block of entry.message.content) {
-                          if (
-                            !block ||
-                            block.type !== 'tool_result' ||
-                            block.is_error === true ||
-                            !ghCommentToolIds.has(block.tool_use_id)
-                          ) {
-                            continue;
-                          }
-                          succeededGhCommentCalls += 1;
-                          const chunks = [];
-                          if (typeof block.content === 'string') {
-                            chunks.push(block.content);
-                          } else if (Array.isArray(block.content)) {
-                            for (const part of block.content) {
-                              if (part && part.type === 'text' && typeof part.text === 'string') {
-                                chunks.push(part.text);
-                              }
-                            }
-                          }
-                          for (const text of chunks) {
-                            for (const line of text.split(/\r?\n/)) {
-                              const match = commentUrlRe.exec(line.trim());
-                              if (match) {
-                                const id = Number(match[1]);
-                                if (Number.isSafeInteger(id)) execCommentIds.add(id);
-                              }
-                            }
-                          }
-                        }
-                      }
+                    let j = i + 1;
+                    let inner = '';
+                    while (j < n && cmd[j] !== '"') {
+                      if (cmd[j] === '\\' && j + 1 < n) { inner += cmd.slice(j, j + 2); j += 2; }
+                      else { inner += cmd[j]; j++; }
+                    }
+                    if (j >= n) { hasUnsafeSub = true; break; }
+                    if (subRe.test(inner)) hasUnsafeSub = true;
+                    out.push(' ');
+                    i = j + 1;
+                    continue;
+                  }
+                  if (ch === '#' && (i === 0 || /[\s;&|({})]/.test(cmd[i - 1]))) {
+                    const end = cmd.indexOf('\n', i);
+                    i = end === -1 ? n : end;
+                    continue;
+                  }
+                  if (ch === '<' && cmd[i + 1] === '<' && cmd[i + 2] !== '<') {
+                    const m = hdRe.exec(cmd.slice(i));
+                    if (m) {
+                      pendingHd.push({
+                        stripTabs: Boolean(m[1]),
+                        delim: m[2] || m[3] || m[4] || m[5],
+                        quoted: Boolean(m[2] || m[3] || m[4]),
+                      });
+                      out.push(' ');
+                      i += m[0].length;
+                      continue;
                     }
                   }
-                } catch (err) {
-                  execParsed = false;
+                  out.push(ch);
+                  i++;
                 }
-              }
+                if (pendingHd.length > 0) hasUnsafeSub = true;
 
-              const isKnownNonClaudeComment = (body) => {
-                const trimmed = (body || '').trimStart();
-                return (
-                  /^##\s+(?:Codex|Gemini|Grok)\s+Review\b/i.test(trimmed) ||
-                  /^##\s+(?:Instruction-File\s+(?:Drift\s+Detection|Audit)|CLAUDE\.md\s+Drift\s+Detection)\b/i.test(trimmed) ||
-                  /^(?:Claude|Codex|Gemini|Grok)\s+(?:re-)?review\s+skipped\b/i.test(trimmed) ||
-                  /^\u26a0\ufe0f?\s*(?:Claude|Codex|Gemini|Grok)\s+review\s+did\s+not\s+complete\b/i.test(trimmed)
-                );
+                const unquoted = out.join('');
+                if (subRe.test(unquoted)) hasUnsafeSub = true;
+                const normalized = unquoted.split(/\r?\n/).map(l => l.trim()).filter(Boolean).join('\n');
+                const hasGhComment = /(?:^|[\r\n;&|({}!]|\b(?:then|do|else|elif)\b)[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|(){}!]*[ \t]+)*gh[ \t]+pr[ \t]+comment(?:[ \t\r\n;&|)}]|$)/.test(normalized);
+                if (!hasGhComment) return 'none';
+
+                const isStandalone =
+                  !hasUnsafeSub &&
+                  !/[\r\n;&|()`<>{}]/.test(normalized) &&
+                  /^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|(){}!]*[ \t]+)*gh[ \t]+pr[ \t]+comment(?:[ \t]|$)/.test(normalized);
+                if (isStandalone && /(?:^|[ \t])(?:-h|--help)(?:[ \t=]|$)/.test(normalized)) {
+                  return 'none';
+                }
+                const isPure =
+                  isStandalone &&
+                  !/(?:^|[ \t])--(?:delete|edit)-last(?:[ \t=]|$)/.test(normalized);
+                return isPure ? 'pure' : 'mixed';
               };
 
+              const parseExecTrace = (execPath) => {
+                const empty = { parsed: false, hasResult: false, hasAmbiguousGhCommentCall: false, execCommentIds: new Set() };
+                if (!execPath) return empty;
+                let entries;
+                try {
+                  entries = JSON.parse(fs.readFileSync(execPath, 'utf8'));
+                } catch (err) {
+                  return empty;
+                }
+                if (!Array.isArray(entries)) return empty;
+
+                let hasResult = false;
+                let hasAmbiguousGhCommentCall = false;
+                const pureGhCommentToolIds = new Set();
+                const seenPureResults = new Set();
+                const execCommentIds = new Set();
+
+                for (const entry of entries) {
+                  if (!entry || typeof entry !== 'object') continue;
+                  if (entry.type === 'result') { hasResult = true; continue; }
+                  if (entry.type !== 'assistant' || !Array.isArray(entry.message?.content)) continue;
+                  for (const block of entry.message.content) {
+                    if (block?.type !== 'tool_use' || block.name !== 'Bash' || typeof block.id !== 'string') continue;
+                    const kind = classifyGhPrCommentCmd(block.input?.command);
+                    if (kind === 'pure') pureGhCommentToolIds.add(block.id);
+                    else if (kind === 'mixed') hasAmbiguousGhCommentCall = true;
+                  }
+                }
+
+                if (pureGhCommentToolIds.size === 0) {
+                  return { parsed: true, hasResult, hasAmbiguousGhCommentCall, execCommentIds };
+                }
+
+                for (const entry of entries) {
+                  if (entry?.type !== 'user' || !Array.isArray(entry.message?.content)) continue;
+                  for (const block of entry.message.content) {
+                    if (block?.type !== 'tool_result' || !pureGhCommentToolIds.has(block.tool_use_id)) continue;
+                    seenPureResults.add(block.tool_use_id);
+                    const text = typeof block.content === 'string'
+                      ? block.content
+                      : Array.isArray(block.content)
+                        ? block.content.filter(p => p?.type === 'text' && typeof p.text === 'string').map(p => p.text).join('\n')
+                        : '';
+                    let foundUrl = false;
+                    for (const line of text.split(/\r?\n/)) {
+                      const match = commentUrlRe.exec(line.trim());
+                      if (!match) continue;
+                      const id = Number(match[1]);
+                      if (!Number.isSafeInteger(id)) continue;
+                      execCommentIds.add(id);
+                      foundUrl = true;
+                    }
+                    if (block.is_error !== true && !foundUrl) hasAmbiguousGhCommentCall = true;
+                  }
+                }
+                if (seenPureResults.size < pureGhCommentToolIds.size) hasAmbiguousGhCommentCall = true;
+
+                return { parsed: true, hasResult, hasAmbiguousGhCommentCall, execCommentIds };
+              };
+
+              const hasClaudeReviewHeading = (body) =>
+                /^(?:#{1,6}[ \t]+Claude[ \t]+Review\b|<h([1-6])(?:[ \t][^>]*)?>[ \t]*Claude[ \t]+Review[ \t]*<\/h\1>)/i.test((body || '').trimStart());
+
+              const trace = parseExecTrace((process.env.EXEC_FILE || '').trim());
               let ours;
-              if (execCommentIds.size > 0) {
-                ours = newBotComments.filter(c => execCommentIds.has(c.id));
-              } else if (execParsed && hasResult && succeededGhCommentCalls === 0) {
-                console.log('Execution trace completed with no successful `gh pr comment` call — skipping conversion.');
+              if (trace.execCommentIds.size > 0) {
+                ours = newBotComments.filter(
+                  c => trace.execCommentIds.has(c.id) || (trace.hasAmbiguousGhCommentCall && hasClaudeReviewHeading(c.body))
+                );
+              } else if (trace.parsed && trace.hasResult && !trace.hasAmbiguousGhCommentCall) {
+                console.log('Execution trace completed with no `gh pr comment` call — skipping conversion.');
                 return;
               } else {
-                ours = newBotComments.filter(c => !isKnownNonClaudeComment(c.body));
+                ours = newBotComments.filter(c => hasClaudeReviewHeading(c.body));
               }
               const claudeComment = ours[ours.length - 1];
 
@@ -1221,12 +1327,11 @@ jobs:
                       repo,
                       comment_id: c.id,
                     });
+                    console.log(`graphify not used: deleted Claude issue comment ${c.id} without converting it.`);
                   } catch (err) {
-                    // Fail closed: an unverified review must not stay posted quietly.
+                    // Fail closed: record failure and keep attempting remaining comments.
                     core.setFailed(`graphify not used, and deleting Claude issue comment ${c.id} failed: ${err.message}`);
-                    return;
                   }
-                  console.log(`graphify not used: deleted Claude issue comment ${c.id} without converting it.`);
                 }
                 return;
               }
