@@ -45,10 +45,10 @@ on:
         description: "OpenAI model ID for Codex PR reviews. Callers can override the default."
         required: false
         type: string
-        default: "gpt-6.2-astra"
+        default: "gpt-6.2-sol"
 
       effort:
-        description: "Reasoning effort level (none, low, medium, high, xhigh)"
+        description: "Reasoning effort level (low, medium, high, xhigh). Use none only with a model that supports it."
         required: false
         type: string
         default: "medium"
@@ -493,6 +493,12 @@ jobs:
           if [ -S /var/run/docker.sock ]; then echo "WARN: docker socket still present"; else echo "OK: docker socket removed"; fi
           if timeout 5 docker info >/dev/null 2>&1; then echo "WARN: docker daemon still reachable"; else echo "OK: docker daemon unreachable"; fi
 
+      - name: Check reasoning effort for GPT-6.2
+        if: steps.context.outputs.empty_scope != 'true' && (inputs.model == 'gpt-6.2-sol' || inputs.model == 'gpt-6.2-astra') && inputs.effort == 'none'
+        run: |
+          echo "::error::GPT-6.2 Sol and Astra do not support effort 'none'. Use 'low' or omit effort for the default 'medium'."
+          exit 1
+
       - name: Run Codex
         id: run_codex
         if: steps.context.outputs.empty_scope != 'true'
@@ -501,7 +507,7 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           # Pin CLI+proxy: empty/unset installs @latest, whose --server-info handshake
           # intermittently breaks vs this action SHA ("Failed to read server info" -> exit 1).
-          codex-version: "0.135.0"
+          codex-version: "0.166.0"
           model: ${{ inputs.model }}
           effort: ${{ inputs.effort }}
           # Hardcoded — callers cannot override. read-only prevents file mutation,
