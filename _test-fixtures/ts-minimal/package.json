@@ -1,6 +1,7 @@
 {
   "name": "ts-ci-test-fixture",
   "version": "0.0.1",
+  "description": "Minimal TypeScript fixture for testing ts-ci.yml",
   "private": true,
   "scripts": {
     "test": "vitest run",

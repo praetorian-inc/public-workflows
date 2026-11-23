@@ -6,12 +6,14 @@ on:
     paths:
       - ".github/workflows/ts-ci.yml"
       - ".github/workflows/test-ts-ci.yml"
+      - "test/ts-ci.test.sh"
       - "_test-fixtures/ts-minimal/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/ts-ci.yml"
       - ".github/workflows/test-ts-ci.yml"
+      - "test/ts-ci.test.sh"
       - "_test-fixtures/ts-minimal/**"
 
 concurrency:
@@ -39,3 +41,37 @@ jobs:
       working-directory: _test-fixtures/ts-minimal
       enable-typecheck: false
       enable-lint: false
+
+  unit-tests:
+    name: Unit tests (preflight & Run tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40  # v2.19.0
+        with:
+          egress-policy: audit
+          disable-sudo-and-containers: true
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: pip install "PyYAML==6.0.2"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Run ts-ci unit test suite
+        run: bash test/ts-ci.test.sh
