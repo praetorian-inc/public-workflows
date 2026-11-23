@@ -423,13 +423,16 @@ jobs:
         env:
           FAIL_ON_FINDINGS: ${{ inputs.fail-on-findings }}
           GOVULNCHECK_PACKAGE: ${{ inputs.govulncheck-package }}
-        # govulncheck exits 0 on clean, 3 on vulns-found, other on error. Under
-        # the default `bash -e` shell, exit 3 aborts the step mid-pipe and can
-        # leave govulncheck-results.sarif empty or truncated; the subsequent
-        # upload-sarif step (guarded by `always()`) then fails with
-        # "Invalid SARIF. JSON syntax error: Unexpected end of JSON input".
-        # We disable `-e`, tee stderr for debuggability, and fall back to a
-        # minimal valid SARIF on malformed output so upload always succeeds.
+        # In SARIF mode govulncheck exits 0 even when it finds vulnerabilities —
+        # exit 3 ("vulns found") is a text-mode-only signal. Non-zero exits other
+        # than 3 are tool errors. The findings gate below therefore reads the
+        # SARIF itself: govulncheck marks a finding whose vulnerable symbol the
+        # code actually calls as level "error" (imported-only is "warning",
+        # required-module-only is "note"), which is exactly what makes text mode
+        # exit 3. Verified on govulncheck v1.7.0 and v1.10.0.
+        # We disable `-e` so the SARIF is always written, tee stderr for
+        # debuggability, and fall back to a minimal valid SARIF on malformed
+        # output so the always() upload step never fails on invalid JSON.
         run: |
           set +e
           # shellcheck disable=SC2086  # package spec may be a space-separated list (e.g. ./...)
@@ -441,7 +444,9 @@ jobs:
             cat govulncheck-stderr.log
             echo "::endgroup::"
           fi
-          if [ ! -s govulncheck-results.sarif ] || ! python3 -c "import json,sys; json.load(open('govulncheck-results.sarif'))" 2>/dev/null; then
+          SARIF_VALID=true
+          if [ ! -s govulncheck-results.sarif ] || ! python3 -c "import json,sys; d=json.load(open('govulncheck-results.sarif')); sys.exit(0 if isinstance(d, dict) and isinstance(d.get('runs'), list) else 1)" 2>/dev/null; then
+            SARIF_VALID=false
             echo "::warning::govulncheck did not produce valid SARIF (exit=$EXIT). Writing empty SARIF so upload succeeds."
             cat > govulncheck-results.sarif <<'SARIF_EOF'
           {
@@ -451,21 +456,44 @@ jobs:
           }
           SARIF_EOF
           fi
-          # Gate on vulnerabilities (exit 3) only when enforcing. The SARIF file
-          # is already written/validated above, so the always() upload below
-          # still has a valid artifact even when we fail the step here.
-          if [ "$FAIL_ON_FINDINGS" = "true" ] && [ "$EXIT" -eq 3 ]; then
-            echo "::error::govulncheck found vulnerabilities (exit=3) and fail-on-findings is enabled."
-            exit "$EXIT"
+          # Reachable findings = SARIF results at level "error". Mirror them into
+          # the job log so a red build (or an observe-only run) shows what was hit.
+          # Counted with python3 (already required above) rather than jq, and an
+          # unreadable count is treated like malformed SARIF so the gate can't
+          # fail open on a missing tool.
+          CALLED=$(python3 -c "import json; d=json.load(open('govulncheck-results.sarif')); print(sum(1 for r in d['runs'] for x in (r.get('results') or []) if x.get('level') == 'error'))" 2>/dev/null)
+          case "$CALLED" in
+            ''|*[!0-9]*) CALLED=0; SARIF_VALID=false ;;
+          esac
+          echo "govulncheck reachable findings (SARIF level=error): $CALLED"
+          if [ "$CALLED" -gt 0 ]; then
+            echo "::group::govulncheck reachable findings"
+            python3 -c "import json; d=json.load(open('govulncheck-results.sarif')); [print('%s — %s' % (x.get('ruleId', '?'), (x.get('message') or {}).get('text', ''))) for r in d['runs'] for x in (r.get('results') or []) if x.get('level') == 'error']" 2>/dev/null || true
+            echo "::endgroup::"
           fi
-          # Propagate genuine tool errors (exit 1,2) — but treat "vulns found"
-          # (exit 3) as success for CI purposes; findings surface via SARIF
-          # upload to the GitHub Security tab. Keeps security scanning
-          # non-blocking on build pipelines, per design rationale at top of file.
+          # Propagate genuine tool errors (not clean=0, not vulns=3) regardless
+          # of fail-on-findings.
           if [ "$EXIT" -ne 0 ] && [ "$EXIT" -ne 3 ]; then
             echo "::error::govulncheck tooling error (exit=$EXIT)"
             exit "$EXIT"
           fi
+          # Gate only when enforcing. The SARIF file is already written/validated
+          # above, so the always() upload below still has a valid artifact even
+          # when we fail the step here. Exit 3 is kept as a trigger in case a
+          # future govulncheck starts returning it in SARIF mode.
+          if [ "$FAIL_ON_FINDINGS" = "true" ]; then
+            if [ "$CALLED" -gt 0 ] || [ "$EXIT" -eq 3 ]; then
+              echo "::error::govulncheck reported $CALLED reachable vulnerability finding(s) and fail-on-findings is enabled."
+              exit 1
+            fi
+            # Fail closed: an enforcing gate must not pass on output it could not read.
+            if [ "$SARIF_VALID" != "true" ]; then
+              echo "::error::govulncheck SARIF was missing or malformed and fail-on-findings is enabled; cannot confirm the scan is clean."
+              exit 1
+            fi
+          fi
+          # Observe-only: findings surface via the SARIF upload to the Security
+          # tab, per the design rationale at the top of this file.
 
       # Text mode runs when SARIF won't be uploaded (private/internal repo without
       # GHAS, or upload-sarif:false). Findings print to the job log — the finding
