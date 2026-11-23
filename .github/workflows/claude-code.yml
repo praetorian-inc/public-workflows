@@ -366,7 +366,8 @@ jobs:
         run: |
           set -euo pipefail
           git rev-parse --verify HEAD^1 >/dev/null
-          git rev-parse --verify HEAD^2 >/dev/null
+          review_head_sha="$(git rev-parse --verify HEAD^2)"
+          echo "head_sha=$review_head_sha" >> "$GITHUB_OUTPUT"
           # Materialize the reviewable delta with caller-declared generated paths
           # (e.g. agentsmesh mirrors) excluded via `:(exclude)` pathspecs. Claude
           # reads this file instead of running `gh pr diff` (which cannot filter
@@ -625,16 +626,16 @@ jobs:
           set -euo pipefail
           log="$RUNNER_TEMP/graphify-queries.jsonl"
           rm -f -- "$log"
-          # The Claude Review comments that exist before this run: "Convert to
-          # PR review" leaves them alone and acts only on the ones added since.
-          # An empty file means the listing failed; Convert then falls back to
-          # the start time below.
+          # All github-actions[bot] comments that exist before this run:
+          # "Convert to PR review" leaves them alone and acts only on the ones
+          # added since (regardless of heading format). An empty file means the
+          # listing failed; Convert then falls back to the start time below.
           prior="$RUNNER_TEMP/claude-review-prior-ids.json"
           if ! gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("## Claude Review"))) | .id' \
+            --jq '.[] | select((.user?.login // "") == "github-actions[bot]") | .id' \
             > "$prior.ids" 2>/dev/null; then
             : > "$prior.ids"
-            echo "::warning::Could not list existing Claude Review comments; Convert to PR review falls back to CLAUDE_REVIEW_STARTED_AT."
+            echo "::warning::Could not list existing github-actions[bot] comments; Convert to PR review falls back to CLAUDE_REVIEW_STARTED_AT."
             : > "$prior"
           else
             python3 -I -c 'import json,sys; print(json.dumps([int(l) for l in open(sys.argv[1]) if l.strip()]))' "$prior.ids" > "$prior"
@@ -1040,15 +1041,22 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
         env:
           GRAPHIFY_VERDICT: ${{ steps.graphify-use.outputs.verdict }}
+          REVIEW_HEAD_SHA: ${{ steps.context.outputs.head_sha }}
+          EXEC_FILE: ${{ steps.claude-review-retry.outputs.execution_file || steps.claude-review.outputs.execution_file }}
         with:
           script: |
             try {
+              const fs = require('fs');
+              const owner = context.repo.owner;
+              const repo = context.repo.repo;
+              const prNumber = context.payload.pull_request.number;
+
               const comments = await github.paginate(
                 github.rest.issues.listComments,
                 {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: context.payload.pull_request.number,
+                  owner,
+                  repo,
+                  issue_number: prNumber,
                   per_page: 100,
                 }
               );
@@ -1060,7 +1068,7 @@ jobs:
               // to the start time.
               let priorIds = null;
               try {
-                const raw = require('fs').readFileSync(process.env.CLAUDE_REVIEW_PRIOR_IDS || '', 'utf8').trim();
+                const raw = fs.readFileSync(process.env.CLAUDE_REVIEW_PRIOR_IDS || '', 'utf8').trim();
                 const parsed = raw ? JSON.parse(raw) : null;
                 if (Array.isArray(parsed)) priorIds = new Set(parsed);
               } catch (err) {
@@ -1071,10 +1079,128 @@ jobs:
                 console.log('CLAUDE_REVIEW_PRIOR_IDS and CLAUDE_REVIEW_STARTED_AT missing — skipping conversion.');
                 return;
               }
-              const ours = comments
-                .filter(c => c.user.login === 'github-actions[bot]')
-                .filter(c => c.body.includes('## Claude Review'))
+
+              const newBotComments = comments
+                .filter(c => c.user && c.user.login === 'github-actions[bot]')
                 .filter(c => priorIds ? !priorIds.has(c.id) : Date.parse(c.created_at) >= startedAt);
+
+              // Prefer exact comment IDs parsed from main-session Bash
+              // `gh pr comment` tool results in EXEC_FILE, intersected with
+              // newBotComments, so concurrent sibling workflow comments are
+              // never hijacked and untrusted PR text cannot forge an ID.
+              const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const serverUrl = (process.env.GITHUB_SERVER_URL || 'https://github.com').replace(/\/+$/, '');
+              const commentUrlRe = new RegExp(
+                `^${escapeRe(serverUrl)}/${escapeRe(owner)}/${escapeRe(repo)}/(?:pull|issues)/${escapeRe(prNumber)}#issuecomment-(\\d+)$`,
+                'i'
+              );
+              const isGhPrCommentCmd = (cmd) => {
+                if (typeof cmd !== 'string') return false;
+                // Strip line continuations, backslash escapes, single/double quoted strings,
+                // and shell comments (only after start/whitespace/metacharacter) in one O(n) pass
+                // so `graphify query "gh pr comment"` or `# gh pr comment` never false-matches.
+                const unquoted = cmd
+                  .replace(/\\\r?\n/g, ' ')
+                  .replace(/\\.|'[^']*'|"(?:\\.|[^"\\])*"|(?<=^|[\s;&|(])#[^\r\n]*/g, ' ');
+                return /(?:^|[\r\n;&|(])[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*gh[ \t]+pr[ \t]+comment(?:[ \t\r\n;&|)]|$)/.test(unquoted);
+              };
+
+              let execParsed = false;
+              let hasResult = false;
+              let succeededGhCommentCalls = 0;
+              const ghCommentToolIds = new Set();
+              const execCommentIds = new Set();
+              const execPath = (process.env.EXEC_FILE || '').trim();
+              if (execPath) {
+                try {
+                  const rawExec = fs.readFileSync(execPath, 'utf8');
+                  const entries = JSON.parse(rawExec);
+                  if (Array.isArray(entries)) {
+                    execParsed = true;
+                    for (const entry of entries) {
+                      if (!entry || typeof entry !== 'object') continue;
+                      if (entry.type === 'result') {
+                        hasResult = true;
+                        continue;
+                      }
+                      if (entry.parent_tool_use_id != null) continue;
+                      if (entry.type === 'assistant' && entry.message && Array.isArray(entry.message.content)) {
+                        for (const block of entry.message.content) {
+                          if (
+                            block &&
+                            block.type === 'tool_use' &&
+                            block.name === 'Bash' &&
+                            typeof block.id === 'string' &&
+                            block.input &&
+                            isGhPrCommentCmd(block.input.command)
+                          ) {
+                            ghCommentToolIds.add(block.id);
+                          }
+                        }
+                      }
+                    }
+                    if (ghCommentToolIds.size > 0) {
+                      for (const entry of entries) {
+                        if (!entry || typeof entry !== 'object') continue;
+                        if (entry.parent_tool_use_id != null) continue;
+                        if (entry.type !== 'user' || !entry.message || !Array.isArray(entry.message.content)) continue;
+                        for (const block of entry.message.content) {
+                          if (
+                            !block ||
+                            block.type !== 'tool_result' ||
+                            block.is_error === true ||
+                            !ghCommentToolIds.has(block.tool_use_id)
+                          ) {
+                            continue;
+                          }
+                          succeededGhCommentCalls += 1;
+                          const chunks = [];
+                          if (typeof block.content === 'string') {
+                            chunks.push(block.content);
+                          } else if (Array.isArray(block.content)) {
+                            for (const part of block.content) {
+                              if (part && part.type === 'text' && typeof part.text === 'string') {
+                                chunks.push(part.text);
+                              }
+                            }
+                          }
+                          for (const text of chunks) {
+                            for (const line of text.split(/\r?\n/)) {
+                              const match = commentUrlRe.exec(line.trim());
+                              if (match) {
+                                const id = Number(match[1]);
+                                if (Number.isSafeInteger(id)) execCommentIds.add(id);
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                } catch (err) {
+                  execParsed = false;
+                }
+              }
+
+              const isKnownNonClaudeComment = (body) => {
+                const trimmed = (body || '').trimStart();
+                return (
+                  /^##\s+(?:Codex|Gemini|Grok)\s+Review\b/i.test(trimmed) ||
+                  /^##\s+(?:Instruction-File\s+(?:Drift\s+Detection|Audit)|CLAUDE\.md\s+Drift\s+Detection)\b/i.test(trimmed) ||
+                  /^(?:Claude|Codex|Gemini|Grok)\s+(?:re-)?review\s+skipped\b/i.test(trimmed) ||
+                  /^\u26a0\ufe0f?\s*(?:Claude|Codex|Gemini|Grok)\s+review\s+did\s+not\s+complete\b/i.test(trimmed)
+                );
+              };
+
+              let ours;
+              if (execCommentIds.size > 0) {
+                ours = newBotComments.filter(c => execCommentIds.has(c.id));
+              } else if (execParsed && hasResult && succeededGhCommentCalls === 0) {
+                console.log('Execution trace completed with no successful `gh pr comment` call — skipping conversion.');
+                return;
+              } else {
+                ours = newBotComments.filter(c => !isKnownNonClaudeComment(c.body));
+              }
               const claudeComment = ours[ours.length - 1];
 
               if (!claudeComment) {
@@ -1091,8 +1217,8 @@ jobs:
                 for (const c of doomed) {
                   try {
                     await github.rest.issues.deleteComment({
-                      owner: context.repo.owner,
-                      repo: context.repo.repo,
+                      owner,
+                      repo,
                       comment_id: c.id,
                     });
                   } catch (err) {
@@ -1105,23 +1231,30 @@ jobs:
                 return;
               }
 
+              const commitId = (process.env.REVIEW_HEAD_SHA || '').trim();
+              if (!/^[0-9a-f]{40}$/i.test(commitId)) {
+                core.setFailed('Missing or invalid REVIEW_HEAD_SHA; refusing to create an unanchored PR review.');
+                return;
+              }
+
               await github.rest.pulls.createReview({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: context.payload.pull_request.number,
-                body: claudeComment.body,
+                owner,
+                repo,
+                pull_number: prNumber,
+                commit_id: commitId,
+                body: claudeComment.body || '',
                 event: 'COMMENT',
               });
 
               await github.rest.issues.deleteComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner,
+                repo,
                 comment_id: claudeComment.id,
               });
 
-              console.log(`Converted issue comment ${claudeComment.id} to PR review.`);
+              console.log(`Converted issue comment ${claudeComment.id} to PR review at ${commitId}.`);
             } catch (err) {
-              console.log(`Conversion or removal failed (review may remain as issue comment): ${err.message}`);
+              core.setFailed(`Conversion or removal failed (review may remain as issue comment): ${err.message}`);
             }
 
       - name: Post empty-scope skip notice
