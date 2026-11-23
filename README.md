@@ -112,6 +112,7 @@ No `secrets: inherit` needed — this reusable only uses the auto-granted `GITHU
 | Input | Default | Purpose |
 |---|---|---|
 | `working-directory` | `.` | Working dir for multi-module repos |
+| `go-version-file` | `go.mod` | Go version/toolchain source, relative to `working-directory`. The reusable fails in preflight before scanner setup if this file is absent; there is no floating-stable fallback. |
 | `enable-gosec` | `true` | Run gosec SAST scanner |
 | `gosec-version` | `v2.22.11` | Pinned gosec version. Never use `latest` — floating `@latest` has historically broken consumers when new gosec releases require newer Go than the CI toolchain. |
 | `gosec-args` | `-no-fail -fmt sarif -out gosec-results.sarif ./...` | Arguments passed to gosec. Defaults to observe-only. Override with e.g. `-severity=high -fmt sarif -out gosec-results.sarif ./...` to enforce. |
@@ -132,7 +133,7 @@ No `secrets: inherit` needed — this reusable only uses the auto-granted `GITHU
 | `gosec` | v2.22.11 | Requires Go >= 1.24. Installed via `go install github.com/securego/gosec/v2/cmd/gosec@<version>` — the `securego/gosec` GitHub Action is not on the org allowlist, so we use a pinned `go install` instead. |
 | `govulncheck` | v1.1.4 | Requires Go >= 1.22. Installed via `go install golang.org/x/vuln/cmd/govulncheck@<version>`. |
 | `github/codeql-action/upload-sarif` | v4.35.2 | Used for SARIF upload to the Security tab (github-owned, always allowlisted). v4 runs on Node 24; v3 was on deprecated Node 20. |
-| `actions/setup-go` | v6.4.0 | Uses `go-version: stable` — the tool binaries analyze source; they don't need to match the consumer's go.mod Go version. |
+| `actions/setup-go` | v6.4.0 | Uses the caller's `go-version-file` (default `go.mod`, relative to `working-directory`) so both scanners run with the module's declared Go version/toolchain. Caching remains disabled. |
 
 ### `go-auto-tag.yml` — Go semver auto-tagging on merge
 
