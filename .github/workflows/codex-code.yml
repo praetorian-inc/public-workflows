@@ -493,12 +493,6 @@ jobs:
           if [ -S /var/run/docker.sock ]; then echo "WARN: docker socket still present"; else echo "OK: docker socket removed"; fi
           if timeout 5 docker info >/dev/null 2>&1; then echo "WARN: docker daemon still reachable"; else echo "OK: docker daemon unreachable"; fi
 
-      - name: Check reasoning effort for GPT-6.2
-        if: steps.context.outputs.empty_scope != 'true' && (inputs.model == 'gpt-6.2-sol' || inputs.model == 'gpt-6.2-astra') && inputs.effort == 'none'
-        run: |
-          echo "::error::GPT-6.2 Sol and Astra do not support effort 'none'. Use 'low' or omit effort for the default 'medium'."
-          exit 1
-
       - name: Run Codex
         id: run_codex
         if: steps.context.outputs.empty_scope != 'true'
