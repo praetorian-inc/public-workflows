@@ -56,10 +56,10 @@ else
   ok "no installer piped to a shell"
 fi
 
-if grep -F -q 'default: "grok-4.6"' "$WF"; then
-  ok "default model is grok-4.6"
+if grep -F -q 'default: "grok-4.7"' "$WF"; then
+  ok "default model is grok-4.7"
 else
-  bad "default model is grok-4.6" "$(grep -n 'default:' "$WF" | head -5 || true)"
+  bad "default model is grok-4.7" "$(grep -n 'default:' "$WF" | head -5 || true)"
 fi
 
 if grep -F -q 'id: turns' "$WF"; then

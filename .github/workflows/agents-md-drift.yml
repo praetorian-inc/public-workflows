@@ -50,7 +50,7 @@ on:
         description: "Claude model for drift analysis"
         required: false
         type: string
-        default: "claude-haiku-4-5-20251001"
+        default: "claude-haiku-5-5"
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner"
         required: false
@@ -322,8 +322,7 @@ jobs:
           fi
 
   # ── Phase 2: Drift check (LLM) ──────────────────────────────────────
-  # Runs only when pre-filter finds relevant instruction files. Uses Haiku
-  # (~$0.003-0.01 per check) for cost efficiency. The model is read-only and
+  # Runs only when pre-filter finds relevant instruction files. The model is read-only and
   # posts nothing; the "Post or update drift comment" step after it writes the
   # PR comment if stale content is found. No files are edited.
   drift-check:

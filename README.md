@@ -432,7 +432,7 @@ jobs:
 
 ### `grok-code.yml` — Grok PR Assistant (hardened)
 
-Runs Grok 4.6 as a complementary PR reviewer alongside Claude, Codex, and Gemini, via the pinned Grok Build CLI (`grok` 1.0.34, linux-x86_64, sha256-verified `.zst`). Headless: `--prompt-file` + `--output-format json`. It stages the curated review-skill allowlist vendored in this repo into `.agents/skills/`. A public log will contain the staged skill bodies.
+Runs Grok 4.7 as a complementary PR reviewer alongside Claude, Codex, and Gemini, via the pinned Grok Build CLI (`grok` 1.0.34, linux-x86_64, sha256-verified `.zst`). Headless: `--prompt-file` + `--output-format json`. It stages the curated review-skill allowlist vendored in this repo into `.agents/skills/`. A public log will contain the staged skill bodies.
 
 **Security posture** follows `gemini-code.yml`'s two-job defense-in-depth split:
 
@@ -475,7 +475,7 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `prompt` | Built-in 4-section review template | Custom review prompt (the PR diff is materialized to `.grok-review/pr.diff`) |
-| `model` | `grok-4.6` | Grok model ID |
+| `model` | `grok-4.7` | Grok model ID |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `api.x.ai:443, x.ai:443, storage.googleapis.com:443, api.github.com:443, github.com:443, objects.githubusercontent.com:443, pypi.org:443, files.pythonhosted.org:443` |
@@ -735,7 +735,7 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `skip_extensions` | `.md,.markdown,.rst,.txt,.yml,.yaml,.json,.toml,.png,.jpg,.jpeg,.svg,.gif,.webp,.ico,.lock` | File extensions ignored when deciding whether code (vs docs/config) changed |
-| `model` | `claude-haiku-4-5-20251001` | Claude model for the semantic drift check |
+| `model` | `claude-haiku-5-5` | Claude model for the semantic drift check |
 | `max_turns` | `45` | Max Claude conversation turns for drift analysis |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
@@ -781,7 +781,7 @@ When `harden-runner-policy` is `block`, the allowlist must include `api.github.c
 
 | Input | Default | Purpose |
 |---|---|---|
-| `model` | `claude-haiku-4-5-20251001` | Claude model for the audit |
+| `model` | `claude-haiku-5-5` | Claude model for the audit |
 | `max_turns` | `45` | Max Claude conversation turns |
 | `rubric_repository` | `praetorian-inc/palatine` | Repo that carries the skill files |
 | `rubric_ref` | palatine SHA pin | Commit of `rubric_repository` to load |
