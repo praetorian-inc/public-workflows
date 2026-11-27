@@ -40,7 +40,7 @@ on:
         description: "Claude model for the audit"
         required: false
         type: string
-        default: "claude-haiku-4-5-20251001"
+        default: "claude-haiku-5-5"
       enable-harden-runner:
         description: "Whether to install StepSecurity Harden-Runner"
         required: false
