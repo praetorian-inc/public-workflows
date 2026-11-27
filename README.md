@@ -798,7 +798,7 @@ When `harden-runner-policy` is `block`, the allowlist must include `api.github.c
 
 ### `ts-ci.yml` — TypeScript/Node.js CI (install + typecheck + lint + test)
 
-Reusable workflow for TypeScript/Node.js repositories (Claude plugin repos and other TS projects). Provides consistent `npm ci` + `tsc --noEmit` + `npm run lint` + `npm test` + Harden-Runner. Typecheck, lint, and test each auto-skip when the corresponding `tsconfig.json` / `lint` script / test script is absent. Private dependencies (e.g. `@praetorian/claude-tool-sdk`) are **optional** — opt in with `enable-private-deps: true` to mint a short-lived GitHub App token before `npm ci`. A preflight job skips CI on PRs with no TypeScript/JS changes.
+Reusable workflow for TypeScript/Node.js repositories (Claude plugin repos and other TS projects). Provides consistent `npm ci` + `tsc --noEmit` + `npm run lint` + `npm test` + Harden-Runner. Typecheck and lint auto-skip when `tsconfig.json` or the `lint` script is absent; test fails loudly if `test-script` is missing (set `enable-test: false` to skip tests). Private dependencies (e.g. `@praetorian/claude-tool-sdk`) are **optional** — opt in with `enable-private-deps: true` to mint a short-lived GitHub App token before `npm ci`. A preflight job skips CI on PRs with no TypeScript/JS changes.
 
 **Minimal caller** (drop this in `.github/workflows/ci.yml` of a consumer repo):
 

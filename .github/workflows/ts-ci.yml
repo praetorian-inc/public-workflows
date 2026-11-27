@@ -185,7 +185,7 @@ jobs:
           printf '%s\n' "$FILES" | sed 's/^/  /'
           echo
 
-          TS_RE='\.(tsx|ts|jsx|js|mjs|cjs)$|^package\.json$|^package-lock\.json$|^tsconfig|^vitest\.config|^\.eslintrc|^eslint\.config'
+          TS_RE='\.(tsx|ts|jsx|js|mjs|cjs)$|(^|/)package\.json$|(^|/)package-lock\.json$|(^|/)tsconfig[^/]*\.jsonc?$|(^|/)vitest\.config(\.[^/.]+)*\.(ts|mts|cts|js|mjs|cjs)$|(^|/)\.eslintrc(\.(js|cjs|yml|yaml|json))?$|(^|/)eslint\.config(\.[^/.]+)*\.(ts|mts|cts|js|mjs|cjs)$'
           if printf '%s\n' "$FILES" | grep -E "$TS_RE" | grep -q .; then
             echo "has_ts=true" >> "$GITHUB_OUTPUT"
             echo "✓ TypeScript/JS changes detected — CI will run."
@@ -547,9 +547,8 @@ jobs:
         env:
           TEST_SCRIPT: ${{ inputs.test-script }}
         run: |
-          if npm run "$TEST_SCRIPT" --if-present 2>/dev/null; then
-            echo "Tests passed"
-          else
-            echo "::error::Test script '$TEST_SCRIPT' failed or not found"
+          if [ ! -f package.json ] || ! jq -e --arg s "$TEST_SCRIPT" '(.scripts | type == "object") and (.scripts[$s] | type == "string") and (.scripts[$s] | test("\\S"))' package.json >/dev/null; then
+            echo "::error::Test script '$TEST_SCRIPT' not found in package.json"
             exit 1
           fi
+          npm run -- "$TEST_SCRIPT"
