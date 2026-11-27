@@ -528,8 +528,8 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `prompt` | Built-in 4-section review template | Output-format/emphasis text appended after the hardcoded review wrapper |
-| `model` | `gpt-5.6-sol` | Codex review model ID (flagship, Codex-optimized 5.6 tier; validated accessible in CI). Override per-caller for special cases: `gpt-5.6-luna` (fast/cheap, cost-sensitive repos) or `gpt-5.6-terra` (balanced cost/quality). Note: there is no plain `gpt-5.6` — the 5.6 generation ships only as the luna/terra/sol tiers. |
-| `effort` | `medium` | Reasoning effort level (`none`, `low`, `medium`, `high`, `xhigh`) |
+| `model` | `gpt-6.2-sol` | OpenAI model ID for Codex PR reviews. Set `with.model` in the caller to use a different model. |
+| `effort` | `medium` | Reasoning effort (`low`, `medium`, `high`, `xhigh`). GPT-6.2 Sol and Astra reject `none`; use `low` instead, or explicitly select a model that supports `none`. |
 | `enable-harden-runner` | `true` | Install StepSecurity Harden-Runner |
 | `harden-runner-policy` | `audit` | `audit` or `block` |
 | `harden-runner-allowed-endpoints` | `""` | Egress allowlist for block mode. Recommended: `api.openai.com:443, api.github.com:443, github.com:443, objects.githubusercontent.com:443, registry.npmjs.org:443, pypi.org:443, files.pythonhosted.org:443` |
